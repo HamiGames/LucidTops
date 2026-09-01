@@ -20,7 +20,7 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sessions._common import (
+from ._common import (
     SESSION_STATUSES,
     TALLY_RECORDS_COLLECTION,
     get_master_db,
@@ -84,7 +84,7 @@ def log_session_id(
     return entry
 
 
-@with_mongo
+@with_mongo  # pyright: ignore[reportArgumentType]
 def touch_session_id_log(
     *,
     session_id: str,

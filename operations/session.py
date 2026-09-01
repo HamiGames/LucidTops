@@ -29,6 +29,19 @@ limitations:
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+_OPERATIONS_DIR = Path(__file__).resolve().parent
+_PROJECT_ROOT = _OPERATIONS_DIR.parent
+_BACKEND_DIR = _PROJECT_ROOT / "backend"
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+if str(_OPERATIONS_DIR) not in sys.path:
+    sys.path.insert(0, str(_OPERATIONS_DIR))
+if str(_BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(_BACKEND_DIR))
+
 from sessions.compress import compress_session
 from sessions.SessionCore import (
     agree_session,

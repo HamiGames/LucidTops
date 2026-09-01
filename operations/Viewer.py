@@ -10,7 +10,16 @@ this is via the session control settings (settings.js)
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
 from typing import Any
+
+_OPERATIONS_DIR = Path(__file__).resolve().parent
+_PROJECT_ROOT = _OPERATIONS_DIR.parent
+_BACKEND_DIR = _PROJECT_ROOT / "backend"
+for path in (_PROJECT_ROOT, _OPERATIONS_DIR, _BACKEND_DIR):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
 from _common import SESSION_RECORDS_COLLECTION, get_master_db, with_mongo
 from sessions.searchpeer import peer_search

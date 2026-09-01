@@ -62,7 +62,7 @@ TOR_HIDDEN_SERVICE_DIRS = {
     ),
 }
 
-TOR_HOST = os.environ.get("TOR_HOST", "tor-proxy")
+TOR_HOST = os.environ.get("TOR_HOST", "127.0.0.1")
 TOR_SOCKS_HOST = os.environ.get("TOR_SOCKS_HOST", TOR_HOST)
 TOR_SOCKS_PORT = int(os.environ.get("TOR_SOCKS_PORT", "9050"))
 TOR_CONTROL_PORT = int(os.environ.get("TOR_CONTROL_PORT", "9051"))
@@ -123,25 +123,46 @@ def resolve_master_server_onion() -> str | None:
     return read_onion_from_hidden_service_dir("master_server")
 
 
+def format_tor_onion_service(onion: str, path: str = "") -> str:
+    """Tor hidden service reference (*.onion + path). Not clearnet."""
+    host = onion.strip().lower().split("/")[0]
+    if not path:
+        return host
+    normalized = path if path.startswith("/") else f"/{path}"
+    return f"{host}{normalized}"
+
+
 def get_api_public_base_url() -> str:
     onion = resolve_master_server_onion()
     if onion:
-        return f"http://{onion}{API_PREFIX}"
+        return format_tor_onion_service(onion, API_PREFIX)
     return API_PREFIX
 
 
 def get_gui_public_base_url() -> str:
     onion = resolve_master_server_onion()
     if onion:
-        return f"http://{onion}{GUI_PREFIX}"
+        return format_tor_onion_service(onion, GUI_PREFIX)
     return GUI_PREFIX
 
 
 def get_master_server_public_url() -> str:
     onion = resolve_master_server_onion()
     if onion:
-        return f"http://{onion}"
-    return f"http://{MASTER_SERVER_BIND_HOST}:{MASTER_SERVER_PORT}"
+        return format_tor_onion_service(onion)
+    return ""
+
+
+def get_tor_api_service() -> str:
+    return get_api_public_base_url()
+
+
+def get_tor_gui_service() -> str:
+    return get_gui_public_base_url()
+
+
+def get_master_server_tor_service() -> str:
+    return get_master_server_public_url()
 
 
 def get_mongo_client() -> Any | None:

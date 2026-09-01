@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from config import get_api_public_base_url, get_master_server_public_url, resolve_master_server_onion
-from config import get_master_db, get_mongo_client, utc_now
+from config import API_PREFIX, format_tor_onion_service, get_master_db, get_mongo_client, resolve_master_server_onion, utc_now
+from WebPageLink import frontend_link_for_api_route
 
 MASTER_API_ROUTES: tuple[str, ...] = (
     "/register",
@@ -167,21 +167,35 @@ MASTER_CLASS_ROUTES: tuple[str, ...] = (
 
 
 def _route_handler(route_path: str, subsystem: str) -> Callable[..., dict[str, Any]]:
-    tor_url = f"{get_api_public_base_url()}{route_path}"
+    link = frontend_link_for_api_route(route_path)
 
     def handler() -> dict[str, Any]:
-        return {
+        onion = resolve_master_server_onion()
+        api_segment = link.get("api_path") or route_path
+        api_path = (
+            api_segment
+            if api_segment.startswith(API_PREFIX)
+            else f"{API_PREFIX}{api_segment if api_segment.startswith('/') else f'/{api_segment}'}"
+        )
+        response: dict[str, Any] = {
             "route": route_path,
-            "tor_url": tor_url,
             "subsystem": subsystem,
             "status": "registered",
             "service": "master_server",
             "network": "tor",
             "tor_only": True,
-            "master_server_onion": resolve_master_server_onion(),
-            "master_server_public_url": get_master_server_public_url(),
+            "master_server_onion": onion or "",
             "timestamp": utc_now(),
         }
+        if link.get("frontend"):
+            response["frontend"] = link["frontend"]
+            response["javascript"] = link["javascript"]
+        response["api_path"] = api_path
+        if link.get("gui_path"):
+            response["gui_path"] = link["gui_path"]
+        if onion:
+            response["tor_service"] = format_tor_onion_service(onion, api_path)
+        return response
 
     return handler
 

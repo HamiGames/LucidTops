@@ -1,0 +1,18 @@
+{
+  "include": ["backend", "operations", "sessions", "blockchain", "test"],
+  "extraPaths": ["backend", "operations", "sessions"],
+  "executionEnvironments": [
+    {
+      "root": "backend",
+      "extraPaths": ["..", "../operations", "../sessions"]
+    },
+    {
+      "root": "operations",
+      "extraPaths": ["..", "../backend", "../sessions"]
+    },
+    {
+      "root": "sessions",
+      "extraPaths": ["..", "../backend"]
+    }
+  ]
+}

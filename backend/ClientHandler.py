@@ -70,10 +70,14 @@ def handle_client_request(
     link = resolve_web_page_link(source)
     result: dict[str, Any] = {
         "source": _normalize_source(source),
-        "api_route": link["api_route"],
-        "gui_route": link["gui_route"],
+        "api_route": link.get("tor_api_route"),
+        "gui_route": link.get("tor_gui_route"),
+        "frontend": link.get("frontend"),
+        "javascript": link.get("javascript"),
         "payload_keys": sorted(payload.keys()),
         "status": "accepted",
+        "network": "tor",
+        "tor_only": True,
     }
 
     if perform_initial_handshake:

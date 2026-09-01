@@ -24,7 +24,7 @@ import hashlib
 import secrets
 from typing import Any
 
-from sessions._common import (
+from ._common import (
     BLOCKCHAIN_BLOCKS_COLLECTION,
     HASH_ALGORITHM,
     LEDGER_RECORDS_COLLECTION,
@@ -38,7 +38,7 @@ from sessions._common import (
     verify_chunk_hashes,
     with_mongo,
 )
-from sessions.sessionID import touch_session_id_log, validate_session_id
+from .sessionID import touch_session_id_log, validate_session_id
 
 TALLY_ENTITY_MASTER = "master_server"
 

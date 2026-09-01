@@ -50,7 +50,7 @@ from _common import (
     utc_now,
     verify_id_token,
 )
-from NodeDbSchema import NODE_HOSTED_DB_COLLECTION, NODE_SEED_COLLECTION
+from Backend.NodeDbSchema import NODE_HOSTED_DB_COLLECTION, NODE_SEED_COLLECTION  # pyright: ignore[reportMissingImports]
 
 NODE_ROUTES: tuple[str, ...] = (
     "/node-create",

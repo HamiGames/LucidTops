@@ -31,7 +31,7 @@ import secrets
 from datetime import datetime, timezone
 from typing import Any
 
-from sessions._common import (
+from ._common import (
     LEDGER_RECORDS_COLLECTION,
     SESSION_STATUSES,
     get_master_db,
@@ -40,7 +40,7 @@ from sessions._common import (
     verify_user_id_token,
     with_mongo,
 )
-from sessions.sessionID import (
+from .sessionID import (
     generate_session_id,
     log_session_id,
     touch_session_id_log,

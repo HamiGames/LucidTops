@@ -1,11 +1,24 @@
 {
-  "generated_at": "2026-08-29T22:12:31.672512+00:00",
-  "root_dir": "C:/Users/surba/AppData/Local/Temp/LucidTops_build_test",
-  "secrets_dir": "C:/Users/surba/AppData/Local/Temp/LucidTops_build_test/secrets",
+  "generated_at": "2026-08-31T00:50:46.445638+00:00",
+  "root_dir": "C:/Desktop/personal/Lucid_server_2026/Lucid_server_2026/test_launch_output",
+  "secrets_dir": "C:/Desktop/personal/Lucid_server_2026/Lucid_server_2026/test_launch_output/secrets",
+  "launch_config": {
+    "master_server_port": 8080,
+    "gui_bridge_port": 8105,
+    "mongodb_host": "lucid-mongodb",
+    "mongodb_port": 27017,
+    "docker_network_name": "lucid-stack",
+    "enabled_services": [
+      "lucid-mongodb",
+      "lucid-server-default"
+    ]
+  },
   "files": {
-    "server_env": "C:/Users/surba/AppData/Local/Temp/LucidTops_build_test/server.env",
-    "secrets_env": "C:/Users/surba/AppData/Local/Temp/LucidTops_build_test/secrets.env",
-    "torrc": "C:/Users/surba/AppData/Local/Temp/LucidTops_build_test/torrc"
+    "server_env": "C:/Desktop/personal/Lucid_server_2026/Lucid_server_2026/test_launch_output/server.env",
+    "secrets_env": "C:/Desktop/personal/Lucid_server_2026/Lucid_server_2026/test_launch_output/secrets.env",
+    "torrc": "C:/Desktop/personal/Lucid_server_2026/Lucid_server_2026/test_launch_output/torrc",
+    "docker_dns_env": "C:/Desktop/personal/Lucid_server_2026/Lucid_server_2026/test_launch_output/configs/docker-dns.env",
+    "docker_network_yml": "C:/Desktop/personal/Lucid_server_2026/Lucid_server_2026/test_launch_output/configs/docker-network.yml"
   },
   "database": null,
   "connection_layers": [],
@@ -250,7 +263,99 @@
       "current_session_ID",
       "current_session_peer",
       "current_session_status"
+    ],
+    "session_records": [
+      "sessionID",
+      "sessionKey",
+      "sessionData",
+      "sessionStatus",
+      "sessionType",
+      "sessionTime",
+      "sessionDate",
+      "hostUserID",
+      "viewerUserID",
+      "userIDs",
+      "session_records",
+      "participant_agreements",
+      "all_agreed",
+      "compressed",
+      "aggregate_hash",
+      "chunked_payload",
+      "DataInsert",
+      "created_at",
+      "updated_at",
+      "ended_at"
+    ],
+    "session_id_log": [
+      "sessionID",
+      "hostUserID",
+      "userIDs",
+      "source",
+      "status",
+      "created_at",
+      "recorded_at"
+    ],
+    "session_keys": [
+      "sessionID",
+      "sessionKey",
+      "aggregate_hash",
+      "DataInsert",
+      "awaiting_block",
+      "hash_algorithm",
+      "created_at",
+      "updated_at"
+    ],
+    "ledger_records": [
+      "sessionID",
+      "aggregate_hash",
+      "hash_algorithm",
+      "record_type",
+      "created_at"
+    ],
+    "blockchain_blocks": [
+      "blockID",
+      "chainID",
+      "sessionID",
+      "aggregate_hash",
+      "hash_algorithm",
+      "DataInsert",
+      "previous_block_hash",
+      "block_hash",
+      "status",
+      "winner_entity_type",
+      "winner_entity_id",
+      "tally_verified",
+      "created_at",
+      "updated_at"
+    ],
+    "tally_records": [
+      "entity_type",
+      "entity_id",
+      "tally_points",
+      "taskTokens",
+      "sessionID",
+      "sessionID_verified",
+      "last_win_at",
+      "last_reset_at",
+      "created_at",
+      "updated_at"
+    ],
+    "tally_sync": [
+      "sync_batch_id",
+      "seeded_at",
+      "seed_interval_seconds",
+      "tally_snapshot",
+      "target",
+      "created_at"
+    ],
+    "task_tokens": [
+      "taskToken",
+      "sessionID",
+      "entity_type",
+      "entity_id",
+      "aggregate_hash",
+      "created_at"
     ]
   },
-  "api_key_fingerprint": "CpnYFIdB"
+  "api_key_fingerprint": "nE6mApmt"
 }

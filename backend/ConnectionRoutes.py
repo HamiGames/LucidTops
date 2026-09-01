@@ -17,7 +17,12 @@ from connection import (
     validate_onion_address,
     validate_tor_endpoint,
 )
-from config import get_api_public_base_url, resolve_master_server_onion
+from config import (
+    get_tor_api_service,
+    get_tor_gui_service,
+    get_master_server_tor_service,
+    resolve_master_server_onion,
+)
 
 try:
     from fastapi import APIRouter, HTTPException, status
@@ -106,7 +111,11 @@ def create_connection_router(*, prefix: str = "") -> Any:
     def tor_config_endpoint() -> dict[str, Any]:
         config = get_tor_connection_config()
         config["master_server_onion"] = resolve_master_server_onion()
-        config["api_public_base_url"] = get_api_public_base_url()
+        config["master_server_tor_service"] = get_master_server_tor_service()
+        config["tor_api_service"] = get_tor_api_service()
+        config["tor_gui_service"] = get_tor_gui_service()
+        config["network"] = "tor"
+        config["tor_only"] = True
         return config
 
     @router.post("/connection/validate-onion")
@@ -118,6 +127,7 @@ def create_connection_router(*, prefix: str = "") -> Any:
             "valid": valid,
             "format_valid": validate_onion_address(payload.onion_address),
             "tor_only": True,
+            "network": "tor",
         }
 
     @router.get("/connection/status/{session_key}")

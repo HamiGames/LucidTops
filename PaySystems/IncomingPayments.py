@@ -21,4 +21,6 @@ a user may request a refund at any time by selecting refund in tier system (tier
 all payments will be recorded in the master server database and LucidLedger system
 all payments will be validated by the master server API routes
 all payments will be recorded in the master server database and LucidLedger system
+
+no hardcoded addresses for the payment system will be in this file. all information will be created and developed using (payment_system_setup.py)
 """

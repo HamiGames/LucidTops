@@ -18,8 +18,9 @@ from config import (
     MASTER_SERVER_BIND_HOST,
     MASTER_SERVER_PORT,
     MASTER_SERVER_TOR_ONLY,
-    get_api_public_base_url,
-    get_master_server_public_url,
+    get_tor_api_service,
+    get_tor_gui_service,
+    get_master_server_tor_service,
     resolve_master_server_onion,
 )
 from ConnectionRoutes import register_connection_routes
@@ -37,7 +38,11 @@ except ImportError as exc:  # pragma: no cover
 def create_app() -> FastAPI:
     """Assemble the Tor-only master server FastAPI application."""
     onion = resolve_master_server_onion()
-    public_url = get_master_server_public_url()
+    tor_service = get_master_server_tor_service()
+
+    servers = []
+    if tor_service:
+        servers.append({"url": tor_service, "description": "Tor hidden service (*.onion)"})
 
     app = FastAPI(
         title="LucidTops Master Server",
@@ -46,7 +51,7 @@ def create_app() -> FastAPI:
             "Tor-only master server for LucidTops. All API and GUI routes are "
             "reachable exclusively via the *.onion hidden service."
         ),
-        servers=[{"url": public_url, "description": "Tor hidden service (*.onion)"}],
+        servers=servers,
     )
 
     register_tor_middleware(app)
@@ -58,8 +63,9 @@ def create_app() -> FastAPI:
             "service": "master_server",
             "network": "tor",
             "tor_only": str(MASTER_SERVER_TOR_ONLY).lower(),
-            "onion": onion or "",
-            "api_base": get_api_public_base_url(),
+            "master_server_onion": onion or "",
+            "tor_api_service": get_tor_api_service(),
+            "tor_gui_service": get_tor_gui_service(),
         }
 
     register_handshake_routes(app, api_prefix=API_PREFIX, gui_prefix=GUI_PREFIX)

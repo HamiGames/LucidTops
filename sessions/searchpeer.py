@@ -17,7 +17,7 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
-from sessions._common import (
+from ._common import (
     get_master_db,
     session_records_collection,
     utc_now,
@@ -25,8 +25,8 @@ from sessions._common import (
     verify_user_id_token,
     with_mongo,
 )
-from sessions.SessionCore import find_session
-from sessions.sessionID import validate_session_id
+from .SessionCore import find_session
+from .sessionID import validate_session_id
 
 
 def _mask_user_id(user_id: str) -> str:

@@ -14,6 +14,7 @@ from typing import Any, Literal
 
 from config import (
     FRONTEND_ONION,
+    MASTER_SERVER_BIND_HOST,
     MASTER_SERVER_ONION,
     MASTER_SERVER_PORT,
     MASTER_SERVER_TOR_ONLY,
@@ -37,7 +38,7 @@ from handshake import (
     validate_api_key_format,
     validate_handshake_source,
 )
-from WebPageLink import validate_web_page_link
+from WebPageLink import resolve_web_page_link, validate_web_page_link
 
 CONNECTION_PROTOCOL = "connection"
 TRANSPORT_PROTOCOL = "tor-hidden-service"
@@ -62,6 +63,14 @@ ONGOING_SOURCES = frozenset(
         "login.js",
         "tier-select.js",
         "connect-handshake.js",
+        "find-peer.js",
+        "find-Peer.js",
+        "home_page.js",
+        "dashboard.js",
+        "settings.js",
+        "LucidLedger.js",
+        "LucidMarket.js",
+        "RemoteView.js",
     }
 )
 
@@ -149,14 +158,14 @@ def get_tor_connection_config() -> dict[str, Any]:
         "tor_socks_port": TOR_SOCKS_PORT,
         "tor_control_port": TOR_CONTROL_PORT,
         "master_server_onion": master_onion,
-        "master_server_public_url": get_master_server_public_url(),
-        "api_public_base_url": get_api_public_base_url(),
-        "gui_public_base_url": get_gui_public_base_url(),
+        "master_server_tor_service": get_master_server_public_url(),
+        "tor_api_service": get_api_public_base_url(),
+        "tor_gui_service": get_gui_public_base_url(),
         "frontend_onion": resolve_onion_for_entity("frontend"),
         "node_onion": resolve_onion_for_entity("node"),
         "master_server_port": MASTER_SERVER_PORT,
         "hidden_service_port": 80,
-        "bind_host": "127.0.0.1",
+        "internal_bind_host": MASTER_SERVER_BIND_HOST,
     }
 
 
@@ -197,7 +206,7 @@ def validate_connection_source(source: str, connection_type: ConnectionType) -> 
         return bool(normalized)
     if normalized not in ONGOING_SOURCES:
         return False
-    return validate_web_page_link(normalized)
+    return validate_web_page_link(normalized)  # pyright: ignore[reportUndefinedVariable]
 
 
 def confirm_handshake_successful(
@@ -289,6 +298,8 @@ def establish_connection(
         ).hexdigest()
 
         tor_config = get_tor_connection_config()
+        normalized_source = _normalize_source(source)
+        page_link = resolve_web_page_link(normalized_source)
         record = {
             "session_key": session_key,
             "protocol": CONNECTION_PROTOCOL,
@@ -296,11 +307,14 @@ def establish_connection(
             "torrent_layer": TORRENT_LAYER_PROTOCOL,
             "network": "tor",
             "tor_only": True,
-            "source": _normalize_source(source),
+            "source": normalized_source,
+            "frontend": page_link.get("frontend"),
+            "javascript": page_link.get("javascript"),
             "connection_type": connection_type,
             "entity": entity,
             "onion_address": normalized_onion,
-            "api_public_base_url": tor_config["api_public_base_url"],
+            "tor_api_service": tor_config["tor_api_service"],
+            "tor_api_route": page_link.get("tor_api_route"),
             "tor_socks_host": TOR_SOCKS_HOST,
             "tor_socks_port": TOR_SOCKS_PORT,
             "active": True,
@@ -329,10 +343,14 @@ def establish_connection(
             "session_key": session_key,
             "IDToken": id_token.strip(),
             "entity": entity,
-            "source": _normalize_source(source),
+            "source": normalized_source,
+            "frontend": page_link.get("frontend"),
+            "javascript": page_link.get("javascript"),
             "connection_type": connection_type,
             "onion_address": normalized_onion,
-            "api_public_base_url": tor_config["api_public_base_url"],
+            "tor_api_service": tor_config["tor_api_service"],
+            "tor_api_route": page_link.get("tor_api_route"),
+            "tor_gui_route": page_link.get("tor_gui_route"),
             "persistent": True,
             "tor": tor_config,
         }
@@ -357,7 +375,10 @@ def get_connection_status(session_key: str, *, client: Any | None = None) -> dic
             "network": "tor",
             "tor_only": True,
             "onion_address": record.get("onion_address"),
-            "api_public_base_url": record.get("api_public_base_url"),
+            "tor_api_service": record.get("tor_api_service") or record.get("api_public_base_url"),
+            "tor_api_route": record.get("tor_api_route"),
+            "frontend": record.get("frontend"),
+            "javascript": record.get("javascript"),
             "source": record.get("source"),
             "entity": record.get("entity"),
             "updated_at": record.get("updated_at"),

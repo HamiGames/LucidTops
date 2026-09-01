@@ -1,0 +1,58 @@
+# LucidTops stack — Docker DNS, Tor inside lucid-server-default (no tor-proxy sidecar)
+# Repo: https://github.com/HamiGames/LucidTops
+# Pi host SSD mount: /mnt/myssd/LucidTops (server.env, secrets.env, torrc, tor data)
+
+services:
+  lucid-mongodb:
+    image: mongo:7
+    container_name: lucid-mongodb
+    restart: unless-stopped
+    networks:
+      - lucid-stack
+    volumes:
+      - lucid-mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  lucid-server-default:
+    build:
+      context: ..
+      dockerfile: infrastructure/containers/lucid-server-default/Dockerfile
+    container_name: lucid-server-default
+    restart: unless-stopped
+    depends_on:
+      lucid-mongodb:
+        condition: service_healthy
+    env_file:
+      - /mnt/myssd/LucidTops/server.env
+    environment:
+      MONGODB_HOST: lucid-mongodb
+      MONGODB_URL: mongodb://lucid-mongodb:27017/lucid_master
+      LUCID_TOPS_ROOT: /mnt/myssd/LucidTops
+      SECRETS_DIR: /mnt/myssd/LucidTops/secrets
+      SERVER_ENV_FILE: /mnt/myssd/LucidTops/server.env
+      SECRETS_ENV_FILE: /mnt/myssd/LucidTops/secrets.env
+      HOST_TOR_CONFIG_TORRC: /mnt/myssd/LucidTops/torrc
+      TOR_HOST: "127.0.0.1"
+      TOR_SOCKS_HOST: "127.0.0.1"
+      MASTER_SERVER_BIND_HOST: "127.0.0.1"
+      MASTER_SERVER_TOR_ONLY: "true"
+    volumes:
+      - /mnt/myssd/LucidTops:/mnt/myssd/LucidTops
+      - lucid-tor-data:/app/var/lib/tor
+      - lucid-onion-data:/app/run/lucid/onion
+    networks:
+      - lucid-stack
+
+networks:
+  lucid-stack:
+    name: lucid-stack
+
+volumes:
+  lucid-mongo-data:
+  lucid-tor-data:
+  lucid-onion-data:

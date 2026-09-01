@@ -30,6 +30,13 @@ controls include (session control settings):
 - file sync control
 - file transfer location control
 - peer to peer remote desktop sharing session control
+
+must include:
+- the ability to edit the settings based on the selections in the settings.js
+- the control settings must be absolute in the session system
+- the viewers controls will not modify the controls of the host
+- the host will maintain the superior functions and controls while in the sessionID in the session system
+- the session control settings will not be force removed while in a sessionID
 """
 
 from __future__ import annotations

@@ -10,17 +10,22 @@ OPERATIONS_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = OPERATIONS_DIR.parent
 BACKEND_DIR = PROJECT_ROOT / "backend"
 
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+if str(OPERATIONS_DIR) not in sys.path:
+    sys.path.insert(0, str(OPERATIONS_DIR))
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from config import (  # noqa: E402
-    get_api_public_base_url,
+    API_PREFIX,
+    format_tor_onion_service,
     get_master_db,
-    get_master_server_public_url,
     get_mongo_client,
     resolve_master_server_onion,
     utc_now,
 )
+from WebPageLink import frontend_link_for_api_route  # noqa: E402
 from load_module import load_backend_module  # noqa: E402
 
 _data_chunker = load_backend_module("data-chunker.py")
@@ -49,18 +54,36 @@ def tor_envelope(
     payload: dict[str, Any] | None = None,
     **extra: Any,
 ) -> dict[str, Any]:
-    """Attach Tor-only metadata to every operations API response."""
+    """Attach Tor-only metadata and javascript frontend linkage (not clearnet)."""
+    link = frontend_link_for_api_route(route)
+    onion = resolve_master_server_onion()
+    api_segment = link.get("api_path") or route
+    api_path = (
+        api_segment
+        if api_segment.startswith(API_PREFIX)
+        else f"{API_PREFIX}{api_segment if api_segment.startswith('/') else f'/{api_segment}'}"
+    )
     body: dict[str, Any] = {
         "route": route,
-        "tor_url": f"{get_api_public_base_url()}{route}",
         "subsystem": subsystem,
         "service": "master_server",
         "network": "tor",
         "tor_only": True,
-        "master_server_onion": resolve_master_server_onion(),
-        "master_server_public_url": get_master_server_public_url(),
+        "master_server_onion": onion or "",
         "timestamp": utc_now(),
     }
+    if link.get("frontend"):
+        body["frontend"] = link["frontend"]
+        body["javascript"] = link["javascript"]
+    body["api_path"] = api_path
+    if link.get("gui_path"):
+        body["gui_path"] = link["gui_path"]
+    if onion:
+        body["tor_service"] = format_tor_onion_service(onion, api_path)
+        if link.get("gui_path"):
+            gui_path = link["gui_path"]
+            gui_full = gui_path if gui_path.startswith("/gui") else f"/gui{gui_path}"
+            body["tor_gui_service"] = format_tor_onion_service(onion, gui_full)
     if payload:
         body.update(payload)
     body.update(extra)

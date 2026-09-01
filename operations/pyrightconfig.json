@@ -1,0 +1,9 @@
+{
+  "extraPaths": ["..", "../backend", "../sessions"],
+  "executionEnvironments": [
+    {
+      "root": ".",
+      "extraPaths": ["..", "../backend", "../sessions"]
+    }
+  ]
+}

@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
-from sessions.compress import compress_session
-from sessions.searchpeer import peer_search, search_peer
-from sessions.sessionID import (
+from .compress import compress_session
+from .searchpeer import peer_search, search_peer
+from .sessionID import (
     audit_inactive_tally_session_ids,
     generate_session_id,
     log_session_id,
     remove_stale_session_ids,
     validate_session_id,
 )
-from sessions.SessionCore import (
+from .SessionCore import (
     agree_session,
     can_commence_session,
     connect_session,

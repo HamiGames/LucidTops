@@ -39,18 +39,10 @@ import secrets
 import string
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Callable, Literal
 
-try:
-    from fastapi import APIRouter, HTTPException, status
-    from pydantic import BaseModel, Field, field_validator
-except ImportError:  # pragma: no cover - importable without FastAPI during image build
-    APIRouter = None  # type: ignore[misc, assignment]
-    HTTPException = None  # type: ignore[misc, assignment]
-    status = None  # type: ignore[misc, assignment]
-    BaseModel = object  # type: ignore[misc, assignment]
-    Field = lambda *args, **kwargs: None  # type: ignore[misc, assignment]
-    field_validator = lambda *args, **kwargs: (lambda fn: fn)  # type: ignore[misc, assignment]
+from fastapi import APIRouter, HTTPException, status
+from pydantic import BaseModel, Field, field_validator
 
 try:
     from pymongo import MongoClient
@@ -85,6 +77,14 @@ ALLOWED_ONGOING_SOURCES: frozenset[str] = frozenset(
         "login.js",
         "tier-select.js",
         "connect-handshake.js",
+        "find-peer.js",
+        "find-Peer.js",
+        "home_page.js",
+        "dashboard.js",
+        "settings.js",
+        "LucidLedger.js",
+        "LucidMarket.js",
+        "RemoteView.js",
     }
 )
 
@@ -441,39 +441,35 @@ def perform_connect_handshake(
     }
 
 
-if BaseModel is not object:
+class HandshakeRequest(BaseModel):
+    api_key: Annotated[str, Field(min_length=1)]
+    source: Annotated[str, Field(min_length=1)]
+    connection_type: ConnectionType = "initial"
 
-    class HandshakeRequest(BaseModel):
-        api_key: str = Field(..., min_length=1)
-        source: str = Field(..., min_length=1)
-        connection_type: ConnectionType = "initial"
+    @field_validator("api_key", "source")
+    @classmethod
+    def _strip_required_fields(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("field must not be empty")
+        return cleaned
 
-        @field_validator("api_key", "source")
-        @classmethod
-        def _strip_required_fields(cls, value: str) -> str:
-            cleaned = value.strip()
-            if not cleaned:
-                raise ValueError("field must not be empty")
-            return cleaned
 
-    class ConnectHandshakeRequest(HandshakeRequest):
-        session_id: str = Field(..., min_length=1)
-        connection_type: ConnectionType = "ongoing"
+class ConnectHandshakeRequest(HandshakeRequest):
+    session_id: Annotated[str, Field(min_length=1)]
+    connection_type: ConnectionType = "ongoing"
 
-        @field_validator("session_id")
-        @classmethod
-        def _strip_session_id(cls, value: str) -> str:
-            cleaned = value.strip()
-            if not cleaned:
-                raise ValueError("session_id must not be empty")
-            return cleaned
+    @field_validator("session_id")
+    @classmethod
+    def _strip_session_id(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("session_id must not be empty")
+        return cleaned
 
 
 def create_handshake_router() -> Any:
     """Return a FastAPI router for handshake and connect-handshake endpoints."""
-    if APIRouter is None or HTTPException is None:
-        raise RuntimeError("fastapi is required to create handshake routes")
-
     router = APIRouter(tags=["handshake"])
 
     @router.post("/handshake")
@@ -489,9 +485,6 @@ def create_handshake_router() -> Any:
 
 def register_handshake_routes(app: Any, *, api_prefix: str = "/api/v1", gui_prefix: str = "/gui") -> None:
     """Attach handshake routes to a FastAPI application (Docker master-server container)."""
-    if APIRouter is None or HTTPException is None:
-        raise RuntimeError("fastapi is required to register handshake routes")
-
     api_router = APIRouter(tags=["handshake"])
 
     @api_router.post("/handshake")
