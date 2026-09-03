@@ -24,6 +24,7 @@ UserRoutes:
 
 from __future__ import annotations
 
+import secrets
 from typing import Any
 
 from _common import (
@@ -37,6 +38,15 @@ from _common import (
     tor_envelope,
     utc_now,
     verify_id_token,
+)
+from WebPageLink import frontend_link_for_api_route
+from operations_secrets import (
+    resolve_operations_api_prefix,
+    resolve_operations_ledger_read_limit,
+    resolve_session_id_length,
+    resolve_session_key_min_length,
+    resolve_user_register_javascript_source,
+    resolve_user_session_transfer_default_target,
 )
 from session import (
     connect_session,
@@ -71,20 +81,6 @@ USER_ROUTES: tuple[str, ...] = (
     "/user-session-control",
 )
 
-FRONTEND_LINKS: dict[str, str] = {
-    "/user-create": "frontend/register.js",
-    "/user-find": "frontend/login.js",
-    "/user-connect": "frontend/home_page.js",
-    "/user-disconnect": "frontend/logout.js",
-    "/user-end": "frontend/logout.js",
-    "/user-record": "frontend/home_page.js",
-    "/user-report": "frontend/home_page.js",
-    "/user-transfer": "frontend/home_page.js",
-    "/user-control": "frontend/home_page.js",
-    "/user-LucidLedger-read": "frontend/home_page.js",
-    "/user-session-create": "frontend/find-peer.js",
-}
-
 
 if BaseModel is not object:
 
@@ -97,7 +93,7 @@ if BaseModel is not object:
     class UserCreatePayload(BaseModel):
         email: str = Field(..., min_length=3)
         password: str = Field(..., min_length=8)
-        source: str = Field(default="frontend/register.js")
+        source: str = Field(default_factory=resolve_user_register_javascript_source)
 
     class UserFindPayload(BaseModel):
         user_id: str = Field(..., alias="UserID")
@@ -106,18 +102,39 @@ if BaseModel is not object:
         model_config = {"populate_by_name": True}
 
     class UserSessionConnectPayload(UserAuthPayload):
-        session_id: str = Field(..., alias="sessionID", min_length=10, max_length=10)
-        session_key: str = Field(..., alias="sessionKey", min_length=16)
+        session_id: str = Field(
+            ...,
+            alias="sessionID",
+            min_length=resolve_session_id_length(),
+            max_length=resolve_session_id_length(),
+        )
+        session_key: str = Field(..., alias="sessionKey", min_length=resolve_session_key_min_length())
 
         model_config = {"populate_by_name": True}
 
     class UserSessionPayload(UserAuthPayload):
-        session_id: str = Field(..., alias="sessionID", min_length=10, max_length=10)
+        session_id: str = Field(
+            ...,
+            alias="sessionID",
+            min_length=resolve_session_id_length(),
+            max_length=resolve_session_id_length(),
+        )
 
         model_config = {"populate_by_name": True}
 
     class UserSessionReportPayload(UserSessionPayload):
         report: str = Field(default="")
+
+
+def _attach_frontend_link(result: dict[str, Any], route: str) -> None:
+    """Attach Tor-compatible javascript frontend linkage when mapped for this route."""
+    link = frontend_link_for_api_route(route)
+    frontend = link.get("frontend")
+    if frontend:
+        result["frontend"] = frontend
+    javascript = link.get("javascript")
+    if javascript:
+        result["javascript"] = javascript
 
 
 def _user_handler(route: str, payload: Any) -> dict[str, Any]:
@@ -130,8 +147,6 @@ def _user_handler(route: str, payload: Any) -> dict[str, Any]:
             existing = db.users.find_one({"email": payload.email})
             if existing:
                 raise ValueError("User already exists")
-            import secrets
-
             user_id = secrets.token_hex(4)
             id_token = secrets.token_urlsafe(32)
             now = utc_now()
@@ -168,21 +183,23 @@ def _user_handler(route: str, payload: Any) -> dict[str, Any]:
                 "UserID": payload.user_id,
                 "action": route.lstrip("/"),
                 "status": "ok",
-                "frontend": FRONTEND_LINKS.get(route),
             }
         elif route in {"/user-disconnect", "/user-end"}:
             result = {
                 "UserID": payload.user_id,
                 "action": route.lstrip("/"),
                 "status": "disconnected",
-                "frontend": FRONTEND_LINKS.get(route),
             }
         elif route == "/user-LucidLedger-read":
             if not verify_id_token(
                 user_id=payload.user_id, id_token=payload.id_token, client=client
             ):
                 raise PermissionError("User authentication failed")
-            records = list(db[LUCID_LEDGER_COLLECTION].find({}, {"_id": 0}).limit(50))
+            records = list(
+                db[LUCID_LEDGER_COLLECTION].find({}, {"_id": 0}).limit(
+                    resolve_operations_ledger_read_limit()
+                )
+            )
             result = {"UserID": payload.user_id, "records": records, "count": len(records)}
         elif route == "/user-session-create":
             result = create_session(
@@ -225,7 +242,7 @@ def _user_handler(route: str, payload: Any) -> dict[str, Any]:
         elif route == "/user-session-transfer":
             result = transfer_session_metadata(
                 session_id=payload.session_id,
-                target="user_history_ledger",
+                target=resolve_user_session_transfer_default_target(),
             )
         elif route == "/user-session-control":
             result = get_session_control_for_route(
@@ -235,8 +252,7 @@ def _user_handler(route: str, payload: Any) -> dict[str, Any]:
         else:
             raise ValueError(f"Unsupported user route: {route}")
 
-        if route in FRONTEND_LINKS:
-            result["frontend"] = FRONTEND_LINKS[route]
+        _attach_frontend_link(result, route)
         return tor_envelope(route=route, subsystem="user-system", payload=result)
     finally:
         client.close()
@@ -402,5 +418,6 @@ def create_user_router(*, prefix: str = "") -> Any:
     return router
 
 
-def register_user_routes(app: Any, *, api_prefix: str = "/api/v1") -> None:
-    app.include_router(create_user_router(prefix=api_prefix))
+def register_user_routes(app: Any, *, api_prefix: str | None = None) -> None:
+    prefix = api_prefix if api_prefix is not None else resolve_operations_api_prefix()
+    app.include_router(create_user_router(prefix=prefix))

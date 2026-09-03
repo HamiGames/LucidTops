@@ -37,7 +37,7 @@ BACKEND_DIR = PROJECT_ROOT / "backend"
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-from config import LUCID_TOPS_ROOT, get_master_db, utc_now  # noqa: E402
+from configPay import LUCID_TOPS_ROOT, get_payment_db, utc_now 
 
 DEFAULT_ACCOUNTS_PATH = Path("/mnt/myssd/accounts.txt")
 DEFAULT_PAYMENTS_SECRETS_NAME = "payments.secrets"
@@ -370,7 +370,7 @@ def _write_payments_secrets(secrets_dir: Path, wallets: list[TronWallet]) -> Pat
 
 def _persist_wallets_to_database(wallets: list[TronWallet]) -> bool:
     try:
-        from builderMasterServer import _get_mongo_client_for_launch
+        from configPay import _get_mongo_client_for_launch
     except ImportError:
         return False
 
@@ -384,7 +384,7 @@ def _persist_wallets_to_database(wallets: list[TronWallet]) -> bool:
         return False
 
     try:
-        db = get_master_db(client)
+        db = get_payment_db(client)
         for wallet in wallets:
             db[PAYMENT_WALLETS_COLLECTION].update_one(
                 {"wallet_type": wallet.wallet_type},

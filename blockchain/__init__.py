@@ -44,6 +44,12 @@ from blockchain_schema import (  # noqa: E402
     LEDGER_RECORDS_FIELDS,
     schema_template,
 )
+from blockchain_secrets import (  # noqa: E402
+    blockchain_secrets_status,
+    load_blockchain_secrets,
+    resolve_genesis_creator_id,
+    write_blockchain_secrets_template,
+)
 from configBlock import (  # noqa: E402
     GENESIS_CREATOR_ID,
     GENESIS_IMAGE_SCHEMA_PROFILE,
@@ -139,8 +145,10 @@ __all__ = (
     "TOTAL_TOKEN_SUPPLY",
     "append_ledger_record",
     "block_reward_for_minted",
+    "blockchain_secrets_status",
     "build_generation_prompt",
     "calculate_transfer_burn",
+    "connect_blockchain_routes",
     "compute_block_hash",
     "create_block",
     "generate_lucid_token_id",
@@ -152,12 +160,14 @@ __all__ = (
     "initialize_blockchain_genesis",
     "is_genesis_initialized",
     "load_blockchain_module",
+    "load_blockchain_secrets",
     "lucid_token_image_path",
     "lucid_token_storage_dir",
     "lucidtoken_root_dir",
     "mint_lucid_tokens",
     "record_session_history",
     "render_token_image",
+    "resolve_genesis_creator_id",
     "resolve_schema_profile",
     "save_lucid_token_image",
     "schema_template",
@@ -167,8 +177,14 @@ __all__ = (
     "setup_blockchain_config",
     "sha512_hex",
     "transfer_lucid_tokens",
+    "write_blockchain_secrets_template",
     "validate_blockchain_governance",
 )
+
+
+def connect_blockchain_routes(*, client: Any | None = None) -> dict[str, Any]:
+    module = load_blockchain_module("ConnectBlockRoutes.py")
+    return module.connect_blockchain_routes(client=client)
 
 
 def initialize_blockchain_container(*, force: bool = False) -> dict[str, Any]:

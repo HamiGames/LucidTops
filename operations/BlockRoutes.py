@@ -38,6 +38,12 @@ from _common import (
     utc_now,
 )
 from session import compress_session
+from operations_secrets import (
+    resolve_blockchain_hash_algorithm,
+    resolve_operations_api_prefix,
+    resolve_operations_ledger_read_limit,
+    resolve_operations_query_limit,
+)
 
 BLOCKCHAIN_ROUTES: tuple[str, ...] = (
     "/blockchain-create",
@@ -89,7 +95,7 @@ def _blockchain_handler(route: str, payload: BlockchainPayload) -> dict[str, Any
             record = {
                 "chainID": chain_id,
                 "status": "active",
-                "hash_algorithm": "sha512",
+                "hash_algorithm": resolve_blockchain_hash_algorithm(),
                 "created_at": now,
             }
             db[collection].insert_one(record)
@@ -104,7 +110,9 @@ def _blockchain_handler(route: str, payload: BlockchainPayload) -> dict[str, Any
                     raise LookupError("Blockchain record not found")
                 result = record
             else:
-                records = list(db[collection].find({}, {"_id": 0}).limit(50))
+                records = list(
+                    db[collection].find({}, {"_id": 0}).limit(resolve_operations_query_limit())
+                )
                 result = {"records": records, "count": len(records)}
         elif route == "/blockchain-end" and payload.session_id:
             result = compress_session(session_id=payload.session_id, client=client)
@@ -113,7 +121,7 @@ def _blockchain_handler(route: str, payload: BlockchainPayload) -> dict[str, Any
             record = {
                 "blockID": block_id,
                 "payload": payload.payload or {},
-                "hash_algorithm": "sha512",
+                "hash_algorithm": resolve_blockchain_hash_algorithm(),
                 "created_at": now,
             }
             db[LUCID_LEDGER_COLLECTION].insert_one(record)
@@ -170,5 +178,6 @@ def create_blockchain_router(*, prefix: str = "") -> Any:
     return router
 
 
-def register_blockchain_routes(app: Any, *, api_prefix: str = "/api/v1") -> None:
-    app.include_router(create_blockchain_router(prefix=api_prefix))
+def register_blockchain_routes(app: Any, *, api_prefix: str | None = None) -> None:
+    prefix = api_prefix if api_prefix is not None else resolve_operations_api_prefix()
+    app.include_router(create_blockchain_router(prefix=prefix))

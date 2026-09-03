@@ -51,6 +51,10 @@ from _common import (
     verify_id_token,
 )
 from Backend.NodeDbSchema import NODE_HOSTED_DB_COLLECTION, NODE_SEED_COLLECTION  # pyright: ignore[reportMissingImports]
+from operations_secrets import (
+    resolve_operations_api_prefix,
+    resolve_operations_ledger_read_limit,
+)
 
 NODE_ROUTES: tuple[str, ...] = (
     "/node-create",
@@ -130,7 +134,9 @@ def _ledger_action(
         )
         now = utc_now()
         if route.endswith("-read"):
-            records = list(db[collection].find({}, {"_id": 0}).limit(100))
+            records = list(
+                db[collection].find({}, {"_id": 0}).limit(resolve_operations_ledger_read_limit())
+            )
             return {"records": records, "count": len(records)}
         if route.endswith("-create"):
             block = {
@@ -286,5 +292,6 @@ def create_node_router(*, prefix: str = "") -> Any:
     return router
 
 
-def register_node_routes(app: Any, *, api_prefix: str = "/api/v1") -> None:
-    app.include_router(create_node_router(prefix=api_prefix))
+def register_node_routes(app: Any, *, api_prefix: str | None = None) -> None:
+    prefix = api_prefix if api_prefix is not None else resolve_operations_api_prefix()
+    app.include_router(create_node_router(prefix=prefix))

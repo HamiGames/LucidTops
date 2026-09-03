@@ -27,6 +27,7 @@ from DatabaseRoutes import DATABASE_ROUTES, create_database_router, register_dat
 from NodeRoutes import NODE_ROUTES, create_node_router, register_node_routes
 from SessionRoutes import SESSION_ROUTES, create_session_router, register_session_routes
 from UserRoutes import USER_ROUTES, create_user_router, register_user_routes
+from operations_secrets import resolve_operations_api_prefix
 
 _chip_in_spec = importlib.util.spec_from_file_location(
     "chip_in", OPERATIONS_DIR / "chip-in.py"
@@ -69,11 +70,12 @@ __all__ = (
 )
 
 
-def register_operations_routes(app: Any, *, api_prefix: str = "/api/v1") -> None:
+def register_operations_routes(app: Any, *, api_prefix: str | None = None) -> None:
     """Attach all operations subsystem routers to the master server FastAPI app."""
-    register_user_routes(app, api_prefix=api_prefix)
-    register_node_routes(app, api_prefix=api_prefix)
-    register_blockchain_routes(app, api_prefix=api_prefix)
-    register_session_routes(app, api_prefix=api_prefix)
-    register_database_routes(app, api_prefix=api_prefix)
-    register_chip_in_routes(app, api_prefix=api_prefix)
+    prefix = api_prefix if api_prefix is not None else resolve_operations_api_prefix()
+    register_user_routes(app, api_prefix=prefix)
+    register_node_routes(app, api_prefix=prefix)
+    register_blockchain_routes(app, api_prefix=prefix)
+    register_session_routes(app, api_prefix=prefix)
+    register_database_routes(app, api_prefix=prefix)
+    register_chip_in_routes(app, api_prefix=prefix)

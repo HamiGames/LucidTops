@@ -54,10 +54,18 @@ from _common import (
     verify_id_token,
     with_mongo,
 )
-from config import LUCID_TOPS_ROOT, SECRETS_DIR
+from config import LUCID_TOPS_ROOT
+from operations_secrets import (
+    resolve_chip_in_collection,
+    resolve_chip_in_crossover_collection,
+    resolve_chip_in_crossover_worlds,
+    resolve_chip_in_statuses,
+    resolve_operations_api_prefix,
+    resolve_payments_secrets_file,
+)
 
-CHIP_IN_COLLECTION = "chip_in_records"
-CHIP_IN_CROSSOVER_COLLECTION = "chip_in_crossovers"
+CHIP_IN_COLLECTION = resolve_chip_in_collection()
+CHIP_IN_CROSSOVER_COLLECTION = resolve_chip_in_crossover_collection()
 
 CHIP_IN_ROUTES: tuple[str, ...] = (
     "/chip-in-create",
@@ -71,38 +79,11 @@ CHIP_IN_ROUTES: tuple[str, ...] = (
     "/chip-in-control",
 )
 
-CROSSOVER_WORLDS: tuple[str, ...] = (
-    "crypto_wallet",
-    "blockchain",
-    "nft",
-    "game",
-    "social_media",
-    "news",
-    "education",
-    "health",
-    "finance",
-    "real_estate",
-    "travel",
-    "food_and_drink",
-    "art",
-    "music",
-    "video",
-    "photography",
-    "writing",
-    "programming",
-    "design",
-    "marketing",
-    "sales",
-    "customer_service",
-)
+CROSSOVER_WORLDS: tuple[str, ...] = resolve_chip_in_crossover_worlds()
 
-CHIP_IN_STATUSES: frozenset[str] = frozenset(
-    {"draft", "active", "connected", "archived"}
-)
+CHIP_IN_STATUSES: frozenset[str] = resolve_chip_in_statuses()
 
-PAYMENTS_SECRETS_FILE = Path(
-    os.environ.get("PAYMENTS_SECRETS_FILE", SECRETS_DIR / "payments.secrets")
-)
+PAYMENTS_SECRETS_FILE = resolve_payments_secrets_file()
 
 
 def _generate_chip_in_id() -> str:
@@ -555,8 +536,9 @@ def create_chip_in_router(*, prefix: str = "") -> Any:
     return router
 
 
-def register_chip_in_routes(app: Any, *, api_prefix: str = "/api/v1") -> None:
-    app.include_router(create_chip_in_router(prefix=api_prefix))
+def register_chip_in_routes(app: Any, *, api_prefix: str | None = None) -> None:
+    prefix = api_prefix if api_prefix is not None else resolve_operations_api_prefix()
+    app.include_router(create_chip_in_router(prefix=prefix))
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -36,13 +36,18 @@ if str(BLOCKCHAIN_DIR) not in sys.path:
     sys.path.insert(0, str(BLOCKCHAIN_DIR))
 
 from blockchain_schema import BLOCKCHAIN_BLOCKS_COLLECTION, GENESIS_STATE_ID  # noqa: E402
+from blockchain_secrets import (  # noqa: E402
+    resolve_genesis_creator_id,
+    resolve_mongodb_host,
+    resolve_mongodb_port,
+)
 
 DEFAULT_LUCID_TOPS_ROOT = Path("/mnt/myssd/LucidTops")
 LUCID_TOPS_ROOT = Path(os.environ.get("LUCID_TOPS_ROOT", DEFAULT_LUCID_TOPS_ROOT)).expanduser()
 
 BLOCKCHAIN_DB_NAME = os.environ.get("MONGODB_MAIN_DATABASE_NAME", "lucid_master")
-MONGODB_HOST = os.environ.get("MONGODB_HOST", "lucid-mongodb")
-MONGODB_PORT = int(os.environ.get("MONGODB_PORT", "27017"))
+MONGODB_HOST = resolve_mongodb_host()
+MONGODB_PORT = resolve_mongodb_port()
 MONGODB_URL = os.environ.get(
     "MONGODB_URL",
     f"mongodb://{MONGODB_HOST}:{MONGODB_PORT}/{BLOCKCHAIN_DB_NAME}",
@@ -68,7 +73,7 @@ def get_mongo_client() -> Any | None:
 def get_blockchain_db(client: Any) -> Any:
     return client[BLOCKCHAIN_DB_NAME]
 
-GENESIS_CREATOR_ID = "Pickme-LucidTops"
+GENESIS_CREATOR_ID = resolve_genesis_creator_id()
 GENESIS_IMAGE_SCHEMA_PROFILE = "genesisTokens"
 GENESIS_LOCK_FILENAME = ".genesis_initialized"
 GENESIS_MANIFEST_FILENAME = "genesis_manifest.json"

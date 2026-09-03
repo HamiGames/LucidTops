@@ -1,4 +1,26 @@
-"""Main entry point for the LucidTops master server backend (Tor-only, Docker)."""
+"""Main entry point for the LucidTops master server backend (uvicorn server and FastAPI system).
+this is the the overal run program for the MasterServer (uvicorn server and FastAPI system) for the LucidTops system.
+all contentent required to operate inside a Docker Network container, will be included in this file
+- all links to the containers within the LucidTops system will be included in this file
+- no API route will be Directly written in this file ( will call API routes from the other files)
+- No direct MongoDB access will be made in this file ( will call MongoDB from the other files)
+- No direct Tor Hidden Service access will be made in this file ( will call Tor Hidden Service from the other files)
+- No direct Docker Network access will be made in this file ( will call Docker Network from the other files)
+- No direct Clearnet access will be made in this file ( will call Clearnet from the other files)
+- NO container content will be directly written in this file ( will call container content from the other files)
+this file will include a command to start the uvicorn server (master server) and the FastAPI system (master server)
+this file will include a command to stop the uvicorn server (master server) and the FastAPI system (master server)
+this file will include a command to restart the uvicorn server (master server) and the FastAPI system (master server)
+this file will include a command to check the status of the uvicorn server (master server) and the FastAPI system (master server)
+this file will include a command to check the logs of the uvicorn server (master server) and the FastAPI system (master server)
+this file will include a command to check the configuration of the uvicorn server (master server) and the FastAPI system (master server)
+this file will include a command to check the registration of the uvicorn server (master server) and the FastAPI system (master server)
+this file will include a command to check the connection status of the uvicorn server (master server) and the FastAPI system (master server)
+this file will include a command to check the connection configuration of the uvicorn server (master server) and the FastAPI system (master server)
+this file will include a command to check the connection logs of the uvicorn server (master server) and the FastAPI system (master server)
+All configuration requirements will be imported from a set of *.secrets files (server.secrets, mongodb.secrets, tor.secrets, docker.secrets, clearnet.secrets, frontend.secrets, backend.secrets, operations.secrets, paysystems.secrets)
+All configuration data is pulled from outside the container (via the DockerfileDNS) and stored on the Host Machine (hardward using a configurable Path)
+"""
 
 from __future__ import annotations
 

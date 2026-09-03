@@ -38,9 +38,16 @@ import re
 import secrets
 import string
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Annotated, Any, Callable, Literal
+from typing import Annotated, Any, Literal
 
+from config import (
+    get_config_int,
+    get_config_list,
+    get_config_value,
+    get_env_secret,
+    get_mongo_client,
+    get_master_db,
+)
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
 
@@ -52,16 +59,14 @@ except ImportError:  # pragma: no cover
     PyMongoError = Exception  # type: ignore[misc, assignment]
 
 HANDSHAKE_PROTOCOL = "handshake"
-ID_LENGTH = int(os.environ.get("HANDSHAKE_ID_LENGTH", "8"))
-ID_TOKEN_BYTES = int(os.environ.get("HANDSHAKE_ID_TOKEN_BYTES", "32"))
+ID_LENGTH = get_config_int("HANDSHAKE_ID_LENGTH", 8)
+ID_TOKEN_BYTES = get_config_int("HANDSHAKE_ID_TOKEN_BYTES", 32)
 
-MASTER_DB_NAME = os.environ.get("MONGODB_MAIN_DATABASE_NAME", "lucid_master")
-MONGODB_HOST = os.environ.get("MONGODB_HOST", "lucid-mongodb")
-MONGODB_PORT = int(os.environ.get("MONGODB_PORT", "27017"))
-ID_TOKENS_COLLECTION = os.environ.get("HANDSHAKE_ID_TOKENS_COLLECTION", "id_tokens")
+MASTER_DB_NAME = get_config_value("MONGODB_MAIN_DATABASE_NAME", "lucid_master")
+ID_TOKENS_COLLECTION = get_config_value("HANDSHAKE_ID_TOKENS_COLLECTION", "id_tokens")
 
-API_KEY_MIN_LENGTH = int(os.environ.get("HANDSHAKE_API_KEY_MIN_LENGTH", "24"))
-API_KEY_GENERATION_LENGTH = int(os.environ.get("HANDSHAKE_API_KEY_GENERATION_LENGTH", "24"))
+API_KEY_MIN_LENGTH = get_config_int("HANDSHAKE_API_KEY_MIN_LENGTH", 24)
+API_KEY_GENERATION_LENGTH = get_config_int("HANDSHAKE_API_KEY_GENERATION_LENGTH", 24)
 API_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 
 HANDSHAKE_REQUIRED_FIELDS: tuple[str, ...] = (
@@ -70,7 +75,7 @@ HANDSHAKE_REQUIRED_FIELDS: tuple[str, ...] = (
     "connection_type",
 )
 
-ALLOWED_ONGOING_SOURCES: frozenset[str] = frozenset(
+_DEFAULT_ONGOING_SOURCES = frozenset(
     {
         "register.js",
         "node-registration.js",
@@ -87,6 +92,11 @@ ALLOWED_ONGOING_SOURCES: frozenset[str] = frozenset(
         "RemoteView.js",
     }
 )
+
+
+def get_allowed_ongoing_sources() -> frozenset[str]:
+    return get_config_list("ALLOWED_ONGOING_SOURCES", _DEFAULT_ONGOING_SOURCES)
+
 
 ConnectionType = Literal["initial", "ongoing"]
 
@@ -139,39 +149,11 @@ def is_api_key_format_valid(api_key: str) -> bool:
 
 
 def _resolve_api_key() -> str | None:
-    env_key = os.environ.get("API_KEY", "").strip()
-    if env_key:
-        return env_key
-
-    secrets_file = os.environ.get("API_KEY_FILE", "").strip()
-    if secrets_file:
-        try:
-            return Path(secrets_file).read_text(encoding="utf-8").strip()
-        except OSError:
-            return None
-
-    default_root = os.environ.get("LUCID_TOPS_ROOT", "/mnt/myssd/LucidTops")
-    fallback = os.path.join(default_root, "secrets", "api_key.txt")
-    try:
-        return Path(fallback).read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
+    return get_env_secret("API_KEY", filename="api_key.txt")
 
 
 def _mongo_client() -> Any | None:
-    if MongoClient is None:
-        return None
-
-    uri = os.environ.get(
-        "MONGODB_URL",
-        f"mongodb://{MONGODB_HOST}:{MONGODB_PORT}",
-    )
-    try:
-        client = MongoClient(uri, serverSelectionTimeoutMS=3000)
-        client.admin.command("ping")
-        return client
-    except PyMongoError:
-        return None
+    return get_mongo_client()
 
 
 def _load_api_key_from_database(client: Any) -> str | None:
@@ -258,7 +240,7 @@ def validate_handshake_source(source: str, connection_type: ConnectionType) -> b
     normalized = _normalize_source(source)
     if connection_type == "initial":
         return bool(normalized)
-    return normalized in ALLOWED_ONGOING_SOURCES
+    return normalized in get_allowed_ongoing_sources()
 
 
 # --- includes: the process of storing the IDTokens in the Master server database ---

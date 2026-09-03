@@ -1,4 +1,35 @@
-"""Fundamental functions to create NodeUserID and configure node database with NodeDatabaseID."""
+f"""Fundamental functions to create NodeUserID and configure node database with NodeDatabaseID, 
+uses the MasterServer (LucidTopsDB) as the seed source for the NodeDB (NodeUser)
+information inclusions:
+UserID=True
+User-TokenID= True
+UserProfileData=False
+ReadOnly= True
+WriteOnly= False
+UserId-SessionID=current only
+UserID-SessionData-raw= False
+UserID-SessionData-hash= True
+
+Collection Content:
+
+User:[userID: str,
+idToken: str,
+SessionID: str,
+SessionID-hash: str,
+SessionData-hash: str ]
+
+Sessions:[SessionID: str,
+SessionID-hash: str,
+SessionData-hash: str ]
+
+Blockchain:[LedgerID: str,
+LedgerData-hash: str, 
+Last-BlockID: str,
+last-block-timestamp: datetime,
+lastblock-creator: str,
+]
+
+"""
 
 from __future__ import annotations
 
@@ -98,7 +129,7 @@ def create_node_seed(
             "NodeDatabaseID": node_database_id,
             "UserID": user_id,
             "status": "created",
-            "fields": list(NODE_SEED_FIELDS),
+            "fields": str(list(NODE_SEED_FIELDS)), 
         }
     finally:
         if client is None:

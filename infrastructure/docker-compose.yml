@@ -21,7 +21,7 @@ services:
   lucid-server-default:
     build:
       context: ..
-      dockerfile: infrastructure/containers/lucid-server-default/Dockerfile
+      dockerfile: backend/Server.dockerfile
     container_name: lucid-server-default
     restart: unless-stopped
     depends_on:
@@ -30,17 +30,22 @@ services:
     env_file:
       - /mnt/myssd/LucidTops/server.env
     environment:
-      MONGODB_HOST: lucid-mongodb
-      MONGODB_URL: mongodb://lucid-mongodb:27017/lucid_master
       LUCID_TOPS_ROOT: /mnt/myssd/LucidTops
       SECRETS_DIR: /mnt/myssd/LucidTops/secrets
       SERVER_ENV_FILE: /mnt/myssd/LucidTops/server.env
       SECRETS_ENV_FILE: /mnt/myssd/LucidTops/secrets.env
+      SERVER_SECRETS_FILE: /mnt/myssd/LucidTops/secrets/server.secrets
+      CONFIG_SECRETS_FILE: /mnt/myssd/LucidTops/secrets/config.secrets
+      OPERATIONS_SECRETS_FILE: /mnt/myssd/LucidTops/secrets/operations.secrets
+      MONGODB_SECRETS_FILE: /mnt/myssd/LucidTops/secrets/mongodb.secrets
+      BLOCKCHAIN_SECRETS_FILE: /mnt/myssd/LucidTops/secrets/blockchain.secrets
+      PAYMENTS_SECRETS_FILE: /mnt/myssd/LucidTops/secrets/payments.secrets
       HOST_TOR_CONFIG_TORRC: /mnt/myssd/LucidTops/torrc
       TOR_HOST: "127.0.0.1"
       TOR_SOCKS_HOST: "127.0.0.1"
       MASTER_SERVER_BIND_HOST: "127.0.0.1"
       MASTER_SERVER_TOR_ONLY: "true"
+      RUN_BUILDER_ON_START: "true"
     volumes:
       - /mnt/myssd/LucidTops:/mnt/myssd/LucidTops
       - lucid-tor-data:/app/var/lib/tor

@@ -1,7 +1,7 @@
 {
-  "generated_at": "2026-08-31T00:50:46.445638+00:00",
-  "root_dir": "C:/Desktop/personal/Lucid_server_2026/Lucid_server_2026/test_launch_output",
-  "secrets_dir": "C:/Desktop/personal/Lucid_server_2026/Lucid_server_2026/test_launch_output/secrets",
+  "generated_at": "2026-09-03T01:47:31.426235+00:00",
+  "root_dir": "C:/Users/surba/AppData/Local/Temp/lucid_test_q1l56xoj",
+  "secrets_dir": "C:/Users/surba/AppData/Local/Temp/lucid_test_q1l56xoj/secrets",
   "launch_config": {
     "master_server_port": 8080,
     "gui_bridge_port": 8105,
@@ -10,15 +10,94 @@
     "docker_network_name": "lucid-stack",
     "enabled_services": [
       "lucid-mongodb",
-      "lucid-server-default"
+      "lucid-server-default",
+      "lucid-blockchain",
+      "lucid-sessions",
+      "lucid-operations",
+      "lucid-paysystems",
+      "lucid-frontend"
     ]
   },
+  "critical_profile": {
+    "UBUNTU_SERVER_VERSION": "24.04 LTS",
+    "HARDWARE_CPU_CORES": "4",
+    "HARDWARE_RAM_GB": "8",
+    "HARDWARE_STORAGE": "100GB SSD",
+    "HARDWARE_PLATFORM": "raspberry_pi_5",
+    "NETWORK_BANDWIDTH": "100Mbps",
+    "SECURITY_FIREWALL": "ufw",
+    "SECURITY_TOR_HIDDEN_SERVICE": "true",
+    "SECURITY_CLEARNET_CONNECTION": "true"
+  },
+  "operational_flags": {
+    "OPERATIONAL_UVICORN": "true",
+    "OPERATIONAL_FASTAPI": "true",
+    "OPERATIONAL_MONGODB": "true",
+    "OPERATIONAL_TOR": "true",
+    "OPERATIONAL_CLEARNET": "true",
+    "OPERATIONAL_NODE_CONTAINER_HOST": "true",
+    "OPERATIONAL_BLOCKCHAIN_CONTAINER_HOST": "true",
+    "OPERATIONAL_SESSIONS_CONTAINER_HOST": "true",
+    "OPERATIONAL_OPERATIONS_CONTAINER_HOST": "true",
+    "OPERATIONAL_PAYSYSTEMS_CONTAINER_HOST": "true",
+    "OPERATIONAL_FRONTEND_CONTAINER_HOST": "true"
+  },
   "files": {
-    "server_env": "C:/Desktop/personal/Lucid_server_2026/Lucid_server_2026/test_launch_output/server.env",
-    "secrets_env": "C:/Desktop/personal/Lucid_server_2026/Lucid_server_2026/test_launch_output/secrets.env",
-    "torrc": "C:/Desktop/personal/Lucid_server_2026/Lucid_server_2026/test_launch_output/torrc",
-    "docker_dns_env": "C:/Desktop/personal/Lucid_server_2026/Lucid_server_2026/test_launch_output/configs/docker-dns.env",
-    "docker_network_yml": "C:/Desktop/personal/Lucid_server_2026/Lucid_server_2026/test_launch_output/configs/docker-network.yml"
+    "server_env": "C:/Users/surba/AppData/Local/Temp/lucid_test_q1l56xoj/server.env",
+    "secrets_env": "C:/Users/surba/AppData/Local/Temp/lucid_test_q1l56xoj/secrets.env",
+    "server_secrets": "C:/Users/surba/AppData/Local/Temp/lucid_test_q1l56xoj/secrets/server.secrets",
+    "mongodb_secrets": "C:/Users/surba/AppData/Local/Temp/lucid_test_q1l56xoj/secrets/mongodb.secrets",
+    "torrc": "C:/Users/surba/AppData/Local/Temp/lucid_test_q1l56xoj/torrc",
+    "docker_dns_env": "C:/Users/surba/AppData/Local/Temp/lucid_test_q1l56xoj/configs/docker-dns.env",
+    "docker_network_yml": "C:/Users/surba/AppData/Local/Temp/lucid_test_q1l56xoj/configs/docker-network.yml",
+    "tor_routes": "C:/Users/surba/AppData/Local/Temp/lucid_test_q1l56xoj/configs/tor-routes.json",
+    "server_secrets_file": "C:/Users/surba/AppData/Local/Temp/lucid_test_q1l56xoj/secrets/server.secrets",
+    "config_secrets_file": "C:/Users/surba/AppData/Local/Temp/lucid_test_q1l56xoj/secrets/config.secrets",
+    "operations_secrets_file": "C:/Users/surba/AppData/Local/Temp/lucid_test_q1l56xoj/secrets/operations.secrets",
+    "mongodb_secrets_file": "C:/Users/surba/AppData/Local/Temp/lucid_test_q1l56xoj/secrets/mongodb.secrets",
+    "blockchain_secrets_file": "C:/Users/surba/AppData/Local/Temp/lucid_test_q1l56xoj/secrets/blockchain.secrets",
+    "payments_secrets_file": "C:/Users/surba/AppData/Local/Temp/lucid_test_q1l56xoj/secrets/payments.secrets"
+  },
+  "container_secrets": {
+    "SERVER_SECRETS_FILE": {
+      "path": "C:/Users/surba/AppData/Local/Temp/lucid_test_q1l56xoj/secrets/server.secrets",
+      "exists": true,
+      "keys_loaded": 51
+    },
+    "CONFIG_SECRETS_FILE": {
+      "path": "C:/Users/surba/AppData/Local/Temp/lucid_test_q1l56xoj/secrets/config.secrets",
+      "exists": true,
+      "keys_loaded": 23
+    },
+    "OPERATIONS_SECRETS_FILE": {
+      "path": "C:/Users/surba/AppData/Local/Temp/lucid_test_q1l56xoj/secrets/operations.secrets",
+      "exists": false,
+      "keys_loaded": 0
+    },
+    "MONGODB_SECRETS_FILE": {
+      "path": "C:/Users/surba/AppData/Local/Temp/lucid_test_q1l56xoj/secrets/mongodb.secrets",
+      "exists": false,
+      "keys_loaded": 0
+    },
+    "BLOCKCHAIN_SECRETS_FILE": {
+      "path": "C:/Users/surba/AppData/Local/Temp/lucid_test_q1l56xoj/secrets/blockchain.secrets",
+      "exists": false,
+      "keys_loaded": 0
+    },
+    "PAYMENTS_SECRETS_FILE": {
+      "path": "C:/Users/surba/AppData/Local/Temp/lucid_test_q1l56xoj/secrets/payments.secrets",
+      "exists": false,
+      "keys_loaded": 0
+    }
+  },
+  "tor_services": {
+    "master_server_onion": "",
+    "frontend_onion": "",
+    "client_request_tor_service": "/api/v1/client-request",
+    "handshake_tor_service": "/api/v1/handshake",
+    "connection_tor_service": "/api/v1/connection",
+    "tor_api_base": "/api/v1",
+    "tor_gui_base": "/gui"
   },
   "database": null,
   "connection_layers": [],
@@ -171,7 +250,649 @@
       "/sessions",
       "/blockchain",
       "/ledger"
+    ],
+    "core_protocol": [
+      "/client-request",
+      "/client-request/tor-config",
+      "/handshake",
+      "/connection",
+      "/connection/tor-config",
+      "/connection/validate-onion"
     ]
+  },
+  "tor_routes": {
+    "generated_at": "2026-09-03T01:47:27.284543+00:00",
+    "network": "tor",
+    "tor_only": true,
+    "api_prefix": "/api/v1",
+    "gui_prefix": "/gui",
+    "master_server_onion": "",
+    "frontend_onion": "",
+    "nodeuser_onion": "",
+    "tor_api_base": "/api/v1",
+    "tor_gui_base": "/gui",
+    "master_server_tor_service": "/",
+    "client_request_route": "/api/v1/client-request",
+    "client_request_tor_service": "/api/v1/client-request",
+    "client_request_tor_config": "/api/v1/client-request/tor-config",
+    "handshake_tor_service": "/api/v1/handshake",
+    "connection_tor_service": "/api/v1/connection",
+    "connection_tor_config": "/api/v1/connection/tor-config",
+    "connect_handshake_tor_service": "/gui/connect-handshake",
+    "routes": {
+      "/LucidLedger": {
+        "api_path": "/api/v1/LucidLedger",
+        "tor_service": "/api/v1/LucidLedger",
+        "master_onion": ""
+      },
+      "/LucidLedger-connect": {
+        "api_path": "/api/v1/LucidLedger-connect",
+        "tor_service": "/api/v1/LucidLedger-connect",
+        "master_onion": ""
+      },
+      "/LucidLedger-control": {
+        "api_path": "/api/v1/LucidLedger-control",
+        "tor_service": "/api/v1/LucidLedger-control",
+        "master_onion": ""
+      },
+      "/LucidLedger-disconnect": {
+        "api_path": "/api/v1/LucidLedger-disconnect",
+        "tor_service": "/api/v1/LucidLedger-disconnect",
+        "master_onion": ""
+      },
+      "/LucidLedger-end": {
+        "api_path": "/api/v1/LucidLedger-end",
+        "tor_service": "/api/v1/LucidLedger-end",
+        "master_onion": ""
+      },
+      "/LucidLedger-find": {
+        "api_path": "/api/v1/LucidLedger-find",
+        "tor_service": "/api/v1/LucidLedger-find",
+        "master_onion": ""
+      },
+      "/LucidLedger-record": {
+        "api_path": "/api/v1/LucidLedger-record",
+        "tor_service": "/api/v1/LucidLedger-record",
+        "master_onion": ""
+      },
+      "/LucidLedger-report": {
+        "api_path": "/api/v1/LucidLedger-report",
+        "tor_service": "/api/v1/LucidLedger-report",
+        "master_onion": ""
+      },
+      "/LucidLedger-transfer": {
+        "api_path": "/api/v1/LucidLedger-transfer",
+        "tor_service": "/api/v1/LucidLedger-transfer",
+        "master_onion": ""
+      },
+      "/billing-information": {
+        "api_path": "/api/v1/billing-information",
+        "tor_service": "/api/v1/billing-information",
+        "master_onion": ""
+      },
+      "/blockchain-connect": {
+        "api_path": "/api/v1/blockchain-connect",
+        "tor_service": "/api/v1/blockchain-connect",
+        "master_onion": ""
+      },
+      "/blockchain-control": {
+        "api_path": "/api/v1/blockchain-control",
+        "tor_service": "/api/v1/blockchain-control",
+        "master_onion": ""
+      },
+      "/blockchain-create": {
+        "api_path": "/api/v1/blockchain-create",
+        "tor_service": "/api/v1/blockchain-create",
+        "master_onion": ""
+      },
+      "/blockchain-disconnect": {
+        "api_path": "/api/v1/blockchain-disconnect",
+        "tor_service": "/api/v1/blockchain-disconnect",
+        "master_onion": ""
+      },
+      "/blockchain-end": {
+        "api_path": "/api/v1/blockchain-end",
+        "tor_service": "/api/v1/blockchain-end",
+        "master_onion": ""
+      },
+      "/blockchain-find": {
+        "api_path": "/api/v1/blockchain-find",
+        "tor_service": "/api/v1/blockchain-find",
+        "master_onion": ""
+      },
+      "/blockchain-record": {
+        "api_path": "/api/v1/blockchain-record",
+        "tor_service": "/api/v1/blockchain-record",
+        "master_onion": ""
+      },
+      "/blockchain-report": {
+        "api_path": "/api/v1/blockchain-report",
+        "tor_service": "/api/v1/blockchain-report",
+        "master_onion": ""
+      },
+      "/blockchain-transfer": {
+        "api_path": "/api/v1/blockchain-transfer",
+        "tor_service": "/api/v1/blockchain-transfer",
+        "master_onion": ""
+      },
+      "/client-request": {
+        "api_path": "/api/v1/client-request",
+        "tor_service": "/api/v1/client-request",
+        "master_onion": ""
+      },
+      "/client-request/tor-config": {
+        "api_path": "/api/v1/client-request/tor-config",
+        "tor_service": "/api/v1/client-request/tor-config",
+        "master_onion": ""
+      },
+      "/connection": {
+        "api_path": "/api/v1/connection",
+        "tor_service": "/api/v1/connection",
+        "master_onion": ""
+      },
+      "/connection/tor-config": {
+        "api_path": "/api/v1/connection/tor-config",
+        "tor_service": "/api/v1/connection/tor-config",
+        "master_onion": ""
+      },
+      "/connection/validate-onion": {
+        "api_path": "/api/v1/connection/validate-onion",
+        "tor_service": "/api/v1/connection/validate-onion",
+        "master_onion": ""
+      },
+      "/database-connect": {
+        "api_path": "/api/v1/database-connect",
+        "tor_service": "/api/v1/database-connect",
+        "master_onion": ""
+      },
+      "/database-control": {
+        "api_path": "/api/v1/database-control",
+        "tor_service": "/api/v1/database-control",
+        "master_onion": ""
+      },
+      "/database-create": {
+        "api_path": "/api/v1/database-create",
+        "tor_service": "/api/v1/database-create",
+        "master_onion": ""
+      },
+      "/database-disconnect": {
+        "api_path": "/api/v1/database-disconnect",
+        "tor_service": "/api/v1/database-disconnect",
+        "master_onion": ""
+      },
+      "/database-end": {
+        "api_path": "/api/v1/database-end",
+        "tor_service": "/api/v1/database-end",
+        "master_onion": ""
+      },
+      "/database-find": {
+        "api_path": "/api/v1/database-find",
+        "tor_service": "/api/v1/database-find",
+        "master_onion": ""
+      },
+      "/database-record": {
+        "api_path": "/api/v1/database-record",
+        "tor_service": "/api/v1/database-record",
+        "master_onion": ""
+      },
+      "/database-seed": {
+        "api_path": "/api/v1/database-seed",
+        "tor_service": "/api/v1/database-seed",
+        "master_onion": ""
+      },
+      "/database-seed-connect": {
+        "api_path": "/api/v1/database-seed-connect",
+        "tor_service": "/api/v1/database-seed-connect",
+        "master_onion": ""
+      },
+      "/database-seed-control": {
+        "api_path": "/api/v1/database-seed-control",
+        "tor_service": "/api/v1/database-seed-control",
+        "master_onion": ""
+      },
+      "/database-seed-delete": {
+        "api_path": "/api/v1/database-seed-delete",
+        "tor_service": "/api/v1/database-seed-delete",
+        "master_onion": ""
+      },
+      "/database-seed-disconnect": {
+        "api_path": "/api/v1/database-seed-disconnect",
+        "tor_service": "/api/v1/database-seed-disconnect",
+        "master_onion": ""
+      },
+      "/database-seed-download": {
+        "api_path": "/api/v1/database-seed-download",
+        "tor_service": "/api/v1/database-seed-download",
+        "master_onion": ""
+      },
+      "/database-seed-end": {
+        "api_path": "/api/v1/database-seed-end",
+        "tor_service": "/api/v1/database-seed-end",
+        "master_onion": ""
+      },
+      "/database-seed-find": {
+        "api_path": "/api/v1/database-seed-find",
+        "tor_service": "/api/v1/database-seed-find",
+        "master_onion": ""
+      },
+      "/database-seed-record": {
+        "api_path": "/api/v1/database-seed-record",
+        "tor_service": "/api/v1/database-seed-record",
+        "master_onion": ""
+      },
+      "/database-seed-rename": {
+        "api_path": "/api/v1/database-seed-rename",
+        "tor_service": "/api/v1/database-seed-rename",
+        "master_onion": ""
+      },
+      "/database-seed-sync": {
+        "api_path": "/api/v1/database-seed-sync",
+        "tor_service": "/api/v1/database-seed-sync",
+        "master_onion": ""
+      },
+      "/database-seed-transfer": {
+        "api_path": "/api/v1/database-seed-transfer",
+        "tor_service": "/api/v1/database-seed-transfer",
+        "master_onion": ""
+      },
+      "/database-seed-upload": {
+        "api_path": "/api/v1/database-seed-upload",
+        "tor_service": "/api/v1/database-seed-upload",
+        "master_onion": ""
+      },
+      "/database-transfer": {
+        "api_path": "/api/v1/database-transfer",
+        "tor_service": "/api/v1/database-transfer",
+        "master_onion": ""
+      },
+      "/handshake": {
+        "api_path": "/api/v1/handshake",
+        "tor_service": "/api/v1/handshake",
+        "master_onion": ""
+      },
+      "/login": {
+        "api_path": "/api/v1/login",
+        "tor_service": "/api/v1/login",
+        "master_onion": ""
+      },
+      "/logout": {
+        "api_path": "/api/v1/logout",
+        "tor_service": "/api/v1/logout",
+        "master_onion": ""
+      },
+      "/node-Blockchain-connect": {
+        "api_path": "/api/v1/node-Blockchain-connect",
+        "tor_service": "/api/v1/node-Blockchain-connect",
+        "master_onion": ""
+      },
+      "/node-Blockchain-create": {
+        "api_path": "/api/v1/node-Blockchain-create",
+        "tor_service": "/api/v1/node-Blockchain-create",
+        "master_onion": ""
+      },
+      "/node-Blockchain-disconnect": {
+        "api_path": "/api/v1/node-Blockchain-disconnect",
+        "tor_service": "/api/v1/node-Blockchain-disconnect",
+        "master_onion": ""
+      },
+      "/node-Blockchain-find": {
+        "api_path": "/api/v1/node-Blockchain-find",
+        "tor_service": "/api/v1/node-Blockchain-find",
+        "master_onion": ""
+      },
+      "/node-Blockchain-read": {
+        "api_path": "/api/v1/node-Blockchain-read",
+        "tor_service": "/api/v1/node-Blockchain-read",
+        "master_onion": ""
+      },
+      "/node-LucidLedger-connect": {
+        "api_path": "/api/v1/node-LucidLedger-connect",
+        "tor_service": "/api/v1/node-LucidLedger-connect",
+        "master_onion": ""
+      },
+      "/node-LucidLedger-create": {
+        "api_path": "/api/v1/node-LucidLedger-create",
+        "tor_service": "/api/v1/node-LucidLedger-create",
+        "master_onion": ""
+      },
+      "/node-LucidLedger-delete": {
+        "api_path": "/api/v1/node-LucidLedger-delete",
+        "tor_service": "/api/v1/node-LucidLedger-delete",
+        "master_onion": ""
+      },
+      "/node-LucidLedger-disconnect": {
+        "api_path": "/api/v1/node-LucidLedger-disconnect",
+        "tor_service": "/api/v1/node-LucidLedger-disconnect",
+        "master_onion": ""
+      },
+      "/node-LucidLedger-end": {
+        "api_path": "/api/v1/node-LucidLedger-end",
+        "tor_service": "/api/v1/node-LucidLedger-end",
+        "master_onion": ""
+      },
+      "/node-LucidLedger-find": {
+        "api_path": "/api/v1/node-LucidLedger-find",
+        "tor_service": "/api/v1/node-LucidLedger-find",
+        "master_onion": ""
+      },
+      "/node-LucidLedger-read": {
+        "api_path": "/api/v1/node-LucidLedger-read",
+        "tor_service": "/api/v1/node-LucidLedger-read",
+        "master_onion": ""
+      },
+      "/node-LucidLedger-record": {
+        "api_path": "/api/v1/node-LucidLedger-record",
+        "tor_service": "/api/v1/node-LucidLedger-record",
+        "master_onion": ""
+      },
+      "/node-LucidLedger-report": {
+        "api_path": "/api/v1/node-LucidLedger-report",
+        "tor_service": "/api/v1/node-LucidLedger-report",
+        "master_onion": ""
+      },
+      "/node-LucidLedger-update": {
+        "api_path": "/api/v1/node-LucidLedger-update",
+        "tor_service": "/api/v1/node-LucidLedger-update",
+        "master_onion": ""
+      },
+      "/node-LucidLedger-write": {
+        "api_path": "/api/v1/node-LucidLedger-write",
+        "tor_service": "/api/v1/node-LucidLedger-write",
+        "master_onion": ""
+      },
+      "/node-connect": {
+        "api_path": "/api/v1/node-connect",
+        "tor_service": "/api/v1/node-connect",
+        "master_onion": ""
+      },
+      "/node-control": {
+        "api_path": "/api/v1/node-control",
+        "tor_service": "/api/v1/node-control",
+        "master_onion": ""
+      },
+      "/node-create": {
+        "api_path": "/api/v1/node-create",
+        "tor_service": "/api/v1/node-create",
+        "master_onion": ""
+      },
+      "/node-disconnect": {
+        "api_path": "/api/v1/node-disconnect",
+        "tor_service": "/api/v1/node-disconnect",
+        "master_onion": ""
+      },
+      "/node-end": {
+        "api_path": "/api/v1/node-end",
+        "tor_service": "/api/v1/node-end",
+        "master_onion": ""
+      },
+      "/node-find": {
+        "api_path": "/api/v1/node-find",
+        "tor_service": "/api/v1/node-find",
+        "master_onion": ""
+      },
+      "/node-login": {
+        "api_path": "/api/v1/node-login",
+        "tor_service": "/api/v1/node-login",
+        "master_onion": ""
+      },
+      "/node-logout": {
+        "api_path": "/api/v1/node-logout",
+        "tor_service": "/api/v1/node-logout",
+        "master_onion": ""
+      },
+      "/node-record": {
+        "api_path": "/api/v1/node-record",
+        "tor_service": "/api/v1/node-record",
+        "master_onion": ""
+      },
+      "/node-registration": {
+        "api_path": "/api/v1/node-registration",
+        "tor_service": "/api/v1/node-registration",
+        "master_onion": ""
+      },
+      "/node-report": {
+        "api_path": "/api/v1/node-report",
+        "tor_service": "/api/v1/node-report",
+        "master_onion": ""
+      },
+      "/node-transfer": {
+        "api_path": "/api/v1/node-transfer",
+        "tor_service": "/api/v1/node-transfer",
+        "master_onion": ""
+      },
+      "/payment-processing": {
+        "api_path": "/api/v1/payment-processing",
+        "tor_service": "/api/v1/payment-processing",
+        "master_onion": ""
+      },
+      "/register": {
+        "api_path": "/api/v1/register",
+        "tor_service": "/api/v1/register",
+        "master_onion": ""
+      },
+      "/server-API-key-sync": {
+        "api_path": "/api/v1/server-API-key-sync",
+        "tor_service": "/api/v1/server-API-key-sync",
+        "master_onion": ""
+      },
+      "/server-IDToken-sync": {
+        "api_path": "/api/v1/server-IDToken-sync",
+        "tor_service": "/api/v1/server-IDToken-sync",
+        "master_onion": ""
+      },
+      "/server-blockchain-sync": {
+        "api_path": "/api/v1/server-blockchain-sync",
+        "tor_service": "/api/v1/server-blockchain-sync",
+        "master_onion": ""
+      },
+      "/server-database-sync": {
+        "api_path": "/api/v1/server-database-sync",
+        "tor_service": "/api/v1/server-database-sync",
+        "master_onion": ""
+      },
+      "/server-ledger-sync": {
+        "api_path": "/api/v1/server-ledger-sync",
+        "tor_service": "/api/v1/server-ledger-sync",
+        "master_onion": ""
+      },
+      "/session-connect": {
+        "api_path": "/api/v1/session-connect",
+        "tor_service": "/api/v1/session-connect",
+        "master_onion": ""
+      },
+      "/session-control": {
+        "api_path": "/api/v1/session-control",
+        "tor_service": "/api/v1/session-control",
+        "master_onion": ""
+      },
+      "/session-create": {
+        "api_path": "/api/v1/session-create",
+        "tor_service": "/api/v1/session-create",
+        "master_onion": ""
+      },
+      "/session-disconnect": {
+        "api_path": "/api/v1/session-disconnect",
+        "tor_service": "/api/v1/session-disconnect",
+        "master_onion": ""
+      },
+      "/session-end": {
+        "api_path": "/api/v1/session-end",
+        "tor_service": "/api/v1/session-end",
+        "master_onion": ""
+      },
+      "/session-find": {
+        "api_path": "/api/v1/session-find",
+        "tor_service": "/api/v1/session-find",
+        "master_onion": ""
+      },
+      "/session-record": {
+        "api_path": "/api/v1/session-record",
+        "tor_service": "/api/v1/session-record",
+        "master_onion": ""
+      },
+      "/session-transfer": {
+        "api_path": "/api/v1/session-transfer",
+        "tor_service": "/api/v1/session-transfer",
+        "master_onion": ""
+      },
+      "/tier-select": {
+        "api_path": "/api/v1/tier-select",
+        "tor_service": "/api/v1/tier-select",
+        "master_onion": ""
+      },
+      "/user-LucidLedger-read": {
+        "api_path": "/api/v1/user-LucidLedger-read",
+        "tor_service": "/api/v1/user-LucidLedger-read",
+        "master_onion": ""
+      },
+      "/user-connect": {
+        "api_path": "/api/v1/user-connect",
+        "tor_service": "/api/v1/user-connect",
+        "master_onion": ""
+      },
+      "/user-control": {
+        "api_path": "/api/v1/user-control",
+        "tor_service": "/api/v1/user-control",
+        "master_onion": ""
+      },
+      "/user-create": {
+        "api_path": "/api/v1/user-create",
+        "tor_service": "/api/v1/user-create",
+        "master_onion": ""
+      },
+      "/user-disconnect": {
+        "api_path": "/api/v1/user-disconnect",
+        "tor_service": "/api/v1/user-disconnect",
+        "master_onion": ""
+      },
+      "/user-end": {
+        "api_path": "/api/v1/user-end",
+        "tor_service": "/api/v1/user-end",
+        "master_onion": ""
+      },
+      "/user-find": {
+        "api_path": "/api/v1/user-find",
+        "tor_service": "/api/v1/user-find",
+        "master_onion": ""
+      },
+      "/user-record": {
+        "api_path": "/api/v1/user-record",
+        "tor_service": "/api/v1/user-record",
+        "master_onion": ""
+      },
+      "/user-report": {
+        "api_path": "/api/v1/user-report",
+        "tor_service": "/api/v1/user-report",
+        "master_onion": ""
+      },
+      "/user-session-connect": {
+        "api_path": "/api/v1/user-session-connect",
+        "tor_service": "/api/v1/user-session-connect",
+        "master_onion": ""
+      },
+      "/user-session-control": {
+        "api_path": "/api/v1/user-session-control",
+        "tor_service": "/api/v1/user-session-control",
+        "master_onion": ""
+      },
+      "/user-session-create": {
+        "api_path": "/api/v1/user-session-create",
+        "tor_service": "/api/v1/user-session-create",
+        "master_onion": ""
+      },
+      "/user-session-disconnect": {
+        "api_path": "/api/v1/user-session-disconnect",
+        "tor_service": "/api/v1/user-session-disconnect",
+        "master_onion": ""
+      },
+      "/user-session-end": {
+        "api_path": "/api/v1/user-session-end",
+        "tor_service": "/api/v1/user-session-end",
+        "master_onion": ""
+      },
+      "/user-session-find": {
+        "api_path": "/api/v1/user-session-find",
+        "tor_service": "/api/v1/user-session-find",
+        "master_onion": ""
+      },
+      "/user-session-record": {
+        "api_path": "/api/v1/user-session-record",
+        "tor_service": "/api/v1/user-session-record",
+        "master_onion": ""
+      },
+      "/user-session-report": {
+        "api_path": "/api/v1/user-session-report",
+        "tor_service": "/api/v1/user-session-report",
+        "master_onion": ""
+      },
+      "/user-session-transfer": {
+        "api_path": "/api/v1/user-session-transfer",
+        "tor_service": "/api/v1/user-session-transfer",
+        "master_onion": ""
+      },
+      "/user-transfer": {
+        "api_path": "/api/v1/user-transfer",
+        "tor_service": "/api/v1/user-transfer",
+        "master_onion": ""
+      }
+    },
+    "gui_routes": {
+      "/register": {
+        "gui_path": "/gui/register",
+        "tor_service": "/gui/register",
+        "frontend_onion": ""
+      },
+      "/login": {
+        "gui_path": "/gui/login",
+        "tor_service": "/gui/login",
+        "frontend_onion": ""
+      },
+      "/logout": {
+        "gui_path": "/gui/logout",
+        "tor_service": "/gui/logout",
+        "frontend_onion": ""
+      },
+      "/home": {
+        "gui_path": "/gui/home",
+        "tor_service": "/gui/home",
+        "frontend_onion": ""
+      },
+      "/settings": {
+        "gui_path": "/gui/settings",
+        "tor_service": "/gui/settings",
+        "frontend_onion": ""
+      },
+      "/find-peer": {
+        "gui_path": "/gui/find-peer",
+        "tor_service": "/gui/find-peer",
+        "frontend_onion": ""
+      },
+      "/LucidLedger": {
+        "gui_path": "/gui/LucidLedger",
+        "tor_service": "/gui/LucidLedger",
+        "frontend_onion": ""
+      },
+      "/LucidMarket": {
+        "gui_path": "/gui/LucidMarket",
+        "tor_service": "/gui/LucidMarket",
+        "frontend_onion": ""
+      },
+      "/node-registration": {
+        "gui_path": "/gui/node-registration",
+        "tor_service": "/gui/node-registration",
+        "frontend_onion": ""
+      },
+      "/tier-select": {
+        "gui_path": "/gui/tier-select",
+        "tor_service": "/gui/tier-select",
+        "frontend_onion": ""
+      },
+      "/connect-handshake": {
+        "gui_path": "/gui/connect-handshake",
+        "tor_service": "/gui/connect-handshake",
+        "frontend_onion": ""
+      }
+    }
   },
   "schemas": {
     "master_credentials": [
@@ -357,5 +1078,5 @@
       "created_at"
     ]
   },
-  "api_key_fingerprint": "nE6mApmt"
+  "api_key_fingerprint": "pKJPA8Vj"
 }

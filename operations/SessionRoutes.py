@@ -36,6 +36,12 @@ from session import (
 )
 from sessionControl import get_session_control_for_route
 from Viewer import peer_search, resolve_viewer
+from operations_secrets import (
+    resolve_operations_api_prefix,
+    resolve_session_key_min_length,
+    resolve_session_id_length,
+    resolve_session_transfer_default_target,
+)
 
 SESSION_ROUTES: tuple[str, ...] = (
     "/session-create",
@@ -60,19 +66,34 @@ if BaseModel is not object:
         pass
 
     class SessionFindPayload(BaseModel):
-        session_id: str = Field(..., alias="sessionID", min_length=10, max_length=10)
+        session_id: str = Field(
+            ...,
+            alias="sessionID",
+            min_length=resolve_session_id_length(),
+            max_length=resolve_session_id_length(),
+        )
         user_id: str | None = Field(default=None, alias="UserID")
 
         model_config = {"populate_by_name": True}
 
     class SessionConnectPayload(SessionAuthPayload):
-        session_id: str = Field(..., alias="sessionID", min_length=10, max_length=10)
-        session_key: str = Field(..., alias="sessionKey", min_length=16)
+        session_id: str = Field(
+            ...,
+            alias="sessionID",
+            min_length=resolve_session_id_length(),
+            max_length=resolve_session_id_length(),
+        )
+        session_key: str = Field(..., alias="sessionKey", min_length=resolve_session_key_min_length())
 
         model_config = {"populate_by_name": True}
 
     class SessionScopedPayload(SessionAuthPayload):
-        session_id: str = Field(..., alias="sessionID", min_length=10, max_length=10)
+        session_id: str = Field(
+            ...,
+            alias="sessionID",
+            min_length=resolve_session_id_length(),
+            max_length=resolve_session_id_length(),
+        )
 
         model_config = {"populate_by_name": True}
 
@@ -80,8 +101,13 @@ if BaseModel is not object:
         action: str = Field(default="session-record")
 
     class SessionTransferPayload(BaseModel):
-        session_id: str = Field(..., alias="sessionID", min_length=10, max_length=10)
-        target: str = Field(default="history_ledger")
+        session_id: str = Field(
+            ...,
+            alias="sessionID",
+            min_length=resolve_session_id_length(),
+            max_length=resolve_session_id_length(),
+        )
+        target: str = Field(default_factory=resolve_session_transfer_default_target)
 
         model_config = {"populate_by_name": True}
 
@@ -209,5 +235,6 @@ def create_session_router(*, prefix: str = "") -> Any:
     return router
 
 
-def register_session_routes(app: Any, *, api_prefix: str = "/api/v1") -> None:
-    app.include_router(create_session_router(prefix=api_prefix))
+def register_session_routes(app: Any, *, api_prefix: str | None = None) -> None:
+    prefix = api_prefix if api_prefix is not None else resolve_operations_api_prefix()
+    app.include_router(create_session_router(prefix=prefix))

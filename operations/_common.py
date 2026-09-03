@@ -27,6 +27,11 @@ from config import (  # noqa: E402
 )
 from WebPageLink import frontend_link_for_api_route  # noqa: E402
 from load_module import load_backend_module  # noqa: E402
+from operations_secrets import (  # noqa: E402
+    resolve_blockchain_collection,
+    resolve_lucid_ledger_collection,
+    resolve_session_records_collection,
+)
 
 _data_chunker = load_backend_module("data-chunker.py")
 chunk_session_data = _data_chunker.chunk_session_data
@@ -42,9 +47,9 @@ except ImportError:  # pragma: no cover
     BaseModel = object  # type: ignore[misc, assignment]
     Field = lambda *args, **kwargs: None  # type: ignore[misc, assignment]
 
-SESSION_RECORDS_COLLECTION = "session_records"
-LUCID_LEDGER_COLLECTION = "ledger_records"
-BLOCKCHAIN_COLLECTION = "blockchain_blocks"
+SESSION_RECORDS_COLLECTION = resolve_session_records_collection()
+LUCID_LEDGER_COLLECTION = resolve_lucid_ledger_collection()
+BLOCKCHAIN_COLLECTION = resolve_blockchain_collection()
 
 
 def tor_envelope(

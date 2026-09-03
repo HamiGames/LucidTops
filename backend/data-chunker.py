@@ -1,4 +1,23 @@
-"""Data chunker for integrating session data into the blockchain system using SHA-512."""
+"""Data chunker for integrating session data into the blockchain system using SHA-512,
+included data in the data-chunker:
+-sessionID
+(participant required data)
+- SessionData-hash(excludes Mp4, only text operation logs)
+- SessionID-hash
+- SessionID-Duration: int
+- SessionID-Start-Timestamp: datetime
+- SessionID-End-Timestamp: datetime
+- SessionID-Processing-ID: str
+- SessionID-Processing-Timestamp: datetime
+- SessionID-Processing-Duration: int
+- SessionID-Processing-Status: str
+- SessionID-Processing-Result: str
+- SessionID-Processing-Error: str
+- SessionID-Processing-Error-Code: int
+- SessionID-Processing-Error-Message: str
+- SessionID-Processing-Error-Trace: str
+all session data processed by this module will be less than 1mb in size.
+"""
 
 from __future__ import annotations
 

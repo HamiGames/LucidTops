@@ -43,6 +43,11 @@ from _common import (
     verify_id_token,
 )
 from NodeDbSchema import NODE_HOSTED_DB_COLLECTION, NODE_SEED_COLLECTION
+from operations_secrets import (
+    resolve_node_seed_files_collection,
+    resolve_operations_api_prefix,
+    resolve_operations_query_limit,
+)
 
 DATABASE_ROUTES: tuple[str, ...] = (
     "/database-create",
@@ -82,7 +87,7 @@ ADMIN_SEED_ROUTES = frozenset(
     }
 )
 
-NODE_SEED_FILES_COLLECTION = "node_seed_files"
+NODE_SEED_FILES_COLLECTION = resolve_node_seed_files_collection()
 
 
 if BaseModel is not object:
@@ -141,7 +146,7 @@ def _database_handler(route: str, payload: Any) -> dict[str, Any]:
                     records = list(
                         db.master_credentials.find(
                             {"databaseID": {"$exists": True}}, {"_id": 0}
-                        ).limit(50)
+                        ).limit(resolve_operations_query_limit())
                     )
                     result = {"records": records, "count": len(records)}
             else:
@@ -316,5 +321,6 @@ def create_database_router(*, prefix: str = "") -> Any:
     return router
 
 
-def register_database_routes(app: Any, *, api_prefix: str = "/api/v1") -> None:
-    app.include_router(create_database_router(prefix=api_prefix))
+def register_database_routes(app: Any, *, api_prefix: str | None = None) -> None:
+    prefix = api_prefix if api_prefix is not None else resolve_operations_api_prefix()
+    app.include_router(create_database_router(prefix=prefix))

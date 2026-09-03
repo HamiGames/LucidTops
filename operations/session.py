@@ -57,9 +57,10 @@ from sessions.SessionCore import (
     validate_session_key,
 )
 from sessions.sessionID import generate_session_id, validate_session_id
+from operations_secrets import resolve_session_id_length, resolve_session_key_min_length
 
-SESSION_ID_LENGTH = 10
-SESSION_KEY_MIN_LENGTH = 16
+SESSION_ID_LENGTH = resolve_session_id_length()
+SESSION_KEY_MIN_LENGTH = resolve_session_key_min_length()
 SESSION_REQUIRED_FIELDS = (
     "sessionID",
     "sessionKey",

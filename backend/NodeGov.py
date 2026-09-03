@@ -30,10 +30,18 @@ Rules for the NodeUser:
 from __future__ import annotations
 
 import hashlib
-import secrets
 from typing import Any, Literal
 
-from config import NODE_MIN_MEMORY_GB, get_master_db, get_mongo_client, utc_now
+from config import (
+    get_config_int,
+    get_config_list,
+    get_config_value,
+    get_env_secret,
+    get_local_tor_forward_hosts,
+    get_mongo_client,
+    get_master_db,
+    utc_now,
+)
 
 NodeOperation = Literal[
     "session",
@@ -48,10 +56,14 @@ NodeOperation = Literal[
     "ledger_modify_past",
 ]
 
-BANNED_OPERATIONS_COLLECTION = "node_governance_bans"
-NODE_GOV_AUDIT_COLLECTION = "node_governance_audit"
+BANNED_OPERATIONS_COLLECTION = get_config_value(
+    "NODE_GOV_BANNED_COLLECTION", "node_governance_bans"
+)
+NODE_GOV_AUDIT_COLLECTION = get_config_value(
+    "NODE_GOV_AUDIT_COLLECTION", "node_governance_audit"
+)
 
-RESTRICTED_NODE_OPERATIONS: frozenset[NodeOperation] = frozenset(
+_DEFAULT_RESTRICTED: frozenset[NodeOperation] = frozenset(
     {
         "database_modify",
         "session_modify",
@@ -60,10 +72,36 @@ RESTRICTED_NODE_OPERATIONS: frozenset[NodeOperation] = frozenset(
     }
 )
 
-SESSION_ALLOWED: frozenset[NodeOperation] = frozenset({"session", "session_modify"})
-BLOCKCHAIN_ALLOWED: frozenset[NodeOperation] = frozenset(
-    {"blockchain_read", "blockchain_create", "ledger_read", "ledger_write"}
+_DEFAULT_SESSION_ALLOWED: frozenset[NodeOperation] = frozenset({"session", "session_modify"})
+_DEFAULT_BLOCKCHAIN_ALLOWED: frozenset[NodeOperation] = frozenset(
+    {
+        "blockchain_read",
+        "blockchain_create",
+        "ledger_read",
+        "ledger_write",
+    }
 )
+
+
+def _restricted_node_operations() -> frozenset[NodeOperation]:
+    configured = get_config_list("NODE_GOV_RESTRICTED_OPERATIONS", _DEFAULT_RESTRICTED)
+    return frozenset(op for op in configured if op in _DEFAULT_RESTRICTED) or _DEFAULT_RESTRICTED
+
+
+def _session_allowed_operations() -> frozenset[NodeOperation]:
+    configured = get_config_list("NODE_GOV_SESSION_ALLOWED", _DEFAULT_SESSION_ALLOWED)
+    return frozenset(op for op in configured if op in _DEFAULT_SESSION_ALLOWED) or _DEFAULT_SESSION_ALLOWED
+
+
+def _blockchain_allowed_operations() -> frozenset[NodeOperation]:
+    configured = get_config_list("NODE_GOV_BLOCKCHAIN_ALLOWED", _DEFAULT_BLOCKCHAIN_ALLOWED)
+    return (
+        frozenset(op for op in configured if op in _DEFAULT_BLOCKCHAIN_ALLOWED)
+        or _DEFAULT_BLOCKCHAIN_ALLOWED
+    )
+
+
+NODE_MIN_MEMORY_GB = get_config_int("NODE_MIN_MEMORY_GB", 50)
 
 
 def _mask_credential(value: str) -> str:
@@ -114,6 +152,14 @@ def ban_node_user(node_user_id: str, reason: str, *, client: Any | None = None) 
     mongo = client if client is not None else get_mongo_client()
     if mongo is None:
         raise RuntimeError("Master server database is unavailable")
+    holding_account = get_env_secret(
+        "LUCID_TOKENS_HOLDING_ACCOUNT",
+        filename="lucid_tokens_holding_account.txt",
+    )
+    if not holding_account:
+        raise RuntimeError(
+            "LUCID_TOKENS_HOLDING_ACCOUNT is not configured in secrets.env or config.secrets"
+        )
     try:
         db = get_master_db(mongo)
         db[BANNED_OPERATIONS_COLLECTION].update_one(
@@ -123,7 +169,7 @@ def ban_node_user(node_user_id: str, reason: str, *, client: Any | None = None) 
                     "NodeUserID": node_user_id,
                     "banned": True,
                     "reason": reason,
-                    "lucid_tokens_holding_account": secrets.token_hex(16),
+                    "lucid_tokens_holding_account": holding_account,
                     "updated_at": utc_now(),
                 },
                 "$setOnInsert": {"created_at": utc_now()},
@@ -155,7 +201,7 @@ def validate_node_operation(
     if is_node_banned(node_user_id, client=client):
         raise PermissionError("NodeUser is banned from all operations")
 
-    if operation in RESTRICTED_NODE_OPERATIONS:
+    if operation in _restricted_node_operations():
         if operation == "ledger_write" and is_latest_block_creator:
             pass
         else:
@@ -166,10 +212,10 @@ def validate_node_operation(
             )
             raise PermissionError(f"Operation not permitted for NodeUser: {operation}")
 
-    if operation in SESSION_ALLOWED and operation == "session_modify":
+    if operation in _session_allowed_operations() and operation == "session_modify":
         raise PermissionError("NodeUser cannot modify session data")
 
-    if operation in BLOCKCHAIN_ALLOWED and operation == "blockchain_create":
+    if operation in _blockchain_allowed_operations() and operation == "blockchain_create":
         if not verify_node_memory_requirement(reported_memory_gb):
             raise PermissionError(
                 f"NodeUser console must meet {NODE_MIN_MEMORY_GB}GB memory requirement"

@@ -8,26 +8,30 @@ recorder protocol:
 
 from __future__ import annotations
 
-import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from _common import utc_now
+from operations_secrets import (
+    resolve_history_dir_name,
+    resolve_lucid_user_program_dir,
+    resolve_recording_format,
+    resolve_session_id_length,
+)
 from session import validate_session_id
 
-DEFAULT_LUCID_PROGRAM_DIR = Path(
-    os.environ.get("LUCID_PROGRAM_DIR", os.environ.get("LUCID_TOPS_ROOT", "/mnt/myssd/LucidTops"))
+HISTORY_DIR_NAME = resolve_history_dir_name()
+MP4_EXTENSION = f".{resolve_recording_format()}"
+SESSION_ID_FILENAME_PATTERN = re.compile(
+    rf"^[0-9a-z]{{{resolve_session_id_length()}}}_[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}{re.escape(MP4_EXTENSION)}$"
 )
-HISTORY_DIR_NAME = "History"
-MP4_EXTENSION = ".mp4"
-SESSION_ID_FILENAME_PATTERN = re.compile(r"^[0-9a-z]{10}_[0-9]{4}-[0-9]{2}-[0-9]{2}\.mp4$")
 
 
 def history_directory(*, user_id: str | None = None) -> Path:
     """Resolve the local History folder for a UserID console."""
-    base = Path(os.environ.get("LUCID_USER_PROGRAM_DIR", DEFAULT_LUCID_PROGRAM_DIR))
+    base = resolve_lucid_user_program_dir()
     if user_id:
         return base / user_id / HISTORY_DIR_NAME
     return base / HISTORY_DIR_NAME
@@ -55,7 +59,7 @@ def start_recording(*, session_id: str, user_id: str) -> dict[str, Any]:
     return {
         "sessionID": session_id.strip(),
         "userID": user_id,
-        "format": "mp4",
+        "format": resolve_recording_format(),
         "path": str(path.as_posix()),
         "status": "recording_registered",
         "timestamp": utc_now(),
@@ -71,7 +75,7 @@ def finalize_recording(*, session_id: str, user_id: str, content: bytes) -> dict
     return {
         "sessionID": session_id.strip(),
         "userID": user_id,
-        "format": "mp4",
+        "format": resolve_recording_format(),
         "path": str(path.as_posix()),
         "size_bytes": len(content),
         "status": "saved",

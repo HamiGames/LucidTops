@@ -20,10 +20,9 @@ from config import (
     MASTER_SERVER_TOR_ONLY,
     NODEUSER_ONION,
     TOR_CONTROL_PORT,
-    TOR_HIDDEN_SERVICE_DIRS,
+    TOR_HOST,
     TOR_SOCKS_HOST,
     TOR_SOCKS_PORT,
-    TOR_HOST,
     get_api_public_base_url,
     get_gui_public_base_url,
     get_master_db,
@@ -34,6 +33,7 @@ from config import (
     utc_now,
 )
 from handshake import (
+    get_allowed_ongoing_sources,
     validate_api_key,
     validate_api_key_format,
     validate_handshake_source,
@@ -56,23 +56,8 @@ CONNECTION_REQUIRED_FIELDS: tuple[str, ...] = (
     "onion_address",
 )
 
-ONGOING_SOURCES = frozenset(
-    {
-        "register.js",
-        "node-registration.js",
-        "login.js",
-        "tier-select.js",
-        "connect-handshake.js",
-        "find-peer.js",
-        "find-Peer.js",
-        "home_page.js",
-        "dashboard.js",
-        "settings.js",
-        "LucidLedger.js",
-        "LucidMarket.js",
-        "RemoteView.js",
-    }
-)
+def get_ongoing_connection_sources() -> frozenset[str]:
+    return get_allowed_ongoing_sources()
 
 ENTITY_HIDDEN_SERVICE_KEY: dict[str, str] = {
     "user": "frontend",
@@ -204,7 +189,7 @@ def validate_connection_source(source: str, connection_type: ConnectionType) -> 
     normalized = _normalize_source(source)
     if connection_type == "initial":
         return bool(normalized)
-    if normalized not in ONGOING_SOURCES:
+    if normalized not in get_ongoing_connection_sources():
         return False
     return validate_web_page_link(normalized)  # pyright: ignore[reportUndefinedVariable]
 

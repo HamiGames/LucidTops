@@ -45,6 +45,7 @@ import copy
 from typing import Any
 
 from _common import SESSION_RECORDS_COLLECTION, get_master_db, utc_now, with_mongo
+from operations_secrets import resolve_session_control_javascript_source
 
 SESSION_CONTROL_SETTINGS: dict[str, bool] = {
     "mouse_control": False,
@@ -111,7 +112,7 @@ def load_session_control(
     return {
         "sessionID": session_id.strip(),
         "hostUserID": host_user_id,
-        "source": "frontend/settings.js",
+        "source": resolve_session_control_javascript_source(),
         "immutable": True,
         "controls": settings,
     }
