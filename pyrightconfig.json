@@ -1,10 +1,10 @@
 {
-  "include": ["backend", "operations", "sessions", "blockchain", "test"],
-  "extraPaths": ["backend", "operations", "sessions"],
+  "include": ["backend", "operations", "sessions", "blockchain", "test", "proxy"],
+  "extraPaths": ["backend", "operations", "sessions", "proxy"],
   "executionEnvironments": [
     {
       "root": "backend",
-      "extraPaths": ["..", "../operations", "../sessions"]
+      "extraPaths": ["..", "../operations", "../sessions", "../proxy"]
     },
     {
       "root": "operations",
@@ -13,6 +13,10 @@
     {
       "root": "sessions",
       "extraPaths": ["..", "../backend"]
+    },
+    {
+      "root": "proxy",
+      "extraPaths": ["."]
     }
   ]
 }

@@ -13,6 +13,10 @@ MasterDBSchema:
 
 from __future__ import annotations
 
+from typing import Any
+
+from config import get_config_int, get_config_list, get_config_value
+
 MASTER_CREDENTIALS_COLLECTION = "master_credentials"
 USERS_COLLECTION = "users"
 NODE_USERS_COLLECTION = "node_users"
@@ -118,8 +122,13 @@ MASTER_CLASS_USER_SCHEMA_FIELDS: tuple[str, ...] = (
 
 # --- SessionCore.py (sessions/SessionCore.py) ---
 
-SESSION_ID_LENGTH = 10
-SESSION_STATUSES: tuple[str, ...] = ("pending", "active", "ended", "compressed")
+def resolve_session_id_length() -> int:
+    return get_config_int("SESSION_ID_LENGTH")
+
+
+def resolve_session_statuses() -> tuple[str, ...]:
+    return tuple(sorted(get_config_list("SESSION_STATUSES")))
+
 
 SESSION_RECORDS_FIELDS: tuple[str, ...] = (
     "sessionID",
@@ -192,14 +201,25 @@ BLOCKCHAIN_BLOCKS_FIELDS: tuple[str, ...] = (
 
 # --- tally.py (blockchain/tally.py) + sessions/compress.py + CreateBlock.py ---
 
-TALLY_ENTITY_TYPES: tuple[str, ...] = (
-    "node_user",
-    "master_server",
-    "admin_user",
-    "master_class_user",
-)
+def resolve_tally_entity_types() -> tuple[str, ...]:
+    return tuple(sorted(get_config_list("TALLY_ENTITY_TYPES")))
 
-TALLY_SYNC_INTERVAL_SECONDS = 30
+
+def resolve_tally_sync_interval_seconds() -> int:
+    return get_config_int("TALLY_SYNC_INTERVAL_SECONDS")
+
+
+def __getattr__(name: str) -> Any:
+    if name == "SESSION_ID_LENGTH":
+        return resolve_session_id_length()
+    if name == "SESSION_STATUSES":
+        return resolve_session_statuses()
+    if name == "TALLY_ENTITY_TYPES":
+        return resolve_tally_entity_types()
+    if name == "TALLY_SYNC_INTERVAL_SECONDS":
+        return resolve_tally_sync_interval_seconds()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 TALLY_RECORDS_FIELDS: tuple[str, ...] = (
     "entity_type",
@@ -251,3 +271,8 @@ COLLECTION_SCHEMAS: dict[str, tuple[str, ...]] = {
 
 def schema_template(fields: tuple[str, ...]) -> dict[str, None]:
     return {field: None for field in fields}
+
+
+def resolve_collection_name(key: str) -> str:
+    """Resolve a master DB collection name from config when overridden."""
+    return get_config_value(key)

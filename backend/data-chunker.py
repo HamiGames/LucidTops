@@ -25,19 +25,34 @@ import hashlib
 import json
 from typing import Any
 
-from config import CHUNK_SIZE_BYTES
-
-HASH_ALGORITHM = "sha512"
+from config import CHUNK_SIZE_BYTES, get_config_value
 
 
-def _sha512_hex(data: bytes) -> str:
-    return hashlib.sha512(data).hexdigest()
+def resolve_hash_algorithm() -> str:
+    return get_config_value("SESSION_HASH_ALGORITHM")
+
+
+def resolve_previous_hash_field() -> str:
+    return get_config_value("LEDGER_PREVIOUS_HASH_FIELD")
+
+
+def __getattr__(name: str) -> Any:
+    if name == "HASH_ALGORITHM":
+        return resolve_hash_algorithm()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def _digest_hex(data: bytes, *, algorithm: str) -> str:
+    try:
+        return hashlib.new(algorithm, data).hexdigest()
+    except ValueError as exc:
+        raise RuntimeError(f"unsupported hash algorithm: {algorithm}") from exc
 
 
 def chunk_session_data(
     session_data: dict[str, Any] | bytes | str,
     *,
-    chunk_size: int = CHUNK_SIZE_BYTES,
+    chunk_size: int | None = None,
 ) -> dict[str, Any]:
     """Split session data into chunks and attach SHA-512 hashes for blockchain inclusion."""
     if isinstance(session_data, dict):
@@ -47,42 +62,45 @@ def chunk_session_data(
     else:
         payload = session_data
 
-    if chunk_size <= 0:
+    resolved_chunk_size = chunk_size if chunk_size is not None else CHUNK_SIZE_BYTES
+    if resolved_chunk_size <= 0:
         raise ValueError("chunk_size must be positive")
 
+    algorithm = resolve_hash_algorithm()
     chunks: list[dict[str, Any]] = []
-    for index, offset in enumerate(range(0, len(payload), chunk_size)):
-        piece = payload[offset : offset + chunk_size]
-        chunk_hash = _sha512_hex(piece)
+    for index, offset in enumerate(range(0, len(payload), resolved_chunk_size)):
+        piece = payload[offset : offset + resolved_chunk_size]
+        chunk_hash = _digest_hex(piece, algorithm=algorithm)
         chunks.append(
             {
                 "index": index,
                 "offset": offset,
                 "size": len(piece),
                 "hash": chunk_hash,
-                "hash_algorithm": HASH_ALGORITHM,
+                "hash_algorithm": algorithm,
                 "data_hex": piece.hex(),
             }
         )
 
     merkle_input = "".join(chunk["hash"] for chunk in chunks).encode("utf-8")
-    aggregate_hash = _sha512_hex(merkle_input if chunks else payload)
+    aggregate_hash = _digest_hex(merkle_input if chunks else payload, algorithm=algorithm)
 
     return {
-        "hash_algorithm": HASH_ALGORITHM,
-        "chunk_size": chunk_size,
+        "hash_algorithm": algorithm,
+        "chunk_size": resolved_chunk_size,
         "total_size": len(payload),
         "chunk_count": len(chunks),
         "aggregate_hash": aggregate_hash,
-        "previous_hash_field": "ledger_last_hash",
+        "previous_hash_field": resolve_previous_hash_field(),
         "chunks": chunks,
     }
 
 
 def verify_chunk_hashes(chunked: dict[str, Any]) -> bool:
     """Verify all chunk SHA-512 hashes in a chunked session payload."""
+    algorithm = str(chunked.get("hash_algorithm") or resolve_hash_algorithm())
     for chunk in chunked.get("chunks", []):
         data = bytes.fromhex(chunk["data_hex"])
-        if _sha512_hex(data) != chunk["hash"]:
+        if _digest_hex(data, algorithm=algorithm) != chunk["hash"]:
             return False
     return True

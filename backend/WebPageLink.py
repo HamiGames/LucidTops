@@ -1,11 +1,33 @@
 """The link between the javascript frontend and the python backend via Tor *.onion routes.
 
 All API routes resolve against the master server onion base URL when configured.
+
+functions:
+- binds the javascript frontend as a self hosted website on the Tor network (@*.onion)
+- allows the connetion to master server for initial handshake and connection validation
+- is accessed via a user container (User container [DockerDNS])
+
+operational requirements:
+- uses nginx reverse proxy system
+- uses DockerDNS for network communication
+- uses Tor Hidden Service and Docker Network for network communications as a fallback
+- uses MongoDB 7.0.0 or higher for database storage
+- requires registration with the MasterServer (uvicorn server and FastAPI system) to be operational
+- stabalizes connection to the MasterServer (uvicorn server and FastAPI system)
+- ensures the connection is secure and encrypted
+- requrests access to configuration files (backend.secrets) with a Digital Signature + registration request file.
+
 """
 
 from __future__ import annotations
 
-from config import API_PREFIX, GUI_PREFIX, format_tor_onion_service, resolve_master_server_onion
+from config import (
+    API_PREFIX,
+    GUI_PREFIX,
+    format_tor_onion_service,
+    get_config_value,
+    resolve_master_server_onion,
+)
 
 FRONTEND_TO_API_ROUTE: dict[str, str] = {
     "register.js": "/register",
@@ -82,6 +104,10 @@ API_ROUTE_TO_FRONTEND.update(
 )
 
 
+def _frontend_source_prefix() -> str:
+    return get_config_value("FRONTEND_SOURCE_PREFIX").strip().strip("/")
+
+
 def _normalize_source(source: str) -> str:
     normalized = source.strip().replace("\\", "/")
     if "/" in normalized:
@@ -90,7 +116,7 @@ def _normalize_source(source: str) -> str:
 
 
 def _frontend_path(javascript: str) -> str:
-    return f"frontend/{_normalize_source(javascript)}"
+    return f"{_frontend_source_prefix()}/{_normalize_source(javascript)}"
 
 
 def api_path_for_route(route: str) -> str:
@@ -185,6 +211,8 @@ def resolve_web_page_link(source: str) -> dict[str, str | None]:
     normalized = _normalize_source(source)
     api_path = resolve_api_path(normalized)
     gui_path = resolve_gui_path(normalized)
+    network = get_config_value("CONNECTION_NETWORK")
+    tor_only = get_config_value("CONNECTION_TOR_ONLY")
     return {
         "source": normalized,
         "frontend": _frontend_path(normalized),
@@ -195,8 +223,8 @@ def resolve_web_page_link(source: str) -> dict[str, str | None]:
         "tor_gui_route": resolve_tor_gui_route(normalized),
         "api_route": resolve_tor_api_route(normalized),
         "gui_route": resolve_tor_gui_route(normalized),
-        "network": "tor",
-        "tor_only": "true",
+        "network": network,
+        "tor_only": tor_only,
     }
 
 

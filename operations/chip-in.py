@@ -30,6 +30,13 @@ needs to include:
 - potential API routes to be created for the chip-in system
 - create a script to handle the chip-in system
 
+RULES of CODE CREATION:
+- No hardcoded values, all values are created at time of operation.
+- No placeholder values, all values are created at time of operation.
+- No sensitive data, all data is stored in the secrets file.
+- NO pull from GIT repository, all values are created at time of operation.
+- DO NOT EDIT THE COMMENTS, THEY ARE FOR DOCUMENTATION ONLY.
+
 """
 
 from __future__ import annotations
@@ -46,22 +53,29 @@ from _common import (
     BaseModel,
     Field,
     LUCID_LEDGER_COLLECTION,
+    OperatorAuthPayload,
     get_master_db,
     get_mongo_client,
     handle_operations_error,
+    operator_kwargs_from_payload,
+    require_operations_operator,
     tor_envelope,
     utc_now,
-    verify_id_token,
     with_mongo,
 )
+from UserHandler import verify_user_credentials
 from config import LUCID_TOPS_ROOT
 from operations_secrets import (
     resolve_chip_in_collection,
+    resolve_chip_in_connected_status,
     resolve_chip_in_crossover_collection,
     resolve_chip_in_crossover_worlds,
+    resolve_chip_in_initial_status,
     resolve_chip_in_statuses,
+    resolve_chip_in_world_aliases,
     resolve_operations_api_prefix,
     resolve_payments_secrets_file,
+    resolve_payments_wallet_address_keys,
 )
 
 CHIP_IN_COLLECTION = resolve_chip_in_collection()
@@ -94,13 +108,7 @@ def _normalize_world(world: str) -> str:
     normalized = world.strip().lower().replace(" ", "_").replace("-", "_")
     if normalized in CROSSOVER_WORLDS:
         return normalized
-    aliases = {
-        "crypto": "crypto_wallet",
-        "wallet": "crypto_wallet",
-        "social": "social_media",
-        "food": "food_and_drink",
-        "customer_service_world": "customer_service",
-    }
+    aliases = resolve_chip_in_world_aliases()
     if normalized in aliases:
         return aliases[normalized]
     raise ValueError(f"Unsupported crossover world: {world}")
@@ -108,6 +116,7 @@ def _normalize_world(world: str) -> str:
 
 def load_payments_wallet_address() -> str | None:
     """Load wallet address from payments.secrets (Connect_wallet.py alignment)."""
+    wallet_keys = resolve_payments_wallet_address_keys()
     if PAYMENTS_SECRETS_FILE.exists():
         for line in PAYMENTS_SECRETS_FILE.read_text(encoding="utf-8").splitlines():
             stripped = line.strip()
@@ -115,12 +124,7 @@ def load_payments_wallet_address() -> str | None:
                 continue
             if "=" in stripped:
                 key, value = stripped.split("=", 1)
-                if key.strip().upper() in {
-                    "WALLET_ADDRESS",
-                    "CRYPTO_WALLET_ADDRESS",
-                    "TRON_WALLET_ADDRESS",
-                    "XRP_WALLET_ADDRESS",
-                }:
+                if key.strip().upper() in wallet_keys:
                     address = value.strip()
                     if address:
                         return address
@@ -138,12 +142,18 @@ def create_chip_in(
     crossover_world: str,
     feature_tags: list[str] | None = None,
     client: Any,
+    operator_payload: Any | None = None,
 ) -> dict[str, Any]:
-    if not verify_id_token(user_id=user_id, id_token=id_token, client=client):
-        raise PermissionError("User authentication failed")
+    if operator_payload is not None:
+        require_operations_operator(
+            client=client,
+            **operator_kwargs_from_payload(operator_payload),
+        )
+    verify_user_credentials(user_id=user_id, token_id=id_token, client=client)
     world = _normalize_world(crossover_world)
     chip_in_id = _generate_chip_in_id()
     now = utc_now()
+    initial_status = resolve_chip_in_initial_status()
     record = {
         "chipInID": chip_in_id,
         "UserID": user_id,
@@ -151,7 +161,7 @@ def create_chip_in(
         "description": description.strip(),
         "crossover_world": world,
         "feature_tags": feature_tags or [],
-        "status": "draft",
+        "status": initial_status,
         "external_address": None,
         "created_at": now,
         "updated_at": now,
@@ -161,7 +171,7 @@ def create_chip_in(
         "chipInID": chip_in_id,
         "UserID": user_id,
         "crossover_world": world,
-        "status": "draft",
+        "status": initial_status,
     }
 
 
@@ -183,9 +193,14 @@ def connect_chip_in(
     id_token: str,
     external_address: str,
     client: Any,
+    operator_payload: Any | None = None,
 ) -> dict[str, Any]:
-    if not verify_id_token(user_id=user_id, id_token=id_token, client=client):
-        raise PermissionError("User authentication failed")
+    if operator_payload is not None:
+        require_operations_operator(
+            client=client,
+            **operator_kwargs_from_payload(operator_payload),
+        )
+    verify_user_credentials(user_id=user_id, token_id=id_token, client=client)
     if not external_address or not external_address.strip():
         raise ValueError("external_address is required")
     record = get_master_db(client)[CHIP_IN_COLLECTION].find_one(
@@ -197,12 +212,13 @@ def connect_chip_in(
         raise PermissionError("Only the chip-in owner may connect an address")
     now = utc_now()
     address = external_address.strip()
+    connected_status = resolve_chip_in_connected_status()
     get_master_db(client)[CHIP_IN_COLLECTION].update_one(
         {"chipInID": chip_in_id.strip()},
         {
             "$set": {
                 "external_address": address,
-                "status": "connected",
+                "status": connected_status,
                 "updated_at": now,
             }
         },
@@ -221,7 +237,11 @@ def connect_chip_in(
         {"$set": crossover},
         upsert=True,
     )
-    return {"chipInID": chip_in_id.strip(), "status": "connected", "external_address": address}
+    return {
+        "chipInID": chip_in_id.strip(),
+        "status": connected_status,
+        "external_address": address,
+    }
 
 
 @with_mongo
@@ -232,9 +252,14 @@ def register_crossover_address(
     crossover_world: str,
     external_address: str,
     client: Any,
+    operator_payload: Any | None = None,
 ) -> dict[str, Any]:
-    if not verify_id_token(user_id=user_id, id_token=id_token, client=client):
-        raise PermissionError("User authentication failed")
+    if operator_payload is not None:
+        require_operations_operator(
+            client=client,
+            **operator_kwargs_from_payload(operator_payload),
+        )
+    verify_user_credentials(user_id=user_id, token_id=id_token, client=client)
     world = _normalize_world(crossover_world)
     now = utc_now()
     record = {
@@ -304,7 +329,7 @@ def record_chip_in_event(
 @with_mongo
 def transfer_chip_in_to_ledger(*, chip_in_id: str, client: Any) -> dict[str, Any]:
     record = find_chip_in(chip_in_id=chip_in_id, client=client)
-    if record.get("status") != "connected":
+    if record.get("status") != resolve_chip_in_connected_status():
         raise ValueError("Chip-in must be connected before ledger transfer")
     payload = {
         "chipInID": chip_in_id.strip(),
@@ -409,9 +434,9 @@ def handle_chip_in(
 
 if BaseModel is not object:
 
-    class ChipInAuthPayload(BaseModel):
+    class ChipInAuthPayload(OperatorAuthPayload):
         user_id: str = Field(..., alias="UserID")
-        id_token: str = Field(..., alias="IDToken")
+        id_token: str = Field(..., alias="UserTokenID")
 
         model_config = {"populate_by_name": True}
 
@@ -433,7 +458,7 @@ if BaseModel is not object:
         crossover_world: str = Field(..., min_length=1)
         external_address: str = Field(..., min_length=1)
 
-    class ChipInFindPayload(BaseModel):
+    class ChipInFindPayload(OperatorAuthPayload):
         chip_in_id: str = Field(..., alias="chipInID", min_length=1)
 
         model_config = {"populate_by_name": True}
@@ -441,51 +466,72 @@ if BaseModel is not object:
 
 def _route_handler(route: str, payload: Any) -> dict[str, Any]:
     try:
-        if route == "/chip-in-create":
-            result = create_chip_in(
-                user_id=payload.user_id,
-                id_token=payload.id_token,
-                title=payload.title,
-                description=payload.description,
-                crossover_world=payload.crossover_world,
-                feature_tags=payload.feature_tags,
-            )
-        elif route == "/chip-in-find":
-            result = find_chip_in(chip_in_id=payload.chip_in_id)
-        elif route == "/chip-in-connect":
-            result = connect_chip_in(
-                chip_in_id=payload.chip_in_id,
-                user_id=payload.user_id,
-                id_token=payload.id_token,
-                external_address=payload.external_address,
-            )
-        elif route == "/chip-in-register":
-            result = register_crossover_address(
-                user_id=payload.user_id,
-                id_token=payload.id_token,
-                crossover_world=payload.crossover_world,
-                external_address=payload.external_address,
-            )
-        elif route == "/chip-in-list":
-            result = list_crossover_worlds()
-        elif route == "/chip-in-status":
-            result = chip_in_status(chip_in_id=payload.chip_in_id)
-        elif route == "/chip-in-record":
-            result = record_chip_in_event(
-                chip_in_id=payload.chip_in_id,
-                user_id=payload.user_id,
-                action="chip-in-record",
-            )
-        elif route == "/chip-in-transfer":
-            result = transfer_chip_in_to_ledger(chip_in_id=payload.chip_in_id)
-        elif route == "/chip-in-control":
-            result = get_chip_in_control(
-                chip_in_id=payload.chip_in_id,
-                user_id=payload.user_id,
-            )
-        else:
-            raise ValueError(f"Unsupported chip-in route: {route}")
-        return tor_envelope(route=route, subsystem="chip-in-system", payload=result)
+        client = get_mongo_client()
+        if client is None:
+            raise RuntimeError("Master server database is unavailable")
+        try:
+            if payload is not None and route != "/chip-in-list":
+                require_operations_operator(
+                    client=client,
+                    **operator_kwargs_from_payload(payload),
+                )
+            if route == "/chip-in-create":
+                result = create_chip_in(
+                    user_id=payload.user_id,
+                    id_token=payload.id_token,
+                    title=payload.title,
+                    description=payload.description,
+                    crossover_world=payload.crossover_world,
+                    feature_tags=payload.feature_tags,
+                    operator_payload=payload,
+                    client=client,
+                )
+            elif route == "/chip-in-find":
+                result = find_chip_in(chip_in_id=payload.chip_in_id, client=client)
+            elif route == "/chip-in-connect":
+                result = connect_chip_in(
+                    chip_in_id=payload.chip_in_id,
+                    user_id=payload.user_id,
+                    id_token=payload.id_token,
+                    external_address=payload.external_address,
+                    operator_payload=payload,
+                    client=client,
+                )
+            elif route == "/chip-in-register":
+                result = register_crossover_address(
+                    user_id=payload.user_id,
+                    id_token=payload.id_token,
+                    crossover_world=payload.crossover_world,
+                    external_address=payload.external_address,
+                    operator_payload=payload,
+                    client=client,
+                )
+            elif route == "/chip-in-list":
+                result = list_crossover_worlds()
+            elif route == "/chip-in-status":
+                result = chip_in_status(chip_in_id=payload.chip_in_id, client=client)
+            elif route == "/chip-in-record":
+                result = record_chip_in_event(
+                    chip_in_id=payload.chip_in_id,
+                    user_id=payload.user_id,
+                    action="chip-in-record",
+                    client=client,
+                )
+            elif route == "/chip-in-transfer":
+                result = transfer_chip_in_to_ledger(
+                    chip_in_id=payload.chip_in_id, client=client
+                )
+            elif route == "/chip-in-control":
+                result = get_chip_in_control(
+                    chip_in_id=payload.chip_in_id,
+                    user_id=payload.user_id,
+                    client=client,
+                )
+            else:
+                raise ValueError(f"Unsupported chip-in route: {route}")
+            return tor_envelope(route=route, subsystem="chip-in-system", payload=result)
+        finally:
+            client.close()
     except Exception as exc:
         handle_operations_error(exc)
         raise

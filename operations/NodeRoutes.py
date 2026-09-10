@@ -26,35 +26,47 @@ NodeRoutes:
 - /node-Blockchain-connect: connect to a block in the Blockchain system
 - /node-Blockchain-disconnect: disconnect from a block in the Blockchain system
 
+RULES of CODE CREATION:
+- No hardcoded values, all values are created at time of operation.
+- No placeholder values, all values are created at time of operation.
+- No sensitive data, all data is stored in the secrets file.
+- NO pull from GIT repository, all values are created at time of operation.
+- DO NOT EDIT THE COMMENTS, THEY ARE FOR DOCUMENTATION ONLY.
+
 
 this API routes file is hosted on the MasterServer container
 the API routes are used to access the lucid projects NodeUser system
 the API routes are used to access the lucid projects LucidLedger system
+
 """
 
 from __future__ import annotations
 
-import secrets
 from typing import Any
 
 from _common import (
     APIRouter,
-    BaseModel,
     BLOCKCHAIN_COLLECTION,
     Field,
     LUCID_LEDGER_COLLECTION,
+    OperatorAuthPayload,
+    BaseModel,
     get_master_db,
     get_mongo_client,
     handle_operations_error,
+    operator_kwargs_from_payload,
+    require_operations_operator,
     tor_envelope,
     utc_now,
-    verify_id_token,
 )
-from Backend.NodeDbSchema import NODE_HOSTED_DB_COLLECTION, NODE_SEED_COLLECTION  # pyright: ignore[reportMissingImports]
+from NodeDbSchema import NODE_HOSTED_DB_COLLECTION, NODE_SEED_COLLECTION
 from operations_secrets import (
+    node_ledger_db_name_for_id,
+    resolve_node_ledger_last_block_field,
     resolve_operations_api_prefix,
     resolve_operations_ledger_read_limit,
 )
+from session_to_block import process_complete_session_to_block
 
 NODE_ROUTES: tuple[str, ...] = (
     "/node-create",
@@ -92,19 +104,17 @@ BLOCKCHAIN_NODE_ROUTES = tuple(route for route in NODE_ROUTES if "Blockchain" in
 
 if BaseModel is not object:
 
-    class NodeAuthPayload(BaseModel):
-        node_user_id: str = Field(..., alias="NodeUserID")
-        id_token: str = Field(..., alias="IDToken")
+    class NodeAuthPayload(OperatorAuthPayload):
+        pass
 
-        model_config = {"populate_by_name": True}
-
-    class NodeCreatePayload(NodeAuthPayload):
+    class NodeCreatePayload(OperatorAuthPayload):
         user_id: str = Field(..., alias="UserID")
 
         model_config = {"populate_by_name": True}
 
-    class NodeLedgerPayload(NodeAuthPayload):
+    class NodeLedgerPayload(OperatorAuthPayload):
         block_id: str | None = Field(default=None, alias="blockID")
+        session_id: str | None = Field(default=None, alias="sessionID")
         payload: dict[str, Any] | None = None
 
         model_config = {"populate_by_name": True}
@@ -113,19 +123,16 @@ if BaseModel is not object:
 def _ledger_action(
     *,
     route: str,
-    node_user_id: str,
-    id_token: str,
-    block_id: str | None = None,
-    payload: dict[str, Any] | None = None,
+    payload: Any,
 ) -> dict[str, Any]:
     client = get_mongo_client()
     if client is None:
         raise RuntimeError("Master server database is unavailable")
     try:
-        if not verify_id_token(
-            node_user_id=node_user_id, id_token=id_token, client=client
-        ):
-            raise PermissionError("NodeUser authentication failed")
+        operator = require_operations_operator(
+            client=client,
+            **operator_kwargs_from_payload(payload),
+        )
         db = get_master_db(client)
         collection = (
             LUCID_LEDGER_COLLECTION
@@ -133,42 +140,71 @@ def _ledger_action(
             else BLOCKCHAIN_COLLECTION
         )
         now = utc_now()
+        block_id = getattr(payload, "block_id", None)
+        session_id = getattr(payload, "session_id", None)
+
+        if route.endswith("-create"):
+            if not session_id:
+                raise ValueError(
+                    "sessionID is required — New_BlockID is created only from "
+                    "SessionID_status complete session-data chunks"
+                )
+            return process_complete_session_to_block(
+                session_id=session_id,
+                client=client,
+                **operator_kwargs_from_payload(payload),
+            )
+
         if route.endswith("-read"):
             records = list(
                 db[collection].find({}, {"_id": 0}).limit(resolve_operations_ledger_read_limit())
             )
-            return {"records": records, "count": len(records)}
-        if route.endswith("-create"):
-            block = {
-                "blockID": block_id or secrets.token_hex(8),
-                "NodeUserID": node_user_id,
-                "payload": payload or {},
-                "created_at": now,
+            node_ledger = client[node_ledger_db_name_for_id(operator["operator_id"])]
+            last_field = resolve_node_ledger_last_block_field()
+            meta = node_ledger["ledger_meta"].find_one({"_meta": True}, {"_id": 0}) or {}
+            return {
+                "records": records,
+                "count": len(records),
+                "operator_id": operator["operator_id"],
+                "id_type": operator["id_type"],
+                last_field: meta.get(last_field) or meta.get("LastBlockID"),
             }
-            db[collection].insert_one(block)
-            block.pop("_id", None)
-            return block
+
         if route.endswith("-find") and block_id:
-            record = db[collection].find_one({"blockID": block_id}, {"_id": 0})
+            record = db[collection].find_one({"BlockID": block_id}, {"_id": 0})
+            if not record:
+                record = db[collection].find_one({"blockID": block_id}, {"_id": 0})
             if not record:
                 raise LookupError("Block not found")
             return record
+
         if route.endswith("-write") or route.endswith("-update"):
             if not block_id:
                 raise ValueError("blockID is required")
             db[collection].update_one(
-                {"blockID": block_id},
-                {"$set": {"payload": payload or {}, "updated_at": now}},
+                {"$or": [{"BlockID": block_id}, {"blockID": block_id}]},
+                {
+                    "$set": {
+                        "payload": getattr(payload, "payload", None) or {},
+                        "updated_at": now,
+                        "creator_id": {operator["id_type"]: operator["operator_id"]},
+                    }
+                },
                 upsert=True,
             )
-            return {"blockID": block_id, "status": "updated"}
+            return {"BlockID": block_id, "status": "updated"}
+
         if route.endswith("-delete") and block_id:
-            db[collection].delete_one({"blockID": block_id})
-            return {"blockID": block_id, "status": "deleted"}
+            db[collection].delete_one(
+                {"$or": [{"BlockID": block_id}, {"blockID": block_id}]}
+            )
+            return {"BlockID": block_id, "status": "deleted"}
+
         return {
-            "NodeUserID": node_user_id,
+            "operator_id": operator["operator_id"],
+            "id_type": operator["id_type"],
             "action": route,
-            "blockID": block_id,
+            "BlockID": block_id,
             "status": "ok",
             "timestamp": now,
         }
@@ -178,64 +214,54 @@ def _ledger_action(
 
 def _node_handler(route: str, payload: Any) -> dict[str, Any]:
     if "LucidLedger" in route or "Blockchain" in route:
-        result = _ledger_action(
-            route=route,
-            node_user_id=payload.node_user_id,
-            id_token=payload.id_token,
-            block_id=getattr(payload, "block_id", None),
-            payload=getattr(payload, "payload", None),
-        )
+        result = _ledger_action(route=route, payload=payload)
         return tor_envelope(route=route, subsystem="node-system", payload=result)
 
     client = get_mongo_client()
     if client is None:
         raise RuntimeError("Master server database is unavailable")
     try:
+        operator = require_operations_operator(
+            client=client,
+            **operator_kwargs_from_payload(payload),
+        )
         db = get_master_db(client)
         now = utc_now()
         if route == "/node-create":
-            if not verify_id_token(
-                node_user_id=payload.node_user_id,
-                id_token=payload.id_token,
-                client=client,
-            ):
-                raise PermissionError("NodeUser authentication failed")
-            node_database_id = secrets.token_hex(16)
+            node_database_id = operator["operator_id"]
             record = {
-                "NodeUserID": payload.node_user_id,
-                "UserID": payload.user_id,
-                "IDToken": payload.id_token,
+                "NodeID": operator["operator_id"],
+                "id_type": operator["id_type"],
+                "UserID": getattr(payload, "user_id", None),
+                "TokenID": operator["TokenID"],
                 "NodeDatabaseID": node_database_id,
+                "email": operator["email"],
+                "mac": operator["mac"],
                 "created_at": now,
                 "updated_at": now,
             }
             db[NODE_SEED_COLLECTION].update_one(
-                {"NodeUserID": payload.node_user_id},
+                {"NodeID": operator["operator_id"]},
                 {"$set": record},
                 upsert=True,
             )
             db[NODE_HOSTED_DB_COLLECTION].update_one(
-                {"NodeUserID": payload.node_user_id},
+                {"NodeID": operator["operator_id"]},
                 {"$set": record},
                 upsert=True,
             )
             result = {"status": "created", **record}
         elif route == "/node-find":
-            record = db.node_users.find_one(
-                {"NodeUserID": payload.node_user_id}, {"_id": 0}
+            record = db[NODE_SEED_COLLECTION].find_one(
+                {"NodeID": operator["operator_id"]}, {"_id": 0}
             )
             if not record:
                 raise LookupError("Node not found")
             result = record
         else:
-            if not verify_id_token(
-                node_user_id=payload.node_user_id,
-                id_token=payload.id_token,
-                client=client,
-            ):
-                raise PermissionError("NodeUser authentication failed")
             result = {
-                "NodeUserID": payload.node_user_id,
+                "NodeID": operator["operator_id"],
+                "id_type": operator["id_type"],
                 "action": route.lstrip("/"),
                 "status": "ok",
                 "timestamp": now,

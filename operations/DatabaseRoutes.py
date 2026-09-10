@@ -21,6 +21,13 @@ DatabaseRoutes:
 - /database-seed-delete: delete a file from a NodeUserID hosted database (admin restricted access only)
 - /database-seed-rename: rename a file in a NodeUserID hosted database (admin restricted access only)
 - /database-seed-sync: sync all NodeUserID hosted databases to each other (required information only)
+RULES of CODE CREATION:
+- No hardcoded values, all values are created at time of operation.
+- No placeholder values, all values are created at time of operation.
+- No sensitive data, all data is stored in the secrets file.
+- NO pull from GIT repository, all values are created at time of operation.
+- DO NOT EDIT THE COMMENTS, THEY ARE FOR DOCUMENTATION ONLY.
+
 """
 
 from __future__ import annotations
@@ -33,14 +40,16 @@ from _common import (
     APIRouter,
     BaseModel,
     Field,
+    OperatorAuthPayload,
     get_master_db,
     get_mongo_client,
     handle_operations_error,
-    require_admin_access,
-    require_master_access,
+    operator_kwargs_from_payload,
+    require_admin_operator,
+    require_master_server_operator,
+    require_operations_operator,
     tor_envelope,
     utc_now,
-    verify_id_token,
 )
 from NodeDbSchema import NODE_HOSTED_DB_COLLECTION, NODE_SEED_COLLECTION
 from operations_secrets import (
@@ -87,21 +96,20 @@ ADMIN_SEED_ROUTES = frozenset(
     }
 )
 
-NODE_SEED_FILES_COLLECTION = resolve_node_seed_files_collection()
+
+def _node_seed_files_collection() -> str:
+    return resolve_node_seed_files_collection()
 
 
 if BaseModel is not object:
 
-    class MasterDatabasePayload(BaseModel):
-        id_token: str = Field(..., alias="IDToken")
+    class MasterDatabasePayload(OperatorAuthPayload):
         database_id: str | None = Field(default=None, alias="databaseID")
         payload: dict[str, Any] | None = None
 
         model_config = {"populate_by_name": True}
 
-    class SeedDatabasePayload(BaseModel):
-        node_user_id: str = Field(..., alias="NodeUserID")
-        id_token: str = Field(..., alias="IDToken")
+    class SeedDatabasePayload(OperatorAuthPayload):
         database_id: str | None = Field(default=None, alias="NodeDatabaseID")
         filename: str | None = None
         new_filename: str | None = None
@@ -117,9 +125,10 @@ def _database_handler(route: str, payload: Any) -> dict[str, Any]:
     try:
         db = get_master_db(client)
         now = utc_now()
+        kwargs = operator_kwargs_from_payload(payload)
 
         if route in MASTER_DATABASE_ROUTES:
-            require_master_access(id_token=payload.id_token, client=client)
+            operator = require_master_server_operator(client=client, **kwargs)
             if route == "/database-create":
                 database_id = secrets.token_hex(16)
                 record = {
@@ -127,6 +136,7 @@ def _database_handler(route: str, payload: Any) -> dict[str, Any]:
                     "status": "active",
                     "created_at": now,
                     "updated_at": now,
+                    "creator_id": {operator["id_type"]: operator["operator_id"]},
                 }
                 db.master_credentials.update_one(
                     {"databaseID": database_id},
@@ -154,62 +164,61 @@ def _database_handler(route: str, payload: Any) -> dict[str, Any]:
                     "databaseID": payload.database_id,
                     "action": route.lstrip("/"),
                     "status": "ok",
+                    "operator_id": operator["operator_id"],
                     "timestamp": now,
                 }
         else:
             if route in ADMIN_SEED_ROUTES:
-                require_admin_access(id_token=payload.id_token, client=client)
-            elif not verify_id_token(
-                node_user_id=payload.node_user_id,
-                id_token=payload.id_token,
-                client=client,
-            ):
-                raise PermissionError("NodeUser authentication failed")
+                operator = require_admin_operator(client=client, **kwargs)
+            else:
+                operator = require_operations_operator(client=client, **kwargs)
 
+            node_key = operator["operator_id"]
             if route == "/database-seed":
                 node_database_id = secrets.token_hex(16)
                 record = {
-                    "NodeUserID": payload.node_user_id,
+                    "NodeID": node_key,
+                    "id_type": operator["id_type"],
                     "NodeDatabaseID": node_database_id,
-                    "IDToken": payload.id_token,
+                    "TokenID": operator["TokenID"],
                     "status": "seeded",
                     "created_at": now,
                     "updated_at": now,
                 }
                 db[NODE_SEED_COLLECTION].update_one(
-                    {"NodeUserID": payload.node_user_id},
+                    {"NodeID": node_key},
                     {"$set": record},
                     upsert=True,
                 )
                 db[NODE_HOSTED_DB_COLLECTION].update_one(
-                    {"NodeUserID": payload.node_user_id},
+                    {"NodeID": node_key},
                     {"$set": record},
                     upsert=True,
                 )
                 result = record
             elif route == "/database-seed-find":
-                query = {"NodeUserID": payload.node_user_id}
+                query: dict[str, Any] = {"NodeID": node_key}
                 if payload.database_id:
                     query["NodeDatabaseID"] = payload.database_id
                 record = db[NODE_SEED_COLLECTION].find_one(query, {"_id": 0})
                 if not record:
-                    raise LookupError("NodeUserID hosted database not found")
+                    raise LookupError("NodeID hosted database not found")
                 result = record
             elif route == "/database-seed-upload":
                 if not payload.filename or not payload.content_base64:
                     raise ValueError("filename and content_base64 are required")
                 content = base64.b64decode(payload.content_base64.encode("utf-8"))
                 file_record = {
-                    "NodeUserID": payload.node_user_id,
+                    "NodeID": node_key,
                     "NodeDatabaseID": payload.database_id,
                     "filename": payload.filename,
                     "size_bytes": len(content),
                     "content_base64": payload.content_base64,
                     "updated_at": now,
                 }
-                db[NODE_SEED_FILES_COLLECTION].update_one(
+                db[_node_seed_files_collection()].update_one(
                     {
-                        "NodeUserID": payload.node_user_id,
+                        "NodeID": node_key,
                         "filename": payload.filename,
                     },
                     {"$set": file_record},
@@ -223,9 +232,9 @@ def _database_handler(route: str, payload: Any) -> dict[str, Any]:
             elif route == "/database-seed-download":
                 if not payload.filename:
                     raise ValueError("filename is required")
-                record = db[NODE_SEED_FILES_COLLECTION].find_one(
+                record = db[_node_seed_files_collection()].find_one(
                     {
-                        "NodeUserID": payload.node_user_id,
+                        "NodeID": node_key,
                         "filename": payload.filename,
                     },
                     {"_id": 0},
@@ -236,9 +245,9 @@ def _database_handler(route: str, payload: Any) -> dict[str, Any]:
             elif route == "/database-seed-delete":
                 if not payload.filename:
                     raise ValueError("filename is required")
-                db[NODE_SEED_FILES_COLLECTION].delete_one(
+                db[_node_seed_files_collection()].delete_one(
                     {
-                        "NodeUserID": payload.node_user_id,
+                        "NodeID": node_key,
                         "filename": payload.filename,
                     }
                 )
@@ -246,9 +255,9 @@ def _database_handler(route: str, payload: Any) -> dict[str, Any]:
             elif route == "/database-seed-rename":
                 if not payload.filename or not payload.new_filename:
                     raise ValueError("filename and new_filename are required")
-                record = db[NODE_SEED_FILES_COLLECTION].find_one_and_update(
+                record = db[_node_seed_files_collection()].find_one_and_update(
                     {
-                        "NodeUserID": payload.node_user_id,
+                        "NodeID": node_key,
                         "filename": payload.filename,
                     },
                     {"$set": {"filename": payload.new_filename, "updated_at": now}},
@@ -264,7 +273,7 @@ def _database_handler(route: str, payload: Any) -> dict[str, Any]:
                 seeds = list(db[NODE_SEED_COLLECTION].find({}, {"_id": 0}))
                 sync_payload = [
                     {
-                        "NodeUserID": seed.get("NodeUserID"),
+                        "NodeID": seed.get("NodeID") or seed.get("NodeUserID"),
                         "NodeDatabaseID": seed.get("NodeDatabaseID"),
                         "status": seed.get("status"),
                     }
@@ -273,7 +282,8 @@ def _database_handler(route: str, payload: Any) -> dict[str, Any]:
                 result = {"synced": sync_payload, "count": len(sync_payload)}
             else:
                 result = {
-                    "NodeUserID": payload.node_user_id,
+                    "NodeID": node_key,
+                    "id_type": operator["id_type"],
                     "NodeDatabaseID": payload.database_id,
                     "action": route.lstrip("/"),
                     "status": "ok",

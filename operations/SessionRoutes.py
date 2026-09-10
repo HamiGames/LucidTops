@@ -9,6 +9,13 @@ SessionRoutes:
 - /session-transfer: transfer a peer to peer remote desktop sharing session
 - /session-control: control a peer to peer remote desktop sharing session
 
+
+RULES of CODE CREATION:
+- No hardcoded values, all values are created at time of operation.
+- No placeholder values, all values are created at time of operation.
+- No sensitive data, all data is stored in the secrets file.
+- NO pull from GIT repository, all values are created at time of operation.
+- DO NOT EDIT THE COMMENTS, THEY ARE FOR DOCUMENTATION ONLY.
 """
 
 from __future__ import annotations
@@ -19,9 +26,14 @@ from _common import (
     APIRouter,
     BaseModel,
     Field,
+    OperatorAuthPayload,
+    get_mongo_client,
     handle_operations_error,
+    operator_kwargs_from_payload,
+    require_operations_operator,
     tor_envelope,
 )
+from UserHandler import verify_user_credentials
 from recorder import list_recordings, start_recording
 from session import (
     agree_session,
@@ -35,11 +47,13 @@ from session import (
     transfer_session_metadata,
 )
 from sessionControl import get_session_control_for_route
+from session_to_block import process_complete_session_to_block
 from Viewer import peer_search, resolve_viewer
 from operations_secrets import (
     resolve_operations_api_prefix,
     resolve_session_key_min_length,
     resolve_session_id_length,
+    resolve_session_record_default_action,
     resolve_session_transfer_default_target,
 )
 
@@ -56,16 +70,16 @@ SESSION_ROUTES: tuple[str, ...] = (
 
 if BaseModel is not object:
 
-    class SessionAuthPayload(BaseModel):
+    class SessionAuthPayload(OperatorAuthPayload):
         user_id: str = Field(..., alias="UserID")
-        id_token: str = Field(..., alias="IDToken")
+        user_token_id: str = Field(..., alias="UserTokenID")
 
         model_config = {"populate_by_name": True}
 
     class SessionCreatePayload(SessionAuthPayload):
         pass
 
-    class SessionFindPayload(BaseModel):
+    class SessionFindPayload(OperatorAuthPayload):
         session_id: str = Field(
             ...,
             alias="sessionID",
@@ -98,9 +112,9 @@ if BaseModel is not object:
         model_config = {"populate_by_name": True}
 
     class SessionRecordPayload(SessionScopedPayload):
-        action: str = Field(default="session-record")
+        action: str = Field(default_factory=resolve_session_record_default_action)
 
-    class SessionTransferPayload(BaseModel):
+    class SessionTransferPayload(OperatorAuthPayload):
         session_id: str = Field(
             ...,
             alias="sessionID",
@@ -116,13 +130,34 @@ if BaseModel is not object:
         modification_request: dict[str, Any] | None = None
 
 
+def _require_operator_and_user(payload: Any, client: Any) -> dict[str, Any]:
+    operator = require_operations_operator(
+        client=client,
+        **operator_kwargs_from_payload(payload),
+    )
+    user_id = getattr(payload, "user_id", None)
+    user_token = getattr(payload, "user_token_id", None)
+    user = None
+    if user_id and user_token:
+        user = verify_user_credentials(
+            user_id=user_id,
+            token_id=user_token,
+            client=client,
+        )
+    return {"operator": operator, "user": user}
+
+
 def _dispatch(route: str) -> Any:
     def handler(payload: Any = None) -> dict[str, Any]:
+        client = get_mongo_client()
+        if client is None:
+            raise RuntimeError("Master server database is unavailable")
         try:
+            auth = _require_operator_and_user(payload, client)
             if route == "/session-create":
                 result = create_session(
                     host_user_id=payload.user_id,
-                    id_token=payload.id_token,
+                    id_token=payload.user_token_id,
                 )
             elif route == "/session-find":
                 if payload.user_id:
@@ -137,26 +172,35 @@ def _dispatch(route: str) -> Any:
                     session_id=payload.session_id,
                     session_key=payload.session_key,
                     user_id=payload.user_id,
-                    id_token=payload.id_token,
+                    id_token=payload.user_token_id,
                 )
                 agree_session(
                     session_id=payload.session_id,
                     user_id=payload.user_id,
-                    id_token=payload.id_token,
+                    id_token=payload.user_token_id,
                 )
             elif route == "/session-disconnect":
                 result = disconnect_session(
                     session_id=payload.session_id,
                     user_id=payload.user_id,
-                    id_token=payload.id_token,
+                    id_token=payload.user_token_id,
                 )
             elif route == "/session-end":
                 result = end_session(
                     session_id=payload.session_id,
                     host_user_id=payload.user_id,
-                    id_token=payload.id_token,
+                    id_token=payload.user_token_id,
                 )
                 result["compression"] = compress_session(session_id=payload.session_id)
+                try:
+                    result["new_block"] = process_complete_session_to_block(
+                        session_id=payload.session_id,
+                        client=client,
+                        **operator_kwargs_from_payload(payload),
+                    )
+                except ValueError:
+                    # Session may not yet be marked complete in DB; compression still returned.
+                    result["new_block"] = None
             elif route == "/session-record":
                 record_session_event(
                     session_id=payload.session_id,
@@ -187,10 +231,14 @@ def _dispatch(route: str) -> Any:
                 result["viewer"] = viewer
             else:
                 raise ValueError(f"Unsupported session route: {route}")
+            result["operator_id"] = auth["operator"]["operator_id"]
+            result["id_type"] = auth["operator"]["id_type"]
             return tor_envelope(route=route, subsystem="session-system", payload=result)
         except Exception as exc:
             handle_operations_error(exc)
             raise
+        finally:
+            client.close()
 
     return handler
 

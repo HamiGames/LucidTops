@@ -71,7 +71,7 @@ __all__ = (
 
 
 def register_operations_routes(app: Any, *, api_prefix: str | None = None) -> None:
-    """Attach all operations subsystem routers to the master server FastAPI app."""
+    """Attach all operations subsystem routers to the FastAPI app."""
     prefix = api_prefix if api_prefix is not None else resolve_operations_api_prefix()
     register_user_routes(app, api_prefix=prefix)
     register_node_routes(app, api_prefix=prefix)

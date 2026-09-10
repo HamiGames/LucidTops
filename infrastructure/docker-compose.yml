@@ -20,7 +20,8 @@ services:
 
   lucid-server-default:
     build:
-      context: ..
+      # COPY context must be the mounted LucidTops SSD root only
+      context: /mnt/myssd/LucidTops
       dockerfile: backend/Server.dockerfile
     container_name: lucid-server-default
     restart: unless-stopped
@@ -38,6 +39,7 @@ services:
       CONFIG_SECRETS_FILE: /mnt/myssd/LucidTops/secrets/config.secrets
       OPERATIONS_SECRETS_FILE: /mnt/myssd/LucidTops/secrets/operations.secrets
       MONGODB_SECRETS_FILE: /mnt/myssd/LucidTops/secrets/mongodb.secrets
+      DATABASES_SECRETS_FILE: /mnt/myssd/LucidTops/secrets/databases.secrets
       BLOCKCHAIN_SECRETS_FILE: /mnt/myssd/LucidTops/secrets/blockchain.secrets
       PAYMENTS_SECRETS_FILE: /mnt/myssd/LucidTops/secrets/payments.secrets
       HOST_TOR_CONFIG_TORRC: /mnt/myssd/LucidTops/torrc

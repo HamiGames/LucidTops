@@ -21,6 +21,13 @@ limitations:
 - the block creation must be validated by the blockchain governance protocol (blockGov.py)
 - the new block must be added to the blockchain system and ledger system
 
+
+RULES of CODE CREATION:
+- No hardcoded values, all values are created at time of operation.
+- No placeholder values, all values are created at time of operation.
+- No sensitive data, all data is stored in the secrets file.
+- NO pull from GIT repository, all values are created at time of operation.
+- DO NOT EDIT THE COMMENTS, THEY ARE FOR DOCUMENTATION ONLY.
 """
 
 from __future__ import annotations
@@ -108,16 +115,31 @@ def validate_tally_selection(*, client: Any, core: Any, is_genesis: bool) -> dic
     token_count = len(task_tokens) if isinstance(task_tokens, list) else 0
     tally_points = int(winner.get("tally_points") or 0)
 
-    if not is_genesis and not winner.get("tally_verified"):
+    if is_genesis:
+        return {
+            "winner_entity_type": winner.get("winner_entity_type"),
+            "winner_entity_id": winner.get("winner_entity_id"),
+            "tally_verified": True,
+            "tally_points": tally_points,
+            "taskTokens": list(task_tokens) if isinstance(task_tokens, list) else [],
+            "taskToken_count": token_count,
+            "sessionID": winner.get("sessionID"),
+            "genesis": True,
+        }
+
+    if winner.get("empty_tally") or not winner.get("winner_entity_id"):
+        raise PermissionError(
+            "Block creation requires a tally winner with a real creator_id "
+            "(NodeID, MasterServerID, AdminID, or MasterUserID)"
+        )
+
+    if not winner.get("tally_verified"):
         raise PermissionError("Tally winner must be verified against sessionID log")
 
-    if not is_genesis and token_count <= 0 and tally_points <= 0:
-        winner_type = str(winner.get("winner_entity_type") or "")
-        if winner_type != "master_server":
-            raise PermissionError(
-                "Block creation requires taskTokens in the tally record system "
-                "for the corresponding NodeUser or master server"
-            )
+    if token_count <= 0 and tally_points <= 0 and int(winner.get("chunk_count") or 0) <= 0:
+        raise PermissionError(
+            "Block creation requires session-data-chunks or taskTokens in the tally record system"
+        )
 
     return {
         "winner_entity_type": winner.get("winner_entity_type"),
@@ -127,6 +149,7 @@ def validate_tally_selection(*, client: Any, core: Any, is_genesis: bool) -> dic
         "taskTokens": list(task_tokens) if isinstance(task_tokens, list) else [],
         "taskToken_count": token_count,
         "sessionID": winner.get("sessionID"),
+        "chunk_count": int(winner.get("chunk_count") or 0),
     }
 
 
@@ -186,9 +209,10 @@ def create_new_block(
     node_user_id: str | None = None,
     chain_id: str | None = None,
     reported_memory_gb: int | None = None,
+    use_data_insert: bool = True,
     client: Any | None = None,
 ) -> dict[str, Any]:
-    """Run the create-block protocol: tally, governance, block + ledger writes, LucidToken reward."""
+    """Run the create-block protocol: tally, governance, New_BlockID→BlockID, ledger, rewards."""
     _validate_actor_present(actor_type=actor_type, node_user_id=node_user_id)
     if invoker is not None and invoker not in INVOKER_ACTORS:
         raise ValueError(f"Unsupported invoker actor: {invoker}")
@@ -213,10 +237,21 @@ def create_new_block(
             reported_memory_gb=reported_memory_gb,
         )
 
+        packet = None
+        if use_data_insert and not is_genesis:
+            try:
+                from DataInsert import build_data_insert_packet
+
+                prepared = build_data_insert_packet(client=mongo)
+                packet = prepared.get("packet") or None
+            except Exception:
+                packet = None
+
         creation = core.create_block(
             chain_id=chain_id,
             node_user_id=resolved_node_user_id,
             reported_memory_gb=reported_memory_gb,
+            packet=packet,
             client=mongo,
         )
 
@@ -235,8 +270,11 @@ def create_new_block(
         return {
             "block_hash": block_hash,
             "blockID": block.get("blockID"),
+            "New_BlockID": creation.get("New_BlockID") or block.get("New_BlockID"),
+            "BlockID": creation.get("BlockID") or block.get("blockID"),
             "previous_block_hash": block.get("previous_block_hash"),
             "chainID": block.get("chainID"),
+            "creator_id": block.get("creator_id") or block.get("winner_entity_id"),
             "actor_type": actor_type,
             "invoker": invoker or actor_type,
             "node_user_id": resolved_node_user_id,
@@ -269,7 +307,7 @@ def main() -> int:
     parser.add_argument(
         "--actor-type",
         choices=list(BLOCK_CREATOR_ACTORS),
-        default="master_server",
+        required=True,
         help="Block creator actor (NodeUser or master server)",
     )
     parser.add_argument(

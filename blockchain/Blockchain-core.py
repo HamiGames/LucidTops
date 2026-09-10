@@ -23,17 +23,24 @@ requirements:
 
 
 design factors: 
-- the number of tokens that can be minted is limited to the total of 39 million tokens (LucidTokens)
-- the starting number of tokens per block is 50 tokens (LucidTokens)
-- every 5% of the total tokens are minted, the block reward is halved (LucidTokens)
-- all transfers of tokens will burn 0.00001% of the transfer amount (LucidTokens) 1 per 10000 tokens transferred
+- the number of tokens that can be minted is limited to the total from blockchain.secrets (Blockchain.txt: 42,000,000 LucidTokens)
+- the starting number of tokens per block comes from blockchain.secrets (Blockchain.txt: 50 LucidTokens)
+- every fraction of total supply minted (Blockchain.txt: 2%), the block reward is halved
+- all transfers of tokens will burn per BURN_DIVISOR from secrets (default 1 per 10000)
 - all tokens are worth the same value in the jackpot system (LucidTokens)
-- all burnt tokens are removed from the total supply of tokens (LucidTokens) but accounted for in the total supply of tokens (LucidTokens)
+- all burnt tokens are removed from circulating supply but accounted in total minted
 - all tokens are stored on the owners console in a LucidToken folder (LucidToken-<UserID>.png) in a Lucidtoken folder
+- LucidCoins are also written to Tokens.log on the creator_id console (newline per coin)
 - all tokens will have a unique LucidTokenID (LucidTokenID) imbedded in a randomly generated image
-- all images will be unique and random generated from 39 million possible images found on the internet that are not copyrighted or trademarked
+- all images will be unique and random generated
 - all images will be based on the image schema (image_schema.py)
 - all images will not be more than 1mb in size
+
+RULES of CODE CREATION:
+- No hardcoded values, all values are created at time of operation.
+- No placeholder values, all values are created at time of operation.
+- No sensitive data, all data is stored in the secrets file.
+- NO pull from GIT repository, all values are created at time of operation.
 
 """
 
@@ -71,24 +78,44 @@ from blockchain_schema import (  # noqa: E402
     TALLY_ENTITY_TYPES,
     TALLY_RECORDS_COLLECTION,
 )
+from blockchain_secrets import (  # noqa: E402
+    resolve_burn_divisor,
+    resolve_halving_minted_fraction,
+    resolve_initial_block_reward,
+    resolve_lucid_image_height,
+    resolve_lucid_image_width,
+    resolve_lucid_tops_root,
+    resolve_max_block_bytes,
+    resolve_max_sessions_per_block,
+    resolve_max_token_image_bytes,
+    resolve_min_block_interval_seconds,
+    resolve_total_token_supply,
+)
 from configBlock import (  # noqa: E402
-    LUCID_TOPS_ROOT,
     get_blockchain_db,
     get_mongo_client,
     utc_now,
 )
 
-TOTAL_TOKEN_SUPPLY = 39_000_000
-INITIAL_BLOCK_REWARD = 50
-HALVING_MINTED_FRACTION = 0.05
-BURN_DIVISOR = 10_000
-MAX_TOKEN_IMAGE_BYTES = 1_048_576
-MAX_BLOCK_BYTES = 1_048_576
-MAX_SESSIONS_PER_BLOCK = 100
-MIN_BLOCK_INTERVAL_SECONDS = 300
-
 LUCID_TOKEN_DIR_NAME = "Lucidtoken"
 LUCID_TOKEN_FILE_PREFIX = "LucidToken"
+
+
+def __getattr__(name: str) -> Any:
+    getters = {
+        "TOTAL_TOKEN_SUPPLY": resolve_total_token_supply,
+        "INITIAL_BLOCK_REWARD": resolve_initial_block_reward,
+        "HALVING_MINTED_FRACTION": resolve_halving_minted_fraction,
+        "BURN_DIVISOR": resolve_burn_divisor,
+        "MAX_TOKEN_IMAGE_BYTES": resolve_max_token_image_bytes,
+        "MAX_BLOCK_BYTES": resolve_max_block_bytes,
+        "MAX_SESSIONS_PER_BLOCK": resolve_max_sessions_per_block,
+        "MIN_BLOCK_INTERVAL_SECONDS": resolve_min_block_interval_seconds,
+        "LUCID_TOPS_ROOT": resolve_lucid_tops_root,
+    }
+    if name in getters:
+        return getters[name]()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def sha512_hex(data: bytes | str) -> str:
@@ -128,27 +155,28 @@ def compute_block_hash(
 
 
 def block_reward_for_minted(minted_total: int) -> float:
-    """Halve block reward every 5% of TOTAL_TOKEN_SUPPLY minted."""
+    """Halve block reward every HALVING_MINTED_FRACTION of TOTAL_TOKEN_SUPPLY minted."""
+    initial_reward = resolve_initial_block_reward()
     if minted_total <= 0:
-        return float(INITIAL_BLOCK_REWARD)
-    threshold = int(TOTAL_TOKEN_SUPPLY * HALVING_MINTED_FRACTION)
+        return float(initial_reward)
+    threshold = int(resolve_total_token_supply() * resolve_halving_minted_fraction())
     if threshold <= 0:
-        return float(INITIAL_BLOCK_REWARD)
+        return float(initial_reward)
     halvings = minted_total // threshold
-    return float(INITIAL_BLOCK_REWARD) / (2**halvings)
+    return float(initial_reward) / (2**halvings)
 
 
 def calculate_transfer_burn(amount: float) -> tuple[float, float]:
     """Burn 1 LucidToken per 10,000 transferred; return (net_amount, burn_amount)."""
     if amount <= 0:
         raise ValueError("Transfer amount must be positive")
-    burn_amount = float(int(amount) // BURN_DIVISOR)
+    burn_amount = float(int(amount) // resolve_burn_divisor())
     return amount - burn_amount, burn_amount
 
 
 def lucid_token_storage_dir(*, owner_id: str) -> Path:
     """Resolve owner LucidToken folder (DockerDNS-compatible via LUCID_TOPS_ROOT)."""
-    return LUCID_TOPS_ROOT / LUCID_TOKEN_DIR_NAME / owner_id.strip()
+    return resolve_lucid_tops_root() / LUCID_TOKEN_DIR_NAME / owner_id.strip()
 
 
 def lucid_token_image_path(*, owner_id: str, lucid_token_id: str) -> Path:
@@ -174,29 +202,41 @@ def _png_chunk(tag: bytes, data: bytes) -> bytes:
     return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", crc)
 
 
-def _render_lucid_token_png(*, lucid_token_id: str, owner_id: str, width: int = 256, height: int = 256) -> bytes:
+def _render_lucid_token_png(
+    *,
+    lucid_token_id: str,
+    owner_id: str,
+    width: int | None = None,
+    height: int | None = None,
+) -> bytes:
     """Generate a unique PNG (<=1MB) with embedded LucidTokenID metadata."""
+    max_bytes = resolve_max_token_image_bytes()
+    render_width = resolve_lucid_image_width() if width is None else width
+    render_height = resolve_lucid_image_height() if height is None else height
     image_schema = _load_image_schema_module()
     if image_schema is not None and hasattr(image_schema, "render_token_image"):
         png_bytes = image_schema.render_token_image(
             lucid_token_id=lucid_token_id,
             owner_id=owner_id,
-            max_bytes=MAX_TOKEN_IMAGE_BYTES,
+            max_bytes=max_bytes,
         )
-        if isinstance(png_bytes, bytes) and 0 < len(png_bytes) <= MAX_TOKEN_IMAGE_BYTES:
+        if isinstance(png_bytes, bytes) and 0 < len(png_bytes) <= max_bytes:
             return png_bytes
 
     seed = sha512_hex(f"{lucid_token_id}:{owner_id}:{secrets.token_hex(8)}")
     pixels = bytearray()
-    for y in range(height):
+    for y in range(render_height):
         row_seed = sha512_hex(f"{seed}:{y}")
-        for x in range(width):
+        for x in range(render_width):
             index = (int(row_seed[(x * 2) % len(row_seed) : (x * 2) % len(row_seed) + 2], 16) + x + y) % 256
             pixels.extend((index, (index * 3) % 256, (index * 7) % 256))
 
-    raw_rows = b"".join(b"\x00" + bytes(pixels[y * width * 3 : (y + 1) * width * 3]) for y in range(height))
+    raw_rows = b"".join(
+        b"\x00" + bytes(pixels[y * render_width * 3 : (y + 1) * render_width * 3])
+        for y in range(render_height)
+    )
     compressed = zlib.compress(raw_rows, 9)
-    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    ihdr = struct.pack(">IIBBBBB", render_width, render_height, 8, 2, 0, 0, 0)
     png = (
         b"\x89PNG\r\n\x1a\n"
         + _png_chunk(b"IHDR", ihdr)
@@ -205,7 +245,7 @@ def _render_lucid_token_png(*, lucid_token_id: str, owner_id: str, width: int = 
         + _png_chunk(b"IDAT", compressed)
         + _png_chunk(b"IEND", b"")
     )
-    if len(png) > MAX_TOKEN_IMAGE_BYTES:
+    if len(png) > max_bytes:
         raise RuntimeError("Generated LucidToken image exceeds 1MB limit")
     return png
 
@@ -258,7 +298,7 @@ def get_token_supply_state(*, client: Any) -> dict[str, Any]:
             "total_minted": 0,
             "total_burnt": 0,
             "circulating": 0,
-            "block_reward": float(INITIAL_BLOCK_REWARD),
+            "block_reward": float(resolve_initial_block_reward()),
         }
     minted = int(record.get("total_minted") or 0)
     burnt = int(record.get("total_burnt") or 0)
@@ -300,6 +340,9 @@ def append_ledger_record(
     session_id: str | None,
     aggregate_hash: str,
     record_type: str,
+    block_id: str | None = None,
+    new_block_id: str | None = None,
+    creator_id: str | None = None,
 ) -> dict[str, Any]:
     """Append an immutable ledger record (ledger system recording)."""
     if record_type not in LEDGER_RECORD_TYPES:
@@ -307,6 +350,9 @@ def append_ledger_record(
     now = utc_now()
     record = {
         "sessionID": session_id,
+        "BlockID": block_id,
+        "New_BlockID": new_block_id,
+        "creator_id": creator_id,
         "aggregate_hash": aggregate_hash,
         "hash_algorithm": HASH_ALGORITHM,
         "record_type": record_type,
@@ -315,6 +361,13 @@ def append_ledger_record(
     get_blockchain_db(client)[LEDGER_RECORDS_COLLECTION].insert_one(record)
     record.pop("_id", None)
     return record
+
+
+def write_tokens_log_for_owner(*, owner_id: str, lucid_token_ids: list[str]) -> Path:
+    """Append LucidTokenIDs to Tokens.log on the owner console."""
+    from configBlock import write_tokens_log
+
+    return write_tokens_log(owner_id=owner_id, lucid_token_ids=lucid_token_ids)
 
 
 def record_session_history(*, client: Any, session_id: str, aggregate_hash: str) -> dict[str, Any]:
@@ -339,7 +392,7 @@ def get_ledger_last_hash(*, client: Any) -> str:
         value = record.get("aggregate_hash")
         if isinstance(value, str) and value:
             return value
-    return GENESIS_PREVIOUS_HASH
+    return str(GENESIS_PREVIOUS_HASH)
 
 
 def validate_blockchain_governance(
@@ -375,7 +428,7 @@ def _verify_tally_session_id(*, client: Any, session_id: str | None) -> bool:
 
 
 def select_tally_winner(*, client: Any) -> dict[str, Any]:
-    """Select block creator from tally records (taskTokens + tally_points)."""
+    """Select block creator from tally records (highest session-data-chunk / taskTokens)."""
     db = get_blockchain_db(client)
     candidates = list(
         db[TALLY_RECORDS_COLLECTION].find(
@@ -385,32 +438,49 @@ def select_tally_winner(*, client: Any) -> dict[str, Any]:
     )
     if not candidates:
         return {
-            "winner_entity_type": "master_server",
-            "winner_entity_id": "master_server",
-            "tally_verified": True,
+            "winner_entity_type": None,
+            "winner_entity_id": None,
+            "tally_verified": False,
             "tally_points": 0,
             "taskTokens": [],
+            "empty_tally": True,
         }
 
     def _score(record: dict[str, Any]) -> tuple[int, int]:
         task_tokens = record.get("taskTokens") or []
         token_count = len(task_tokens) if isinstance(task_tokens, list) else 0
+        chunk_count = int(record.get("chunk_count") or 0)
         points = int(record.get("tally_points") or 0)
-        return points, token_count
+        # Prefer session-data-chunk contribution, then points, then taskTokens
+        return chunk_count or points, token_count
 
     winner = max(candidates, key=_score)
+    entity_id = str(winner.get("entity_id") or "").strip()
+    entity_type = str(winner.get("entity_type") or "").strip()
+    if not entity_id or not entity_type:
+        return {
+            "winner_entity_type": None,
+            "winner_entity_id": None,
+            "tally_verified": False,
+            "tally_points": 0,
+            "taskTokens": [],
+            "empty_tally": True,
+        }
+
     session_id = winner.get("sessionID")
     verified = bool(winner.get("sessionID_verified")) and _verify_tally_session_id(
         client=client,
         session_id=session_id if isinstance(session_id, str) else None,
     )
     return {
-        "winner_entity_type": winner.get("entity_type") or "master_server",
-        "winner_entity_id": winner.get("entity_id") or "master_server",
+        "winner_entity_type": entity_type,
+        "winner_entity_id": entity_id,
         "tally_verified": verified,
         "tally_points": int(winner.get("tally_points") or 0),
         "taskTokens": list(winner.get("taskTokens") or []),
         "sessionID": session_id,
+        "chunk_count": int(winner.get("chunk_count") or 0),
+        "empty_tally": False,
     }
 
 
@@ -422,6 +492,7 @@ def _reset_tally_for_winner(*, client: Any, entity_type: str, entity_id: str) ->
             "$set": {
                 "tally_points": 0,
                 "taskTokens": [],
+                "chunk_count": 0,
                 "last_win_at": now,
                 "last_reset_at": now,
                 "updated_at": now,
@@ -452,9 +523,9 @@ def _enforce_block_interval(*, client: Any) -> None:
         elapsed = datetime.now(previous.tzinfo) - previous
     except ValueError:
         return
-    if elapsed.total_seconds() < MIN_BLOCK_INTERVAL_SECONDS:
+    if elapsed.total_seconds() < resolve_min_block_interval_seconds():
         raise ValueError(
-            f"Block creation interval must be at least {MIN_BLOCK_INTERVAL_SECONDS} seconds"
+            f"Block creation interval must be at least {resolve_min_block_interval_seconds()} seconds"
         )
 
 
@@ -471,13 +542,14 @@ def _fetch_pending_sessions(*, client: Any) -> list[dict[str, Any]]:
             {"_id": 0},
         )
         .sort("updated_at", 1)
-        .limit(MAX_SESSIONS_PER_BLOCK)
+        .limit(resolve_max_sessions_per_block())
     )
     selected: list[dict[str, Any]] = []
     total_bytes = 0
+    max_block_bytes = resolve_max_block_bytes()
     for record in pending:
         payload = json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        if total_bytes + len(payload) > MAX_BLOCK_BYTES:
+        if total_bytes + len(payload) > max_block_bytes:
             break
         selected.append(record)
         total_bytes += len(payload)
@@ -491,11 +563,11 @@ def mint_lucid_tokens(
     count: int,
     block_id: str,
 ) -> list[dict[str, Any]]:
-    """Mint LucidTokens for a block winner, respecting the 39M supply cap."""
+    """Mint LucidTokens for a block winner, respecting the supply cap from secrets."""
     if count <= 0:
         return []
     supply = get_token_supply_state(client=client)
-    remaining = TOTAL_TOKEN_SUPPLY - int(supply["total_minted"])
+    remaining = resolve_total_token_supply() - int(supply["total_minted"])
     if remaining <= 0:
         raise RuntimeError("LucidToken supply cap reached")
     mint_count = min(count, remaining)
@@ -515,6 +587,7 @@ def mint_lucid_tokens(
             "owner_id": owner_id,
             "blockID": block_id,
             "image_path": image_path.as_posix(),
+            "tokens_log_path": None,
             "hash_algorithm": HASH_ALGORITHM,
             "status": "active",
             "created_at": now,
@@ -526,8 +599,22 @@ def mint_lucid_tokens(
             session_id=None,
             aggregate_hash=sha512_hex(lucid_token_id),
             record_type="lucid_token",
+            block_id=block_id,
+            creator_id=owner_id,
         )
         minted.append(token_record)
+
+    if minted:
+        log_path = write_tokens_log_for_owner(
+            owner_id=owner_id,
+            lucid_token_ids=[str(t["LucidTokenID"]) for t in minted],
+        )
+        for token in minted:
+            token["tokens_log_path"] = log_path.as_posix()
+            token_col.update_one(
+                {"LucidTokenID": token["LucidTokenID"]},
+                {"$set": {"tokens_log_path": log_path.as_posix()}},
+            )
 
     _update_supply_state(client=client, minted_delta=len(minted))
     return minted
@@ -606,9 +693,10 @@ def create_block(
     chain_id: str | None = None,
     node_user_id: str | None = None,
     reported_memory_gb: int | None = None,
+    packet: list[dict[str, Any]] | None = None,
     client: Any,
 ) -> dict[str, Any]:
-    """Create a confirmed blockchain block with session history and LucidToken rewards."""
+    """Create a block: New_BlockID -> confirmed BlockID (SHA-512) with LucidToken rewards."""
     db = get_blockchain_db(client)
     validate_blockchain_governance(
         node_user_id=node_user_id,
@@ -623,29 +711,43 @@ def create_block(
         _enforce_block_interval(client=client)
 
     winner = select_tally_winner(client=client)
-    if not winner.get("tally_verified") and not is_genesis:
-        raise PermissionError("Tally winner must be verified against sessionID log")
+    if is_genesis:
+        from blockchain_secrets import resolve_genesis_creator_id
 
-    winner_type = str(winner["winner_entity_type"])
-    winner_id = str(winner["winner_entity_id"])
-    if is_genesis and winner_type != "master_server":
-        winner_type = "master_server"
-        winner_id = "master_server"
-
-    pending_sessions = _fetch_pending_sessions(client=client)
-    session_payload: list[dict[str, Any]] = []
-    for session in pending_sessions:
-        session_id = str(session.get("sessionID") or "")
-        aggregate_hash = str(session.get("aggregate_hash") or session.get("DataInsert") or "")
-        if session_id and aggregate_hash:
-            record_session_history(client=client, session_id=session_id, aggregate_hash=aggregate_hash)
-            session_payload.append(
-                {
-                    "sessionID": session_id,
-                    "aggregate_hash": aggregate_hash,
-                    "sessionKey": session.get("sessionKey"),
-                }
+        winner_type = "genesis_creator"
+        winner_id = resolve_genesis_creator_id()
+    else:
+        if winner.get("empty_tally") or not winner.get("winner_entity_id"):
+            raise PermissionError(
+                "Block creation requires a tally winner with a real creator_id "
+                "(NodeID, MasterServerID, AdminID, or MasterUserID)"
             )
+        if not winner.get("tally_verified"):
+            raise PermissionError("Tally winner must be verified against sessionID log")
+        winner_type = str(winner["winner_entity_type"])
+        winner_id = str(winner["winner_entity_id"])
+
+    if packet is not None:
+        session_payload = list(packet)
+        pending_sessions = []
+    else:
+        pending_sessions = _fetch_pending_sessions(client=client)
+        session_payload = []
+        for session in pending_sessions:
+            session_id = str(session.get("sessionID") or "")
+            aggregate_hash = str(session.get("aggregate_hash") or session.get("DataInsert") or "")
+            if session_id and aggregate_hash:
+                record_session_history(
+                    client=client, session_id=session_id, aggregate_hash=aggregate_hash
+                )
+                session_payload.append(
+                    {
+                        "sessionID": session_id,
+                        "aggregate_hash": aggregate_hash,
+                        "sessionKey": session.get("sessionKey"),
+                        "chunks": session.get("chunked_payload") or session.get("chunks") or [],
+                    }
+                )
 
     previous_block_hash = (
         str(previous.get("block_hash"))
@@ -653,12 +755,56 @@ def create_block(
         else GENESIS_PREVIOUS_HASH
     )
     ledger_last_hash = get_ledger_last_hash(client=client)
-    block_id = secrets.token_hex(16)
-    resolved_chain_id = chain_id or (str(previous.get("chainID")) if previous else secrets.token_hex(8))
     now = utc_now()
+    resolved_chain_id = chain_id or (
+        str(previous.get("chainID")) if previous else sha512_hex(f"chain:{winner_id}:{now}")[:16]
+    )
+
+    # New_BlockID stage (pre-confirm) — SHA-512 of pending material
+    new_block_material = json.dumps(
+        {
+            "previous_block_hash": previous_block_hash,
+            "chainID": resolved_chain_id,
+            "session_payload": session_payload,
+            "ledger_last_hash": ledger_last_hash,
+            "creator_id": winner_id,
+            "timestamp": now,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    new_block_id = sha512_hex(new_block_material)
+
+    # Persist New_BlockID as awaiting / new_block before promotion
+    awaiting_record = {
+        "blockID": None,
+        "New_BlockID": new_block_id,
+        "chainID": resolved_chain_id,
+        "sessionID": winner.get("sessionID"),
+        "aggregate_hash": ledger_last_hash,
+        "hash_algorithm": HASH_ALGORITHM,
+        "DataInsert": [entry.get("aggregate_hash") for entry in session_payload],
+        "previous_block_hash": previous_block_hash,
+        "block_hash": None,
+        "status": "new_block",
+        "creator_id": winner_id,
+        "winner_entity_type": winner_type,
+        "winner_entity_id": winner_id,
+        "tally_verified": bool(winner.get("tally_verified")) if not is_genesis else True,
+        "session_payload": session_payload,
+        "chunk_count": sum(
+            len(entry.get("chunks") or []) if isinstance(entry.get("chunks"), list) else 0
+            for entry in session_payload
+        ),
+        "packet": session_payload,
+        "created_at": now,
+        "updated_at": now,
+    }
+    db[BLOCKCHAIN_BLOCKS_COLLECTION].insert_one(dict(awaiting_record))
+
     block_hash = compute_block_hash(
-        previous_block_hash=previous_block_hash,
-        block_id=block_id,
+        previous_block_hash=str(previous_block_hash),
+        block_id=new_block_id,
         chain_id=resolved_chain_id,
         session_payload=session_payload,
         ledger_last_hash=ledger_last_hash,
@@ -666,61 +812,81 @@ def create_block(
         winner_entity_id=winner_id,
         timestamp=now,
     )
+    # Promote New_BlockID -> BlockID (SHA-512 identity per Blockchain.txt)
+    block_id = block_hash
 
     supply = get_token_supply_state(client=client)
     reward_count = int(supply["block_reward"])
-    owner_id = winner_id if winner_type != "master_server" else "master_server"
+    owner_id = winner_id
     minted_tokens = mint_lucid_tokens(
         client=client,
         owner_id=owner_id,
         count=reward_count,
         block_id=block_id,
     )
+    tokens_log = None
+    if minted_tokens:
+        tokens_log = minted_tokens[0].get("tokens_log_path")
 
-    block_record = {
-        "blockID": block_id,
-        "chainID": resolved_chain_id,
-        "sessionID": winner.get("sessionID"),
-        "aggregate_hash": ledger_last_hash,
-        "hash_algorithm": HASH_ALGORITHM,
-        "DataInsert": [entry["aggregate_hash"] for entry in session_payload],
-        "previous_block_hash": previous_block_hash,
-        "block_hash": block_hash,
-        "status": "genesis" if is_genesis else "confirmed",
-        "winner_entity_type": winner_type,
-        "winner_entity_id": winner_id,
-        "tally_verified": bool(winner.get("tally_verified")),
-        "session_payload": session_payload,
-        "lucid_tokens_minted": len(minted_tokens),
-        "block_reward": reward_count,
-        "created_at": now,
-        "updated_at": now,
-    }
-    db[BLOCKCHAIN_BLOCKS_COLLECTION].insert_one(block_record)
+    confirmed_at = utc_now()
+    status = "genesis" if is_genesis else "confirmed"
+    db[BLOCKCHAIN_BLOCKS_COLLECTION].update_one(
+        {"New_BlockID": new_block_id, "status": "new_block"},
+        {
+            "$set": {
+                "blockID": block_id,
+                "block_hash": block_hash,
+                "status": status,
+                "lucid_tokens_minted": len(minted_tokens),
+                "block_reward": reward_count,
+                "tokens_log_path": tokens_log,
+                "updated_at": confirmed_at,
+                "confirmed_at": confirmed_at,
+            }
+        },
+    )
+
     append_ledger_record(
         client=client,
         session_id=winner.get("sessionID") if isinstance(winner.get("sessionID"), str) else None,
         aggregate_hash=block_hash,
         record_type="block",
+        block_id=block_id,
+        new_block_id=new_block_id,
+        creator_id=winner_id,
     )
 
     for session in pending_sessions[: len(session_payload)]:
         db[SESSION_RECORDS_COLLECTION].update_one(
             {"sessionID": session.get("sessionID")},
-            {"$set": {"sessionStatus": "blockchain_recorded", "updated_at": now}},
+            {"$set": {"sessionStatus": "blockchain_recorded", "updated_at": confirmed_at}},
         )
         db[BLOCKCHAIN_BLOCKS_COLLECTION].update_many(
             {
                 "sessionID": session.get("sessionID"),
                 "status": "awaiting_block",
             },
-            {"$set": {"status": "confirmed", "blockID": block_id, "updated_at": now}},
+            {
+                "$set": {
+                    "status": "confirmed",
+                    "blockID": block_id,
+                    "New_BlockID": new_block_id,
+                    "updated_at": confirmed_at,
+                }
+            },
         )
 
-    _reset_tally_for_winner(client=client, entity_type=winner_type, entity_id=winner_id)
-    block_record.pop("_id", None)
+    if not is_genesis:
+        _reset_tally_for_winner(client=client, entity_type=winner_type, entity_id=winner_id)
+
+    block_record = db[BLOCKCHAIN_BLOCKS_COLLECTION].find_one(
+        {"blockID": block_id},
+        {"_id": 0},
+    )
     return {
         "block": block_record,
+        "New_BlockID": new_block_id,
+        "BlockID": block_id,
         "minted_tokens": minted_tokens,
         "supply": get_token_supply_state(client=client),
     }

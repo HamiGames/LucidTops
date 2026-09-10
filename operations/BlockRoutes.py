@@ -18,11 +18,16 @@ BlockchainRoutes:
 - /LucidLedger-report: report a block in the LucidLedger system
 - /LucidLedger-transfer: transfer a block in the LucidLedger system
 - /LucidLedger-control: control a block in the LucidLedger system
+RULES of CODE CREATION:
+- No hardcoded values, all values are created at time of operation.
+- No placeholder values, all values are created at time of operation.
+- No sensitive data, all data is stored in the secrets file.
+- NO pull from GIT repository, all values are created at time of operation.
+- DO NOT EDIT THE COMMENTS, THEY ARE FOR DOCUMENTATION ONLY.
 """
 
 from __future__ import annotations
 
-import secrets
 from typing import Any
 
 from _common import (
@@ -31,13 +36,17 @@ from _common import (
     BLOCKCHAIN_COLLECTION,
     Field,
     LUCID_LEDGER_COLLECTION,
+    OperatorAuthPayload,
     get_master_db,
     get_mongo_client,
     handle_operations_error,
+    operator_kwargs_from_payload,
+    require_operations_operator,
     tor_envelope,
     utc_now,
 )
 from session import compress_session
+from session_to_block import process_complete_session_to_block
 from operations_secrets import (
     resolve_blockchain_hash_algorithm,
     resolve_operations_api_prefix,
@@ -71,7 +80,7 @@ LUCID_LEDGER_ROUTES = tuple(route for route in BLOCKCHAIN_ROUTES if "LucidLedger
 
 if BaseModel is not object:
 
-    class BlockchainPayload(BaseModel):
+    class BlockchainPayload(OperatorAuthPayload):
         session_id: str | None = Field(default=None, alias="sessionID")
         block_id: str | None = Field(default=None, alias="blockID")
         payload: dict[str, Any] | None = None
@@ -84,6 +93,10 @@ def _blockchain_handler(route: str, payload: BlockchainPayload) -> dict[str, Any
     if client is None:
         raise RuntimeError("Master server database is unavailable")
     try:
+        operator = require_operations_operator(
+            client=client,
+            **operator_kwargs_from_payload(payload),
+        )
         db = get_master_db(client)
         now = utc_now()
         collection = (
@@ -91,21 +104,26 @@ def _blockchain_handler(route: str, payload: BlockchainPayload) -> dict[str, Any
         )
 
         if route == "/blockchain-create":
-            chain_id = secrets.token_hex(8)
-            record = {
-                "chainID": chain_id,
-                "status": "active",
-                "hash_algorithm": resolve_blockchain_hash_algorithm(),
-                "created_at": now,
-            }
-            db[collection].insert_one(record)
-            record.pop("_id", None)
-            result = record
+            if not payload.session_id:
+                raise ValueError(
+                    "sessionID required — blockchain block creation uses complete session chunks"
+                )
+            result = process_complete_session_to_block(
+                session_id=payload.session_id,
+                client=client,
+                **operator_kwargs_from_payload(payload),
+            )
+            result["hash_algorithm"] = resolve_blockchain_hash_algorithm()
         elif route == "/blockchain-find":
             if payload.block_id:
-                record = db[collection].find_one({"blockID": payload.block_id}, {"_id": 0})
+                record = db[collection].find_one(
+                    {"$or": [{"BlockID": payload.block_id}, {"blockID": payload.block_id}]},
+                    {"_id": 0},
+                )
                 if not record:
-                    record = db[collection].find_one({"chainID": payload.block_id}, {"_id": 0})
+                    record = db[collection].find_one(
+                        {"chainID": payload.block_id}, {"_id": 0}
+                    )
                 if not record:
                     raise LookupError("Blockchain record not found")
                 result = record
@@ -117,29 +135,43 @@ def _blockchain_handler(route: str, payload: BlockchainPayload) -> dict[str, Any
         elif route == "/blockchain-end" and payload.session_id:
             result = compress_session(session_id=payload.session_id, client=client)
         elif route == "/LucidLedger":
-            block_id = payload.block_id or secrets.token_hex(8)
-            record = {
-                "blockID": block_id,
-                "payload": payload.payload or {},
-                "hash_algorithm": resolve_blockchain_hash_algorithm(),
-                "created_at": now,
-            }
-            db[LUCID_LEDGER_COLLECTION].insert_one(record)
-            record.pop("_id", None)
-            result = record
+            if not payload.session_id:
+                raise ValueError(
+                    "sessionID required — LucidLedger New_BlockID is created only from "
+                    "SessionID_status complete session-data"
+                )
+            result = process_complete_session_to_block(
+                session_id=payload.session_id,
+                client=client,
+                **operator_kwargs_from_payload(payload),
+            )
         elif route in LUCID_LEDGER_ROUTES and route != "/LucidLedger":
             suffix = route.split("/LucidLedger-")[-1]
             if suffix == "find" and payload.block_id:
                 record = db[LUCID_LEDGER_COLLECTION].find_one(
-                    {"blockID": payload.block_id}, {"_id": 0}
+                    {
+                        "$or": [
+                            {"BlockID": payload.block_id},
+                            {"blockID": payload.block_id},
+                        ]
+                    },
+                    {"_id": 0},
                 )
                 if not record:
                     raise LookupError("LucidLedger block not found")
                 result = record
+            elif suffix == "record" and payload.session_id:
+                result = process_complete_session_to_block(
+                    session_id=payload.session_id,
+                    client=client,
+                    **operator_kwargs_from_payload(payload),
+                )
             else:
                 result = {
-                    "blockID": payload.block_id,
+                    "BlockID": payload.block_id,
                     "action": suffix,
+                    "operator_id": operator["operator_id"],
+                    "id_type": operator["id_type"],
                     "status": "ok",
                     "timestamp": now,
                 }
@@ -147,10 +179,20 @@ def _blockchain_handler(route: str, payload: BlockchainPayload) -> dict[str, Any
             result = {
                 "action": route.lstrip("/"),
                 "sessionID": payload.session_id,
-                "blockID": payload.block_id,
+                "BlockID": payload.block_id,
+                "operator_id": operator["operator_id"],
+                "id_type": operator["id_type"],
                 "status": "ok",
                 "timestamp": now,
             }
+            if route.endswith("-read") or route == "/blockchain-control":
+                records = list(
+                    db[collection]
+                    .find({}, {"_id": 0})
+                    .limit(resolve_operations_ledger_read_limit())
+                )
+                result["records"] = records
+                result["count"] = len(records)
         return tor_envelope(route=route, subsystem="blockchain-system", payload=result)
     finally:
         client.close()

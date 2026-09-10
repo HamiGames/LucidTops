@@ -24,6 +24,8 @@ from config import (
     TOR_SOCKS_HOST,
     TOR_SOCKS_PORT,
     get_api_public_base_url,
+    get_config_int,
+    get_config_value,
     get_gui_public_base_url,
     get_master_db,
     get_master_server_public_url,
@@ -40,9 +42,6 @@ from handshake import (
 )
 from WebPageLink import resolve_web_page_link, validate_web_page_link
 
-CONNECTION_PROTOCOL = "connection"
-TRANSPORT_PROTOCOL = "tor-hidden-service"
-TORRENT_LAYER_PROTOCOL = "torrent-over-tor"
 ConnectionType = Literal["initial", "ongoing"]
 ConnectionEntity = Literal["user", "node", "frontend", "master", "api"]
 
@@ -66,6 +65,38 @@ ENTITY_HIDDEN_SERVICE_KEY: dict[str, str] = {
     "master": "master_server",
     "api": "master_server",
 }
+
+
+def resolve_connection_protocol() -> str:
+    return get_config_value("CONNECTION_PROTOCOL_NAME")
+
+
+def resolve_transport_protocol() -> str:
+    return get_config_value("CONNECTION_PROTOCOL")
+
+
+def resolve_torrent_layer_protocol() -> str:
+    return get_config_value("CONNECTION_TORRENT_LAYER")
+
+
+def resolve_connection_network() -> str:
+    return get_config_value("CONNECTION_NETWORK")
+
+
+def resolve_hidden_service_port() -> int:
+    return get_config_int("HIDDEN_SERVICE_PORT")
+
+
+def __getattr__(name: str) -> Any:
+    mapping = {
+        "CONNECTION_PROTOCOL": resolve_connection_protocol,
+        "TRANSPORT_PROTOCOL": resolve_transport_protocol,
+        "TORRENT_LAYER_PROTOCOL": resolve_torrent_layer_protocol,
+    }
+    if name in mapping:
+        return mapping[name]()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = (
     "CONNECTION_PROTOCOL",
@@ -132,25 +163,34 @@ def resolve_onion_for_entity(entity: str) -> str | None:
 
 def get_tor_connection_config() -> dict[str, Any]:
     master_onion = resolve_master_server_onion()
+    master_server_id = ""
+    try:
+        from config import resolve_master_server_id
+
+        master_server_id = resolve_master_server_id()
+    except RuntimeError:
+        master_server_id = ""
     return {
-        "protocol": CONNECTION_PROTOCOL,
-        "transport": TRANSPORT_PROTOCOL,
-        "torrent_layer": TORRENT_LAYER_PROTOCOL,
-        "network": "tor",
+        "protocol": resolve_connection_protocol(),
+        "transport": resolve_transport_protocol(),
+        "torrent_layer": resolve_torrent_layer_protocol(),
+        "network": resolve_connection_network(),
         "tor_only": MASTER_SERVER_TOR_ONLY,
         "tor_host": TOR_HOST,
         "tor_socks_host": TOR_SOCKS_HOST,
         "tor_socks_port": TOR_SOCKS_PORT,
         "tor_control_port": TOR_CONTROL_PORT,
         "master_server_onion": master_onion,
+        "MasterServerID": master_server_id,
         "master_server_tor_service": get_master_server_public_url(),
         "tor_api_service": get_api_public_base_url(),
         "tor_gui_service": get_gui_public_base_url(),
         "frontend_onion": resolve_onion_for_entity("frontend"),
         "node_onion": resolve_onion_for_entity("node"),
         "master_server_port": MASTER_SERVER_PORT,
-        "hidden_service_port": 80,
+        "hidden_service_port": resolve_hidden_service_port(),
         "internal_bind_host": MASTER_SERVER_BIND_HOST,
+        "proxy_mediated": True,
     }
 
 
@@ -287,10 +327,10 @@ def establish_connection(
         page_link = resolve_web_page_link(normalized_source)
         record = {
             "session_key": session_key,
-            "protocol": CONNECTION_PROTOCOL,
-            "transport": TRANSPORT_PROTOCOL,
-            "torrent_layer": TORRENT_LAYER_PROTOCOL,
-            "network": "tor",
+            "protocol": resolve_connection_protocol(),
+            "transport": resolve_transport_protocol(),
+            "torrent_layer": resolve_torrent_layer_protocol(),
+            "network": resolve_connection_network(),
             "tor_only": True,
             "source": normalized_source,
             "frontend": page_link.get("frontend"),
@@ -319,10 +359,10 @@ def establish_connection(
             raise PermissionError("IDToken not found after validation")
 
         return {
-            "protocol": CONNECTION_PROTOCOL,
-            "transport": TRANSPORT_PROTOCOL,
-            "torrent_layer": TORRENT_LAYER_PROTOCOL,
-            "network": "tor",
+            "protocol": resolve_connection_protocol(),
+            "transport": resolve_transport_protocol(),
+            "torrent_layer": resolve_torrent_layer_protocol(),
+            "network": resolve_connection_network(),
             "tor_only": True,
             "status": "connected",
             "session_key": session_key,
@@ -333,6 +373,7 @@ def establish_connection(
             "javascript": page_link.get("javascript"),
             "connection_type": connection_type,
             "onion_address": normalized_onion,
+            "MasterServerID": tor_config.get("MasterServerID", ""),
             "tor_api_service": tor_config["tor_api_service"],
             "tor_api_route": page_link.get("tor_api_route"),
             "tor_gui_route": page_link.get("tor_gui_route"),
@@ -357,7 +398,7 @@ def get_connection_status(session_key: str, *, client: Any | None = None) -> dic
             "status": "connected" if record.get("active") else "inactive",
             "protocol": record.get("protocol"),
             "transport": record.get("transport"),
-            "network": "tor",
+            "network": resolve_connection_network(),
             "tor_only": True,
             "onion_address": record.get("onion_address"),
             "tor_api_service": record.get("tor_api_service") or record.get("api_public_base_url"),

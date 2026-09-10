@@ -9,6 +9,13 @@ ledger system:
 - the ledger can never be deleted or modified, it is a permanent record of the blockchain system
 - the ledger will be visible to the public via the LucidLedger website
 
+RULES of CODE CREATION:
+- No hardcoded values, all values are created at time of operation.
+- No placeholder values, all values are created at time of operation.
+- No sensitive data, all data is stored in the secrets file.
+- NO pull from GIT repository, all values are created at time of operation.
+- DO NOT EDIT THE COMMENTS, THEY ARE FOR DOCUMENTATION ONLY.
+
 """
 
 from __future__ import annotations
@@ -32,9 +39,8 @@ from blockchain_schema import (  # noqa: E402
     LEDGER_RECORDS_FIELDS,
     schema_template,
 )
+from blockchain_secrets import resolve_lucid_ledger_list_limit  # noqa: E402
 from configBlock import get_blockchain_db, get_mongo_client, utc_now  # noqa: E402
-
-DEFAULT_LUCID_LEDGER_LIMIT = 100
 
 
 class LedgerImmutableError(PermissionError):
@@ -58,6 +64,9 @@ def append_ledger_record(
     session_id: str | None,
     aggregate_hash: str,
     record_type: str,
+    block_id: str | None = None,
+    new_block_id: str | None = None,
+    creator_id: str | None = None,
 ) -> dict[str, Any]:
     """Append an immutable ledger record (append-only; never updated or deleted)."""
     if record_type not in LEDGER_RECORD_TYPES:
@@ -68,6 +77,9 @@ def append_ledger_record(
     now = utc_now()
     record = {
         "sessionID": session_id,
+        "BlockID": block_id,
+        "New_BlockID": new_block_id,
+        "creator_id": creator_id,
         "aggregate_hash": str(aggregate_hash).strip(),
         "hash_algorithm": HASH_ALGORITHM,
         "record_type": record_type,
@@ -105,7 +117,7 @@ def get_ledger_last_hash(*, client: Any) -> str:
         value = record.get("aggregate_hash")
         if isinstance(value, str) and value:
             return value
-    return GENESIS_PREVIOUS_HASH
+    return str(GENESIS_PREVIOUS_HASH)
 
 
 def get_ledger_record_for_block_creation(*, client: Any) -> dict[str, Any]:
@@ -127,11 +139,12 @@ def get_ledger_record_for_block_creation(*, client: Any) -> dict[str, Any]:
 def get_ledger_records(
     *,
     client: Any,
-    limit: int = DEFAULT_LUCID_LEDGER_LIMIT,
+    limit: int | None = None,
     record_type: str | None = None,
 ) -> list[dict[str, Any]]:
     """Return ledger records for public LucidLedger visibility."""
-    if limit <= 0:
+    resolved_limit = resolve_lucid_ledger_list_limit() if limit is None else limit
+    if resolved_limit <= 0:
         raise ValueError("limit must be positive")
 
     query: dict[str, Any] = {}
@@ -144,7 +157,7 @@ def get_ledger_records(
         get_blockchain_db(client)[LEDGER_RECORDS_COLLECTION]
         .find(query, {"_id": 0})
         .sort("created_at", -1)
-        .limit(limit)
+        .limit(resolved_limit)
     )
 
 
@@ -171,7 +184,7 @@ def main() -> int:
     subparsers.add_parser("block-context", help="Print ledger context for next block creation")
 
     list_parser = subparsers.add_parser("list", help="List ledger records (LucidLedger public view)")
-    list_parser.add_argument("--limit", type=int, default=DEFAULT_LUCID_LEDGER_LIMIT)
+    list_parser.add_argument("--limit", type=int, default=None)
     list_parser.add_argument("--record-type", choices=list(LEDGER_RECORD_TYPES), default=None)
 
     session_parser = subparsers.add_parser("session-history", help="Record session history in the ledger")

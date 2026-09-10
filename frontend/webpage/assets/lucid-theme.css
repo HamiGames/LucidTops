@@ -1,0 +1,384 @@
+/* LucidTops Noé Dark Mode — contemporary Tor frontend theme
+   Values are visual tokens only; operational endpoints come from runtime-config.js */
+
+/* Tor-safe: no ClearNet font CDN — expressive local stacks only */
+:root {
+  --noe-bg-0: #0a0c0f;
+  --noe-bg-1: #12161c;
+  --noe-bg-2: #1a212b;
+  --noe-panel: rgba(22, 28, 36, 0.88);
+  --noe-line: rgba(148, 173, 186, 0.16);
+  --noe-text: #e8eef2;
+  --noe-muted: #9aa8b5;
+  --noe-accent: #3dceb4;
+  --noe-accent-2: #6fd3ff;
+  --noe-danger: #ff6b7a;
+  --noe-ok: #5dde9a;
+  --noe-warn: #f0c35a;
+  --noe-radius: 14px;
+  --noe-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+  --font-display: "Trebuchet MS", "Gill Sans", "Segoe UI Variable", sans-serif;
+  --font-body: "Lucida Grande", "Segoe UI", "Candara", sans-serif;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+  background:
+    radial-gradient(1200px 700px at 12% -10%, rgba(61, 206, 180, 0.16), transparent 55%),
+    radial-gradient(900px 600px at 100% 0%, rgba(111, 211, 255, 0.1), transparent 50%),
+    linear-gradient(165deg, var(--noe-bg-0), var(--noe-bg-1) 45%, #0d1117);
+  color: var(--noe-text);
+  font-family: var(--font-body);
+  font-size: 16px;
+  line-height: 1.5;
+}
+
+body {
+  animation: noe-fade-in 0.55s ease both;
+}
+
+@keyframes noe-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes noe-modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(16px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+a {
+  color: var(--noe-accent-2);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+.noe-shell {
+  min-height: 100vh;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+}
+
+.noe-header,
+.noe-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.5rem;
+  border-bottom: 1px solid var(--noe-line);
+  backdrop-filter: blur(10px);
+  background: rgba(10, 12, 15, 0.55);
+}
+
+.noe-footer {
+  border-bottom: 0;
+  border-top: 1px solid var(--noe-line);
+  color: var(--noe-muted);
+  font-size: 0.9rem;
+}
+
+.noe-brand {
+  font-family: var(--font-display);
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  font-size: 1.35rem;
+  color: var(--noe-text);
+}
+
+.noe-brand span {
+  color: var(--noe-accent);
+}
+
+.noe-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1rem;
+  align-items: center;
+}
+
+.noe-nav a {
+  color: var(--noe-muted);
+  font-weight: 500;
+}
+
+.noe-nav a:hover,
+.noe-nav a.active {
+  color: var(--noe-text);
+  text-decoration: none;
+}
+
+.noe-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.35rem 0.7rem;
+  border: 1px solid var(--noe-line);
+  border-radius: 999px;
+  font-size: 0.78rem;
+  color: var(--noe-muted);
+  background: rgba(26, 33, 43, 0.8);
+}
+
+.noe-chip.ok {
+  color: var(--noe-ok);
+  border-color: rgba(93, 222, 154, 0.35);
+}
+
+.noe-chip.warn {
+  color: var(--noe-warn);
+}
+
+.noe-main {
+  width: min(1100px, calc(100% - 2rem));
+  margin: 0 auto;
+  padding: 2rem 0 3rem;
+}
+
+.noe-hero {
+  min-height: calc(100vh - 8rem);
+  display: grid;
+  align-content: center;
+  gap: 1.25rem;
+  max-width: 720px;
+}
+
+.noe-hero h1 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: clamp(2.6rem, 7vw, 4.4rem);
+  line-height: 1.05;
+  letter-spacing: -0.03em;
+}
+
+.noe-hero h1 .brand {
+  display: block;
+  color: var(--noe-accent);
+}
+
+.noe-hero p {
+  margin: 0;
+  color: var(--noe-muted);
+  font-size: 1.1rem;
+  max-width: 38rem;
+}
+
+.noe-cta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 0.5rem;
+}
+
+.noe-btn {
+  appearance: none;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 0.75rem 1.25rem;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+}
+
+.noe-btn:focus-visible {
+  outline: 2px solid var(--noe-accent);
+  outline-offset: 3px;
+}
+
+.noe-btn:hover {
+  transform: translateY(-1px);
+}
+
+.noe-btn-primary {
+  background: linear-gradient(135deg, var(--noe-accent), #2aa890);
+  color: #04110e;
+}
+
+.noe-btn-ghost {
+  background: transparent;
+  border-color: var(--noe-line);
+  color: var(--noe-text);
+}
+
+.noe-btn-danger {
+  background: rgba(255, 107, 122, 0.15);
+  border-color: rgba(255, 107, 122, 0.4);
+  color: var(--noe-danger);
+}
+
+.noe-panel {
+  background: var(--noe-panel);
+  border: 1px solid var(--noe-line);
+  border-radius: var(--noe-radius);
+  padding: 1.25rem 1.4rem;
+  box-shadow: var(--noe-shadow);
+}
+
+.noe-grid {
+  display: grid;
+  gap: 1rem;
+}
+
+.noe-grid-2 {
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+
+.noe-layout {
+  display: grid;
+  gap: 1.25rem;
+}
+
+@media (min-width: 900px) {
+  .noe-layout-sidebar {
+    grid-template-columns: 240px 1fr;
+  }
+}
+
+.noe-sidebar {
+  display: grid;
+  gap: 0.75rem;
+  align-content: start;
+}
+
+.noe-form {
+  display: grid;
+  gap: 1rem;
+}
+
+.noe-field {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.noe-field label {
+  font-size: 0.88rem;
+  color: var(--noe-muted);
+  font-weight: 500;
+}
+
+.noe-field input,
+.noe-field select,
+.noe-field textarea {
+  width: 100%;
+  border: 1px solid var(--noe-line);
+  border-radius: 10px;
+  background: var(--noe-bg-0);
+  color: var(--noe-text);
+  padding: 0.7rem 0.85rem;
+  font: inherit;
+}
+
+.noe-field input:focus-visible,
+.noe-field select:focus-visible,
+.noe-field textarea:focus-visible {
+  outline: 2px solid var(--noe-accent);
+  outline-offset: 1px;
+}
+
+.noe-field textarea {
+  min-height: 110px;
+  resize: vertical;
+}
+
+.noe-muted {
+  color: var(--noe-muted);
+}
+
+.noe-error {
+  color: var(--noe-danger);
+  font-size: 0.92rem;
+}
+
+.noe-ok {
+  color: var(--noe-ok);
+}
+
+.noe-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.92rem;
+}
+
+.noe-table th,
+.noe-table td {
+  text-align: left;
+  padding: 0.7rem 0.5rem;
+  border-bottom: 1px solid var(--noe-line);
+}
+
+.noe-table th {
+  color: var(--noe-muted);
+  font-weight: 500;
+}
+
+.noe-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(4, 6, 10, 0.72);
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  z-index: 40;
+}
+
+.noe-modal {
+  width: min(520px, 100%);
+  animation: noe-modal-in 0.28s ease both;
+}
+
+.noe-remote-stage {
+  min-height: 60vh;
+  border: 1px dashed var(--noe-line);
+  border-radius: var(--noe-radius);
+  background:
+    linear-gradient(180deg, rgba(61, 206, 180, 0.05), transparent),
+    var(--noe-bg-0);
+  display: grid;
+  place-items: center;
+  color: var(--noe-muted);
+}
+
+.noe-cli {
+  font-family: ui-monospace, "Cascadia Code", monospace;
+  background: #05070a;
+  border: 1px solid var(--noe-line);
+  border-radius: 10px;
+  padding: 0.85rem;
+  min-height: 160px;
+  white-space: pre-wrap;
+}
+
+.noe-switch-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.noe-switch-row button[aria-pressed="true"] {
+  border-color: var(--noe-accent);
+  color: var(--noe-accent);
+}

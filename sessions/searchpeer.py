@@ -10,6 +10,12 @@ requirements:
 - the IDtoken must be in the correct location
 - the IDtoken must be in the correct state
 
+RULES:
+- No hardcoded values, all values are created at time of operation.
+- No placeholder values, all values are created at time of operation.
+- No sensitive data, all data is stored in the secrets file.
+- NO pull from GIT repository, all values are created at time of operation.
+- DO NOT EDIT THE COMMENTS, THEY ARE FOR DOCUMENTATION ONLY.
  """
 
 from __future__ import annotations
@@ -26,13 +32,20 @@ from ._common import (
     with_mongo,
 )
 from .SessionCore import find_session
-from .sessionID import validate_session_id
+from .sessionID import (
+    resolve_peer_search_label,
+    resolve_peer_user_id_mask_hex_len,
+    resolve_peer_user_id_mask_prefix,
+    validate_session_id,
+)
 
 
 def _mask_user_id(user_id: str) -> str:
     """Return unreadable masked UserID for peer-facing responses."""
     digest = hashlib.sha512(user_id.encode("utf-8")).hexdigest()
-    return f"MASKED:{digest[:16]}"
+    prefix = resolve_peer_user_id_mask_prefix()
+    hex_len = resolve_peer_user_id_mask_hex_len()
+    return f"{prefix}{digest[:hex_len]}"
 
 
 def _verify_participant_tokens(record: dict[str, Any], client: Any) -> bool:
@@ -41,7 +54,16 @@ def _verify_participant_tokens(record: dict[str, Any], client: Any) -> bool:
         user_token = db.id_tokens.find_one({"entity": "user", "UserID": user_id})
         if user_token is None:
             user_token = db.users.find_one({"UserID": user_id})
-        if user_token is None or not user_token.get("IDToken"):
+        if user_token is None:
+            user_token = db.id_tokens.find_one(
+                {"$or": [
+                    {"MasterUserID": user_id},
+                    {"AdminID": user_id},
+                ]}
+            )
+        if user_token is None or not (
+            user_token.get("IDToken") or user_token.get("TokenID")
+        ):
             return False
     return True
 
@@ -54,10 +76,14 @@ def search_peer(
     searcher_id_token: str | None = None,
     client: Any,
 ) -> dict[str, Any]:
-    """Search for a peer session by sessionID; peer UserIDs are masked."""
+    """Search for a peer session by sessionID; requires Rdp-sourced UserID/TokenID."""
     if not validate_session_id(session_id):
         raise ValueError("A valid sessionID is required for peer search")
-    if searcher_id_token and not verify_user_id_token(
+    if not searcher_id_token:
+        raise PermissionError(
+            "Searcher TokenID required — peer search relies on Rdp UserID/TokenID"
+        )
+    if not verify_user_id_token(
         user_id=searcher_user_id,
         id_token=searcher_id_token,
         client=client,
@@ -73,7 +99,9 @@ def search_peer(
     session_info = find_session(session_id=session_id, client=client)
     return {
         "sessionID": session_info["sessionID"],
+        "SessionID": session_info.get("SessionID"),
         "sessionStatus": session_info.get("sessionStatus"),
+        "SessionID_status": session_info.get("SessionID_status"),
         "participant_count": session_info.get("participant_count"),
         "all_agreed": session_info.get("all_agreed", False),
         "hostUserID": _mask_user_id(str(session_info.get("hostUserID", ""))),
@@ -84,18 +112,26 @@ def search_peer(
         ),
         "userIDs": [_mask_user_id(str(uid)) for uid in session_info.get("userIDs", [])],
         "searcherUserID": _mask_user_id(searcher_user_id),
-        "peer_search": "session-find",
+        "peer_search": resolve_peer_search_label(),
         "id_tokens_verified": True,
+        "rdp_user_required": True,
         "timestamp": utc_now(),
     }
 
 
 @with_mongo
-def peer_search(*, session_id: str, searcher_user_id: str, client: Any) -> dict[str, Any]:
+def peer_search(
+    *,
+    session_id: str,
+    searcher_user_id: str,
+    searcher_id_token: str | None = None,
+    client: Any,
+) -> dict[str, Any]:
     """Alias for search_peer used by session-find API routes."""
     return search_peer(
         session_id=session_id,
         searcher_user_id=searcher_user_id,
+        searcher_id_token=searcher_id_token,
         client=client,
     )
 

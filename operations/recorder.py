@@ -3,8 +3,15 @@ this is the protocol for the recording and storage of session data on the local 
 recorder protocol:
 - all actions and workings are recorded in the format of a mp4 video file
 - all mp4 video files are stored on the UserId's console in a History folder, within the lucid program folder
-- all mp4 video files are named with the sessionID and the creation date
+- all mp4 video files are named with the sessionID and the creation date    
+RULES of CODE CREATION:
+- No hardcoded values, all values are created at time of operation.
+- No placeholder values, all values are created at time of operation.
+- No sensitive data, all data is stored in the secrets file.
+- NO pull from GIT repository, all values are created at time of operation.
+- DO NOT EDIT THE COMMENTS, THEY ARE FOR DOCUMENTATION ONLY.
 """
+
 
 from __future__ import annotations
 

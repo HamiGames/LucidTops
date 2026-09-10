@@ -1,8 +1,15 @@
-f""" this is the image schema for the LucidTops blockchain's reward token generation
-[genesisTokens]: a series of sexy topless goddesses, with a sense of mythology and lore, they will all be unique images for the genesis tokens.and
-all other images will be a series of randomly generated, heroes, villains, creatures, and other characters from mythology and lore, they will all be unique images for the other tokens, 
-randomly output NSFW images in the schema for the other tokens. this will use a set of character personality profiles to generate the images.
-the image generation will be done in via a universe wide search engine or a text to image AI model. (perchance.org)[https://perchance.org/ai-text-to-image-generator#data=uup1:c6c1b3e21abeeaf1c68d590a79a6d4b5.gz]
+"""Image schema for LucidTops blockchain LucidToken reward generation.
+Profiles:
+- genesisTokens: mythology/lore genesis reward images
+- standardTokens: mythology character roster for subsequent tokens
+Image generator / universe search hosts come from blockchain.secrets at operation time
+(never baked external URLs or placeholder hashes in operational config).
+
+RULES of CODE CREATION:
+- No hardcoded values, all values are created at time of operation.
+- No placeholder values, all values are created at time of operation.
+- No sensitive data, all data is stored in the secrets file.
+- NO pull from GIT repository, all values are created at time of operation.
 """
 
 import argparse
@@ -23,15 +30,21 @@ if str(BLOCKCHAIN_DIR) not in sys.path:
 
 from blockchain_secrets import (  # noqa: E402
     resolve_image_generator_enabled,
+    resolve_image_generator_host,
+    resolve_image_generator_port,
+    resolve_image_generator_timeout_seconds,
     resolve_image_generator_url,
+    resolve_lucid_image_height,
+    resolve_lucid_image_schema_profile,
+    resolve_lucid_image_width,
+    resolve_lucid_token_nsfw_ratio,
+    resolve_lucid_tops_root,
+    resolve_max_token_image_bytes,
     resolve_universe_search_enabled,
+    resolve_universe_search_host,
+    resolve_universe_search_port,
     resolve_universe_search_url,
 )
-from configBlock import LUCID_TOPS_ROOT  # noqa: E402
-
-MAX_TOKEN_IMAGE_BYTES = 1_048_576
-DEFAULT_IMAGE_WIDTH = 512
-DEFAULT_IMAGE_HEIGHT = 512
 
 LUCID_IMAGE_SCHEMA_PROFILE_ENV = "LUCID_IMAGE_SCHEMA_PROFILE"
 IMAGE_GENERATOR_URL_ENV = "IMAGE_GENERATOR_URL"
@@ -45,9 +58,8 @@ UNIVERSE_SEARCH_PORT_ENV = "UNIVERSE_SEARCH_PORT"
 UNIVERSE_SEARCH_URL_ENV = "UNIVERSE_SEARCH_URL"
 NSFW_OUTPUT_RATIO_ENV = "LUCID_TOKEN_NSFW_RATIO"
 
-DEFAULT_STANDARD_PROFILE = "standardTokens"
+STANDARD_SCHEMA_PROFILE = "standardTokens"
 GENESIS_SCHEMA_PROFILE = "genesisTokens"
-DEFAULT_NSFW_OUTPUT_RATIO = 0.35
 
 SCHEMA_PROFILES: dict[str, dict[str, Any]] = {
     GENESIS_SCHEMA_PROFILE: {
@@ -59,7 +71,7 @@ SCHEMA_PROFILES: dict[str, dict[str, Any]] = {
         "prompt_style": "genesis_goddess_mythology_lore",
         "nsfw_eligible": False,
     },
-    DEFAULT_STANDARD_PROFILE: {
+    STANDARD_SCHEMA_PROFILE: {
         "label": "standardTokens",
         "theme": "mythology_character_roster",
         "palette": ("#263238", "#b71c1c", "#1565c0", "#2e7d32", "#6a1b9a"),
@@ -149,20 +161,28 @@ def _sha512_hex(value: str) -> str:
 
 
 def _nsfw_output_ratio() -> float:
-    raw = os.environ.get(NSFW_OUTPUT_RATIO_ENV, str(DEFAULT_NSFW_OUTPUT_RATIO)).strip()
-    try:
-        ratio = float(raw)
-    except ValueError:
-        ratio = DEFAULT_NSFW_OUTPUT_RATIO
-    return max(0.0, min(1.0, ratio))
+    env_raw = os.environ.get(NSFW_OUTPUT_RATIO_ENV, "").strip()
+    if env_raw:
+        try:
+            return max(0.0, min(1.0, float(env_raw)))
+        except ValueError as exc:
+            raise RuntimeError(
+                f"{NSFW_OUTPUT_RATIO_ENV} must be a float at time of operation"
+            ) from exc
+    return resolve_lucid_token_nsfw_ratio()
 
 
 def resolve_schema_profile(*, profile: str | None = None) -> str:
     """Resolve active schema profile from argument or DockerDNS-friendly env."""
     selected = (profile or os.environ.get(LUCID_IMAGE_SCHEMA_PROFILE_ENV, "")).strip()
-    if selected in SCHEMA_PROFILES:
-        return selected
-    return DEFAULT_STANDARD_PROFILE
+    if not selected:
+        selected = resolve_lucid_image_schema_profile()
+    if selected not in SCHEMA_PROFILES:
+        raise RuntimeError(
+            f"LUCID_IMAGE_SCHEMA_PROFILE missing or invalid — "
+            f"must be one of {sorted(SCHEMA_PROFILES)} at time of operation"
+        )
+    return selected
 
 
 def resolve_nsfw_output(
@@ -172,7 +192,7 @@ def resolve_nsfw_output(
     schema_profile: str,
 ) -> bool:
     """Randomly resolve NSFW output for standard token schema (deterministic per token)."""
-    schema = SCHEMA_PROFILES.get(schema_profile, SCHEMA_PROFILES[DEFAULT_STANDARD_PROFILE])
+    schema = SCHEMA_PROFILES[schema_profile]
     if not schema.get("nsfw_eligible", False):
         return False
 
@@ -253,11 +273,14 @@ def _render_procedural_png(
     schema_profile: str,
     character_profile: dict[str, Any],
     nsfw_output: bool = False,
-    width: int = DEFAULT_IMAGE_WIDTH,
-    height: int = DEFAULT_IMAGE_HEIGHT,
-    max_bytes: int = MAX_TOKEN_IMAGE_BYTES,
+    width: int | None = None,
+    height: int | None = None,
+    max_bytes: int | None = None,
 ) -> bytes:
     """Render a unique PNG from schema + character personality (stdlib, container-safe)."""
+    render_width = resolve_lucid_image_width() if width is None else width
+    render_height = resolve_lucid_image_height() if height is None else height
+    render_max_bytes = resolve_max_token_image_bytes() if max_bytes is None else max_bytes
     schema = SCHEMA_PROFILES[schema_profile]
     palette = [_hex_to_rgb(color) for color in schema["palette"]]
     shift = character_profile.get("palette_shift", (1.0, 1.0, 1.0))
@@ -272,13 +295,13 @@ def _render_procedural_png(
 
     seed = _sha512_hex(f"{lucid_token_id}:{owner_id}:{schema_profile}:{character_profile['seed']}")
     pixels = bytearray()
-    center_x = width / 2.0
-    center_y = height / 2.0
+    center_x = render_width / 2.0
+    center_y = render_height / 2.0
     max_radius = (center_x**2 + center_y**2) ** 0.5
 
-    for y in range(height):
+    for y in range(render_height):
         row_seed = _sha512_hex(f"{seed}:row:{y}")
-        for x in range(width):
+        for x in range(render_width):
             dx = x - center_x
             dy = y - center_y
             radius = ((dx**2 + dy**2) ** 0.5) / max_radius
@@ -302,7 +325,7 @@ def _render_procedural_png(
                 elif archetype == "trickster":
                     mix = ((angle_seed % 40) / 40.0 + radius) / 2.0
                 elif archetype == "lorekeeper":
-                    mix = (radius * 0.5) + ((x / width) * 0.5)
+                    mix = (radius * 0.5) + ((x / render_width) * 0.5)
                 else:
                     mix = (radius + ((angle_seed % 50) / 50.0)) / 2.0
                 color_a = shifted_palette[angle_seed % len(shifted_palette)]
@@ -315,10 +338,11 @@ def _render_procedural_png(
             pixels.extend((red, green, blue))
 
     raw_rows = b"".join(
-        b"\x00" + bytes(pixels[y * width * 3 : (y + 1) * width * 3]) for y in range(height)
+        b"\x00" + bytes(pixels[y * render_width * 3 : (y + 1) * render_width * 3])
+        for y in range(render_height)
     )
     compressed = zlib.compress(raw_rows, 9)
-    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    ihdr = struct.pack(">IIBBBBB", render_width, render_height, 8, 2, 0, 0, 0)
     metadata = {
         "LucidTokenID": lucid_token_id,
         "OwnerID": owner_id,
@@ -336,22 +360,22 @@ def _render_procedural_png(
     png.extend(_png_chunk(b"IDAT", compressed))
     png.extend(_png_chunk(b"IEND", b""))
 
-    if len(png) > max_bytes:
+    if len(png) > render_max_bytes:
         return _render_procedural_png(
             lucid_token_id=lucid_token_id,
             owner_id=owner_id,
             schema_profile=schema_profile,
             character_profile=character_profile,
             nsfw_output=nsfw_output,
-            width=max(128, width // 2),
-            height=max(128, height // 2),
-            max_bytes=max_bytes,
+            width=max(128, render_width // 2),
+            height=max(128, render_height // 2),
+            max_bytes=render_max_bytes,
         )
     return bytes(png)
 
 
 def _image_cache_path(*, lucid_token_id: str) -> Path:
-    cache_dir = LUCID_TOPS_ROOT / "Lucidtoken" / ".schema_cache"
+    cache_dir = resolve_lucid_tops_root() / "Lucidtoken" / ".schema_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
     return cache_dir / f"{lucid_token_id}.png"
 
@@ -412,8 +436,8 @@ def _try_universe_search_engine(
     if not enabled:
         return None
 
-    host = os.environ.get(UNIVERSE_SEARCH_HOST_ENV, "").strip()
-    port = os.environ.get(UNIVERSE_SEARCH_PORT_ENV, "8091").strip()
+    host = os.environ.get(UNIVERSE_SEARCH_HOST_ENV, "").strip() or resolve_universe_search_host()
+    port = os.environ.get(UNIVERSE_SEARCH_PORT_ENV, "").strip() or resolve_universe_search_port()
     base_url = (
         os.environ.get(UNIVERSE_SEARCH_URL_ENV, "").strip()
         or resolve_universe_search_url()
@@ -422,6 +446,11 @@ def _try_universe_search_engine(
         return None
 
     if host:
+        if not port:
+            raise RuntimeError(
+                "UNIVERSE_SEARCH_PORT missing — must be set at time of operation when "
+                "UNIVERSE_SEARCH_HOST is configured"
+            )
         request_url = (
             f"http://{host}:{port}/search/image?"
             f"{urllib.parse.urlencode({'q': prompt, 'format': 'png'})}"
@@ -454,8 +483,8 @@ def _try_text_to_image_generator(
     if not enabled:
         return None
 
-    host = os.environ.get(IMAGE_GENERATOR_HOST_ENV, "").strip()
-    port = os.environ.get(IMAGE_GENERATOR_PORT_ENV, "8090").strip()
+    host = os.environ.get(IMAGE_GENERATOR_HOST_ENV, "").strip() or resolve_image_generator_host()
+    port = os.environ.get(IMAGE_GENERATOR_PORT_ENV, "").strip() or resolve_image_generator_port()
     base_url = (
         os.environ.get(IMAGE_GENERATOR_URL_ENV, "").strip()
         or resolve_image_generator_url()
@@ -464,6 +493,11 @@ def _try_text_to_image_generator(
         return None
 
     if host:
+        if not port:
+            raise RuntimeError(
+                "IMAGE_GENERATOR_PORT missing — must be set at time of operation when "
+                "IMAGE_GENERATOR_HOST is configured"
+            )
         request_url = (
             f"http://{host}:{port}/generate?"
             f"{urllib.parse.urlencode({'prompt': prompt})}"
@@ -506,10 +540,11 @@ def render_token_image(
     *,
     lucid_token_id: str,
     owner_id: str,
-    max_bytes: int = MAX_TOKEN_IMAGE_BYTES,
+    max_bytes: int | None = None,
     schema_profile: str | None = None,
 ) -> bytes:
     """Generate a LucidToken PNG using the active image schema profile."""
+    render_max_bytes = resolve_max_token_image_bytes() if max_bytes is None else max_bytes
     profile_name = resolve_schema_profile(profile=schema_profile)
     nsfw_output = resolve_nsfw_output(
         lucid_token_id=lucid_token_id,
@@ -541,13 +576,22 @@ def render_token_image(
     cache_path = _image_cache_path(lucid_token_id=lucid_token_id)
     if cache_path.exists():
         cached = cache_path.read_bytes()
-        if 0 < len(cached) <= max_bytes:
+        if 0 < len(cached) <= render_max_bytes:
             return cached
 
-    timeout_seconds = float(os.environ.get(IMAGE_GENERATOR_TIMEOUT_ENV, "8"))
+    timeout_raw = os.environ.get(IMAGE_GENERATOR_TIMEOUT_ENV, "").strip()
+    if timeout_raw:
+        try:
+            timeout_seconds = float(timeout_raw)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"{IMAGE_GENERATOR_TIMEOUT_ENV} must be a float at time of operation"
+            ) from exc
+    else:
+        timeout_seconds = resolve_image_generator_timeout_seconds()
     external = _try_remote_image_sources(
         prompt=prompt,
-        max_bytes=max_bytes,
+        max_bytes=render_max_bytes,
         timeout_seconds=timeout_seconds,
     )
     if external is not None:
@@ -560,7 +604,7 @@ def render_token_image(
         schema_profile=profile_name,
         character_profile=character,
         nsfw_output=nsfw_output,
-        max_bytes=max_bytes,
+        max_bytes=render_max_bytes,
     )
     cache_path.write_bytes(png_bytes)
     return png_bytes
@@ -607,7 +651,7 @@ def schema_metadata(
         "universe_search_url": resolve_universe_search_url() or None,
         "generator_url": resolve_image_generator_url() or None,
         "generator_enabled": resolve_image_generator_enabled(),
-        "cache_root": (LUCID_TOPS_ROOT / "Lucidtoken" / ".schema_cache").as_posix(),
+        "cache_root": (resolve_lucid_tops_root() / "Lucidtoken" / ".schema_cache").as_posix(),
     }
 
 

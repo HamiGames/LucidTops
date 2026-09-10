@@ -19,12 +19,18 @@ UserRoutes:
 - /user-session-report: report a session (links to sessionRoutes.py)
 - /user-session-transfer: transfer a session (links to sessionRoutes.py)
 - /user-session-control: control a session (links to sessionRoutes.py)
-- 
+
+RULES of CODE CREATION:
+- No hardcoded values, all values are created at time of operation.
+- No placeholder values, all values are created at time of operation.
+- No sensitive data, all data is stored in the secrets file.
+- NO pull from GIT repository, all values are created at time of operation.
+- DO NOT EDIT THE COMMENTS, THEY ARE FOR DOCUMENTATION ONLY.
+
 """
 
 from __future__ import annotations
 
-import secrets
 from typing import Any
 
 from _common import (
@@ -32,13 +38,18 @@ from _common import (
     BaseModel,
     Field,
     LUCID_LEDGER_COLLECTION,
+    OperatorAuthPayload,
     get_master_db,
     get_mongo_client,
     handle_operations_error,
+    operator_kwargs_from_payload,
+    require_operations_operator,
     tor_envelope,
+    user_accounts_collection,
     utc_now,
-    verify_id_token,
+    verify_user_id_token,
 )
+from UserHandler import verify_user_credentials
 from WebPageLink import frontend_link_for_api_route
 from operations_secrets import (
     resolve_operations_api_prefix,
@@ -84,20 +95,22 @@ USER_ROUTES: tuple[str, ...] = (
 
 if BaseModel is not object:
 
-    class UserAuthPayload(BaseModel):
+    class UserAuthPayload(OperatorAuthPayload):
         user_id: str = Field(..., alias="UserID")
-        id_token: str = Field(..., alias="IDToken")
+        user_token_id: str = Field(..., alias="UserTokenID")
 
         model_config = {"populate_by_name": True}
 
-    class UserCreatePayload(BaseModel):
-        email: str = Field(..., min_length=3)
+    class UserCreatePayload(OperatorAuthPayload):
+        email: str = Field(..., min_length=3)  # type: ignore[reportIncompatibleVariableOverride]
         password: str = Field(..., min_length=8)
         source: str = Field(default_factory=resolve_user_register_javascript_source)
 
-    class UserFindPayload(BaseModel):
+        model_config = {"populate_by_name": True}
+
+    class UserFindPayload(OperatorAuthPayload):
         user_id: str = Field(..., alias="UserID")
-        id_token: str = Field(..., alias="IDToken")
+        user_token_id: str = Field(..., alias="UserTokenID")
 
         model_config = {"populate_by_name": True}
 
@@ -123,7 +136,7 @@ if BaseModel is not object:
         model_config = {"populate_by_name": True}
 
     class UserSessionReportPayload(UserSessionPayload):
-        report: str = Field(default="")
+        report: str = Field(default_factory=str)
 
 
 def _attach_frontend_link(result: dict[str, Any], route: str) -> None:
@@ -142,69 +155,97 @@ def _user_handler(route: str, payload: Any) -> dict[str, Any]:
     if client is None:
         raise RuntimeError("Master server database is unavailable")
     try:
+        operator = require_operations_operator(
+            client=client,
+            **operator_kwargs_from_payload(payload),
+        )
+        users = user_accounts_collection(client)
         db = get_master_db(client)
+
         if route == "/user-create":
-            existing = db.users.find_one({"email": payload.email})
+            existing = users.find_one({"email": payload.email})
             if existing:
                 raise ValueError("User already exists")
-            user_id = secrets.token_hex(4)
-            id_token = secrets.token_urlsafe(32)
+            # UserID and TokenID are created at time of operation (not placeholders).
+            import secrets as _secrets
+
+            user_id = _secrets.token_hex(8)
+            token_id = _secrets.token_urlsafe(32)
             now = utc_now()
-            db.users.insert_one(
+            users.insert_one(
                 {
                     "UserID": user_id,
-                    "IDToken": id_token,
+                    "TokenID": token_id,
                     "email": payload.email,
                     "password": payload.password,
                     "created_at": now,
                     "updated_at": now,
                     "source": payload.source,
+                    "created_by": {
+                        operator["id_type"]: operator["operator_id"],
+                    },
                 }
             )
-            result = {"UserID": user_id, "IDToken": id_token, "status": "created"}
+            result = {"UserID": user_id, "TokenID": token_id, "status": "created"}
         elif route == "/user-find":
-            if not verify_id_token(
-                user_id=payload.user_id, id_token=payload.id_token, client=client
-            ):
-                raise PermissionError("User authentication failed")
-            user = db.users.find_one({"UserID": payload.user_id}) or {}
+            verified = verify_user_credentials(
+                user_id=payload.user_id,
+                token_id=payload.user_token_id,
+                client=client,
+            )
             result = {
-                "UserID": payload.user_id,
-                "email": user.get("email"),
-                "tier": user.get("tier"),
-                "status": "found",
+                **verified,
+                "operator_id": operator["operator_id"],
+                "id_type": operator["id_type"],
             }
         elif route in {"/user-connect", "/user-record", "/user-report", "/user-transfer", "/user-control"}:
-            if not verify_id_token(
-                user_id=payload.user_id, id_token=payload.id_token, client=client
+            if not verify_user_id_token(
+                user_id=payload.user_id,
+                token_id=payload.user_token_id,
+                client=client,
             ):
-                raise PermissionError("User authentication failed")
+                raise PermissionError("UserID / TokenID verification failed")
             result = {
                 "UserID": payload.user_id,
                 "action": route.lstrip("/"),
                 "status": "ok",
+                "operator_id": operator["operator_id"],
             }
         elif route in {"/user-disconnect", "/user-end"}:
             result = {
                 "UserID": payload.user_id,
                 "action": route.lstrip("/"),
                 "status": "disconnected",
+                "operator_id": operator["operator_id"],
             }
         elif route == "/user-LucidLedger-read":
-            if not verify_id_token(
-                user_id=payload.user_id, id_token=payload.id_token, client=client
+            if not verify_user_id_token(
+                user_id=payload.user_id,
+                token_id=payload.user_token_id,
+                client=client,
             ):
-                raise PermissionError("User authentication failed")
+                raise PermissionError("UserID / TokenID verification failed")
             records = list(
                 db[LUCID_LEDGER_COLLECTION].find({}, {"_id": 0}).limit(
                     resolve_operations_ledger_read_limit()
                 )
             )
-            result = {"UserID": payload.user_id, "records": records, "count": len(records)}
+            result = {
+                "UserID": payload.user_id,
+                "records": records,
+                "count": len(records),
+                "operator_id": operator["operator_id"],
+            }
         elif route == "/user-session-create":
+            if not verify_user_id_token(
+                user_id=payload.user_id,
+                token_id=payload.user_token_id,
+                client=client,
+            ):
+                raise PermissionError("UserID / TokenID verification failed")
             result = create_session(
                 host_user_id=payload.user_id,
-                id_token=payload.id_token,
+                id_token=payload.user_token_id,
             )
         elif route == "/user-session-find":
             result = find_session(session_id=payload.session_id)
@@ -213,19 +254,19 @@ def _user_handler(route: str, payload: Any) -> dict[str, Any]:
                 session_id=payload.session_id,
                 session_key=payload.session_key,
                 user_id=payload.user_id,
-                id_token=payload.id_token,
+                id_token=payload.user_token_id,
             )
         elif route == "/user-session-disconnect":
             result = disconnect_session(
                 session_id=payload.session_id,
                 user_id=payload.user_id,
-                id_token=payload.id_token,
+                id_token=payload.user_token_id,
             )
         elif route == "/user-session-end":
             result = end_session(
                 session_id=payload.session_id,
                 host_user_id=payload.user_id,
-                id_token=payload.id_token,
+                id_token=payload.user_token_id,
             )
         elif route == "/user-session-record":
             result = record_session_event(

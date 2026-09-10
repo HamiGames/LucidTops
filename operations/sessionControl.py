@@ -37,6 +37,13 @@ must include:
 - the viewers controls will not modify the controls of the host
 - the host will maintain the superior functions and controls while in the sessionID in the session system
 - the session control settings will not be force removed while in a sessionID
+
+RULES of CODE CREATION:
+- No hardcoded values, all values are created at time of operation.
+- No placeholder values, all values are created at time of operation.
+- No sensitive data, all data is stored in the secrets file.
+- NO pull from GIT repository, all values are created at time of operation.
+- DO NOT EDIT THE COMMENTS, THEY ARE FOR DOCUMENTATION ONLY.
 """
 
 from __future__ import annotations
@@ -45,28 +52,10 @@ import copy
 from typing import Any
 
 from _common import SESSION_RECORDS_COLLECTION, get_master_db, utc_now, with_mongo
-from operations_secrets import resolve_session_control_javascript_source
-
-SESSION_CONTROL_SETTINGS: dict[str, bool] = {
-    "mouse_control": False,
-    "keyboard_control": False,
-    "audio_control": False,
-    "video_control": False,
-    "screen_control": False,
-    "file_transfer_control": False,
-    "file_download_control": False,
-    "file_upload_control": False,
-    "file_delete_control": False,
-    "file_rename_control": False,
-    "file_move_control": False,
-    "file_copy_control": False,
-    "file_paste_control": False,
-    "file_zip_control": False,
-    "file_unzip_control": False,
-    "file_sync_control": False,
-    "file_transfer_location_control": False,
-    "peer_to_peer_remote_desktop_sharing_session_control": False,
-}
+from operations_secrets import (
+    resolve_session_control_javascript_source,
+    resolve_session_control_setting_keys,
+)
 
 IMMUTABLE_MESSAGE = (
     "Session control settings are read-only; modification is blocked for all connected entities"
@@ -74,7 +63,8 @@ IMMUTABLE_MESSAGE = (
 
 
 def default_control_settings() -> dict[str, bool]:
-    return copy.deepcopy(SESSION_CONTROL_SETTINGS)
+    """Build control schema keys from operations.secrets; all start disabled until host loads settings.js."""
+    return {key: False for key in resolve_session_control_setting_keys()}
 
 
 def _freeze_settings(settings: dict[str, bool]) -> dict[str, bool]:

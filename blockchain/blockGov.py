@@ -1,11 +1,25 @@
-"""Blockchain-local NodeUser governance checks (no backend imports)."""
+"""Blockchain-local NodeUser governance checks (no backend imports).
+
+RULES of CODE CREATION:
+- No hardcoded values, all values are created at time of operation.
+- No placeholder values, all values are created at time of operation.
+- No sensitive data, all data is stored in the secrets file.
+- NO pull from GIT repository, all values are created at time of operation.
+- DO NOT EDIT THE COMMENTS, THEY ARE FOR DOCUMENTATION ONLY."""
 
 from __future__ import annotations
 
 import secrets
+import sys
+from pathlib import Path
 from typing import Any, Literal
 
-from configBlock import NODE_MIN_MEMORY_GB, get_blockchain_db, get_mongo_client, utc_now
+BLOCKCHAIN_DIR = Path(__file__).resolve().parent
+if str(BLOCKCHAIN_DIR) not in sys.path:
+    sys.path.insert(0, str(BLOCKCHAIN_DIR))
+
+from blockchain_secrets import resolve_node_min_memory_gb  # noqa: E402
+from configBlock import get_blockchain_db, get_mongo_client, utc_now  # noqa: E402
 
 NodeOperation = Literal[
     "session",
@@ -40,7 +54,7 @@ BLOCKCHAIN_ALLOWED: frozenset[NodeOperation] = frozenset(
 def verify_node_memory_requirement(reported_memory_gb: int | None) -> bool:
     if reported_memory_gb is None:
         return False
-    return reported_memory_gb >= NODE_MIN_MEMORY_GB
+    return reported_memory_gb >= resolve_node_min_memory_gb()
 
 
 def is_node_banned(node_user_id: str, *, client: Any | None = None) -> bool:
@@ -103,6 +117,7 @@ def validate_node_operation(
 
     if operation in RESTRICTED_NODE_OPERATIONS:
         if operation == "ledger_write" and is_latest_block_creator:
+            # Latest block creator may perform ledger_write; do not ban.
             pass
         else:
             ban_node_user(
@@ -112,21 +127,29 @@ def validate_node_operation(
             )
             raise PermissionError(f"Operation not permitted for NodeUser: {operation}")
 
+    if operation == "ledger_write":
+        if not is_latest_block_creator:
+            raise PermissionError(
+                "NodeUser may update ledger only when creator of latest block"
+            )
+        return {
+            "NodeUserID": node_user_id,
+            "operation": operation,
+            "permitted": True,
+            "memory_requirement_gb": resolve_node_min_memory_gb(),
+            "memory_verified": verify_node_memory_requirement(reported_memory_gb),
+        }
+
     if operation in BLOCKCHAIN_ALLOWED and operation == "blockchain_create":
         if not verify_node_memory_requirement(reported_memory_gb):
             raise PermissionError(
-                f"NodeUser console must meet {NODE_MIN_MEMORY_GB}GB memory requirement"
+                f"NodeUser console must meet {resolve_node_min_memory_gb()}GB memory requirement"
             )
-
-    if operation == "ledger_write" and not is_latest_block_creator:
-        raise PermissionError(
-            "NodeUser may update ledger only when creator of latest block"
-        )
 
     return {
         "NodeUserID": node_user_id,
         "operation": operation,
         "permitted": True,
-        "memory_requirement_gb": NODE_MIN_MEMORY_GB,
+        "memory_requirement_gb": resolve_node_min_memory_gb(),
         "memory_verified": verify_node_memory_requirement(reported_memory_gb),
     }

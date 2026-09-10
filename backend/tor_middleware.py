@@ -2,6 +2,25 @@
 
 Applies LucidTops Tor connection protocols (connection.py) and javascript frontend
 linkage (WebPageLink.py) for all API traffic over *.onion hidden services.
+includes:
+- the backend support required for a self hosted website on the Tor network (@*.onion)
+- the backend support required for a self hosted website on the Clearnet network (https://*)
+
+operational requirements:
+- uses nginx reverse proxy system
+- uses DockerDNS for network communication
+- uses Tor Hidden Service and Docker Network for network communications as a fallback
+- uses MongoDB 7.0.0 or higher for database storage
+- requires registration with the MasterServer (uvicorn server and FastAPI system) to be operational
+- stabalizes connection to the MasterServer (uvicorn server and FastAPI system)
+- ensures the connection is secure and encrypted
+- uses (mnt/myssd/LucidTops/secrets/backend.secrets) for authentication and encryption requirements
+
+
+clearnet requirements:
+- HMAC-SHA256 for authentication, to enter the clearnet connection
+- EMV 3D Secure for payment processing.
+
 """
 
 from __future__ import annotations
@@ -14,6 +33,8 @@ from config import (
     GUI_PREFIX,
     MASTER_SERVER_TOR_ONLY,
     format_tor_onion_service,
+    get_config_value,
+    get_config_value_optional,
     get_local_tor_forward_hosts,
     get_tor_api_service,
     get_tor_gui_service,
@@ -21,10 +42,11 @@ from config import (
     utc_now,
 )
 from connection import (
-    CONNECTION_PROTOCOL,
-    TORRENT_LAYER_PROTOCOL,
-    TRANSPORT_PROTOCOL,
     normalize_onion_address,
+    resolve_connection_network,
+    resolve_connection_protocol,
+    resolve_torrent_layer_protocol,
+    resolve_transport_protocol,
     validate_onion_address,
 )
 from WebPageLink import (
@@ -68,10 +90,20 @@ LUCID_JAVASCRIPT_HEADERS: tuple[str, ...] = (
 LUCID_CORS_ALLOW_HEADERS: str = (
     "Content-Type, Authorization, X-API-Key, X-IDToken, "
     "X-Lucid-Source, X-Lucid-JavaScript, X-Javascript-Source, "
-    "X-Connection-Type, X-Onion-Address"
+    "X-Connection-Type, X-Onion-Address, "
+    "X-Lucid-Proxy-Gate, X-Lucid-Proxy-Source, X-Lucid-Proxy-Target, "
+    "X-Lucid-Upstream-Token, X-Lucid-Proxy-Token, X-Lucid-Hmac-Sha256"
 )
 
 LUCID_CORS_ALLOW_METHODS: str = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+
+
+def _cors_max_age() -> str:
+    return get_config_value("CORS_MAX_AGE")
+
+
+def _frontend_source_prefix() -> str:
+    return get_config_value("FRONTEND_SOURCE_PREFIX").strip().strip("/")
 
 
 def _hostname_from_host(host: str) -> str:
@@ -83,7 +115,26 @@ def _host_is_tor(host: str) -> bool:
 
 
 def _host_is_local_tor_forward(host: str) -> bool:
-    return _hostname_from_host(host) in get_local_tor_forward_hosts()
+    try:
+        return _hostname_from_host(host) in get_local_tor_forward_hosts()
+    except RuntimeError:
+        return False
+
+
+def _proxy_gate_authorized(request: Any) -> bool:
+    """Accept traffic forwarded by ProxyGate using secrets created at operation time."""
+    expected_gate = get_config_value_optional("PROXY_GATE_HEADER_VALUE")
+    if not expected_gate:
+        return False
+    gate = request.headers.get("x-lucid-proxy-gate", "").strip()
+    if gate != expected_gate:
+        return False
+    expected_token = get_config_value_optional("PROXY_NGINX_UPSTREAM_TOKEN")
+    if expected_token:
+        upstream = request.headers.get("x-lucid-upstream-token", "").strip()
+        if upstream != expected_token:
+            return False
+    return True
 
 
 def _origin_is_tor(origin: str) -> bool:
@@ -137,7 +188,7 @@ def _resolve_javascript_source(request: Any) -> str | None:
 def _frontend_link_for_javascript(javascript: str) -> dict[str, str | None]:
     normalized = _normalize_javascript_source(javascript)
     return {
-        "frontend": f"frontend/{normalized}",
+        "frontend": f"{_frontend_source_prefix()}/{normalized}",
         "javascript": normalized,
         "api_path": resolve_api_path(normalized),
         "gui_path": resolve_gui_path(normalized),
@@ -175,11 +226,11 @@ def _resolve_cors_origin(request: Any) -> str | None:
 
 def _build_tor_protocol_headers(*, master_onion: str | None) -> dict[str, str]:
     headers = {
-        "X-Lucid-Network": "tor",
+        "X-Lucid-Network": resolve_connection_network(),
         "X-Lucid-Tor-Only": "true",
-        "X-Lucid-Protocol": CONNECTION_PROTOCOL,
-        "X-Lucid-Transport": TRANSPORT_PROTOCOL,
-        "X-Lucid-Torrent-Layer": TORRENT_LAYER_PROTOCOL,
+        "X-Lucid-Protocol": resolve_connection_protocol(),
+        "X-Lucid-Transport": resolve_transport_protocol(),
+        "X-Lucid-Torrent-Layer": resolve_torrent_layer_protocol(),
         "X-Lucid-Tor-Api-Service": get_tor_api_service(),
         "X-Lucid-Tor-Gui-Service": get_tor_gui_service(),
     }
@@ -202,7 +253,7 @@ def _build_cors_headers(request: Any) -> dict[str, str]:
             "X-Lucid-Transport, X-Lucid-Master-Onion, X-Lucid-Javascript, "
             "X-Lucid-Frontend, X-Lucid-Tor-Api-Service, X-Lucid-Tor-Gui-Service"
         ),
-        "Access-Control-Max-Age": "86400",
+        "Access-Control-Max-Age": _cors_max_age(),
         "Vary": "Origin",
     }
 
@@ -225,11 +276,11 @@ def _tor_denied_response(
     body: dict[str, Any] = {
         "detail": detail,
         "service": "master_server",
-        "network": "tor",
+        "network": resolve_connection_network(),
         "tor_only": True,
-        "protocol": CONNECTION_PROTOCOL,
-        "transport": TRANSPORT_PROTOCOL,
-        "torrent_layer": TORRENT_LAYER_PROTOCOL,
+        "protocol": resolve_connection_protocol(),
+        "transport": resolve_transport_protocol(),
+        "torrent_layer": resolve_torrent_layer_protocol(),
         "master_server_onion": master_onion or "",
         "frontend_onion": frontend_onion or FRONTEND_ONION or "",
         "tor_api_service": get_tor_api_service(),
@@ -328,10 +379,11 @@ def register_tor_middleware(app: object) -> None:
                         response.headers["X-Lucid-Frontend"] = str(link["frontend"])
                 return response
 
-            if _host_is_local_tor_forward(host):
+            if _proxy_gate_authorized(request) or _host_is_local_tor_forward(host):
                 response = await call_next(request)
                 _attach_response_headers(response, protocol_headers)
                 _attach_response_headers(response, cors_headers)
+                response.headers["X-Lucid-Proxy-Mediated"] = "true"
                 return response
 
             denied = _tor_denied_response(

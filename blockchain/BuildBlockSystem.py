@@ -1,15 +1,25 @@
 """ this will build all the necessary content for the operation required by the blockchain container.
 includes:
+- hardware pull at time of operation (pull_information.py)
+- blockchain.secrets creation from pull (blockchain_secrets.py)
 - the genesis block creation (configBlock.py)
-- the insertion of the genesis block into the ledger system (Ledger.py)
+- the insertion of the genesis block into the ledger system (legder.py / LucidTops_LedgerDB)
 - the creation of the blockchain system governance protocol (blockGov.py)
 - the creation of the blockchain system tally system (tally.py)
+- FastAPI route connection (ConnectBlockRoutes.py)
 
 this script will all the starting/ running of the blockchain system via the starting of the blockchain container.
 this will allow the stopping/ restarting of the blockchain system via the stopping of the blockchain container.
 this will allow for a opretional state (finalized) where the blockchain system is no longer able to be modified or changed.
-finalized is when all containers are linked and functioning correctly defined by a container naming [blockchain-finalized].
-once naming of container is defined as [blockchain-finalized] the blockchain system is no longer able to be modified or changed.
+finalized is when all containers are linked and functioning correctly defined by a container naming resolved at operation time
+(default finalize marker name from secrets/env; historically blockchain-finalized).
+once naming of container is defined as finalized the blockchain system is no longer able to be modified or changed.
+
+RULES of CODE CREATION:
+- No hardcoded values, all values are created at time of operation.
+- No placeholder values, all values are created at time of operation.
+- No sensitive data, all data is stored in the secrets file.
+- NO pull from GIT repository, all values are created at time of operation.
 """
 
 from __future__ import annotations
@@ -36,12 +46,15 @@ from blockchain_schema import (  # noqa: E402
 )
 from blockchain_secrets import (  # noqa: E402
     blockchain_secrets_status,
+    ensure_blockchain_secrets,
     resolve_blockchain_container_name,
+    resolve_blockchain_mongodb_poll_seconds,
+    resolve_blockchain_mongodb_wait_seconds,
     resolve_master_server_internal_host,
     resolve_master_server_internal_port,
     resolve_mongodb_host,
     resolve_mongodb_port,
-    write_blockchain_secrets_template,
+    resolve_node_min_memory_gb,
 )
 from blockGov import (  # noqa: E402
     BANNED_OPERATIONS_COLLECTION,
@@ -57,6 +70,7 @@ from configBlock import (  # noqa: E402
     utc_now,
 )
 from legder import get_ledger_last_hash  # noqa: E402
+from pull_information import pull_blockchain_hardware  # noqa: E402
 from tally import seed_tally_sync  # noqa: E402
 
 try:
@@ -64,18 +78,21 @@ try:
 except ImportError:  # pragma: no cover
     connect_blockchain_routes = None  # type: ignore[misc, assignment]
 
-BLOCKCHAIN_FINALIZED_CONTAINER_NAME = "blockchain-finalized"
 BLOCKCHAIN_FINALIZED_LOCK_FILENAME = ".blockchain_finalized"
 BLOCKCHAIN_BUILD_STATE_ID = "blockchain_system_build"
 BLOCKCHAIN_GOVERNANCE_STATE_ID = "blockchain_governance_initialized"
 BLOCKCHAIN_TALLY_STATE_ID = "blockchain_tally_initialized"
 
-DEFAULT_MONGODB_HOST = resolve_mongodb_host()
-DEFAULT_MONGODB_PORT = resolve_mongodb_port()
-DEFAULT_MASTER_SERVER_HOST = resolve_master_server_internal_host()
-DEFAULT_MASTER_SERVER_PORT = resolve_master_server_internal_port()
-DEFAULT_MONGODB_WAIT_SECONDS = int(os.environ.get("BLOCKCHAIN_MONGODB_WAIT_SECONDS", "120"))
-DEFAULT_MONGODB_POLL_SECONDS = float(os.environ.get("BLOCKCHAIN_MONGODB_POLL_SECONDS", "2.0"))
+
+def resolve_finalized_container_name() -> str:
+    """Finalize marker name from secrets/env at operation time."""
+    configured = resolve_blockchain_container_name()
+    marker = os.environ.get("BLOCKCHAIN_FINALIZED_CONTAINER_NAME", "").strip()
+    if marker:
+        return marker
+    if configured and configured.endswith("-finalized"):
+        return configured
+    return f"{configured or 'blockchain'}-finalized"
 
 
 class BlockchainFinalizedError(PermissionError):
@@ -96,6 +113,24 @@ def resolve_container_name() -> str:
 
 def finalized_lock_path() -> Path:
     return lucidtoken_root_dir() / BLOCKCHAIN_FINALIZED_LOCK_FILENAME
+
+
+def bootstrap_operation_environ() -> dict[str, Any]:
+    """Pull hardware and write blockchain.secrets before any other build step."""
+    pull = pull_blockchain_hardware(bind_environ=True)
+    secrets_path = ensure_blockchain_secrets(force=False)
+    return {
+        "pull": {
+            "primary_ip": pull.get("primary_ip"),
+            "primary_mac": pull.get("primary_mac"),
+            "machine_id": pull.get("machine_id"),
+            "hostname": pull.get("hostname"),
+            "mongodb_host": pull.get("mongodb_host"),
+            "databases_dir": pull.get("databases_dir"),
+            "ledger_replica_dir": pull.get("ledger_replica_dir"),
+        },
+        "secrets_file": secrets_path.as_posix(),
+    }
 
 
 def _blockchain_state_collection(client: Any) -> Any:
@@ -120,7 +155,7 @@ def _read_finalized_state(*, client: Any | None = None) -> dict[str, Any] | None
 
 def is_blockchain_finalized(*, client: Any | None = None) -> bool:
     """Return True when the blockchain system is immutable (finalized container or lock)."""
-    if resolve_container_name() == BLOCKCHAIN_FINALIZED_CONTAINER_NAME:
+    if resolve_container_name() == resolve_finalized_container_name():
         return True
     if finalized_lock_path().exists():
         return True
@@ -130,10 +165,11 @@ def is_blockchain_finalized(*, client: Any | None = None) -> bool:
 
 def assert_blockchain_modifiable(*, force: bool = False, client: Any | None = None) -> None:
     """Reject mutations when the blockchain system is finalized."""
+    finalized_name = resolve_finalized_container_name()
     if force and is_blockchain_finalized(client=client):
         raise BlockchainFinalizedError(
             "Blockchain system is finalized and cannot be modified; "
-            f"container naming [{BLOCKCHAIN_FINALIZED_CONTAINER_NAME}] is immutable"
+            f"container naming [{finalized_name}] is immutable"
         )
     if is_blockchain_finalized(client=client):
         raise BlockchainFinalizedError(
@@ -143,21 +179,33 @@ def assert_blockchain_modifiable(*, force: bool = False, client: Any | None = No
 
 def wait_for_mongodb(
     *,
-    timeout_seconds: int = DEFAULT_MONGODB_WAIT_SECONDS,
-    poll_seconds: float = DEFAULT_MONGODB_POLL_SECONDS,
+    timeout_seconds: int | None = None,
+    poll_seconds: float | None = None,
 ) -> Any:
-    """Wait for MongoDB via Docker DNS (default host: lucid-mongodb)."""
-    deadline = time.time() + timeout_seconds
+    """Wait for MongoDB via Docker DNS host from blockchain.secrets."""
+    wait_timeout = (
+        resolve_blockchain_mongodb_wait_seconds()
+        if timeout_seconds is None
+        else timeout_seconds
+    )
+    wait_poll = (
+        resolve_blockchain_mongodb_poll_seconds()
+        if poll_seconds is None
+        else poll_seconds
+    )
+    mongodb_host = resolve_mongodb_host()
+    mongodb_port = resolve_mongodb_port()
+    deadline = time.time() + wait_timeout
     last_error = "unknown"
     while time.time() < deadline:
         client = get_mongo_client()
         if client is not None:
             return client
-        last_error = f"{DEFAULT_MONGODB_HOST}:{DEFAULT_MONGODB_PORT}"
-        time.sleep(poll_seconds)
+        last_error = f"{mongodb_host}:{mongodb_port}"
+        time.sleep(wait_poll)
     raise RuntimeError(
         "Blockchain database is unavailable "
-        f"(Docker DNS host={DEFAULT_MONGODB_HOST}, last_target={last_error})"
+        f"(Docker DNS host={mongodb_host}, last_target={last_error})"
     )
 
 
@@ -172,15 +220,18 @@ def _resolve_docker_dns_host(host: str, *, port: int) -> bool:
 
 def verify_linked_containers(*, client: Any) -> dict[str, Any]:
     """Verify linked stack containers are reachable via Docker DNS."""
+    mongodb_host = resolve_mongodb_host()
+    master_host = resolve_master_server_internal_host()
+    master_port = resolve_master_server_internal_port()
     checks = {
         "mongodb": client is not None,
-        "mongodb_host": DEFAULT_MONGODB_HOST,
+        "mongodb_host": mongodb_host,
         "master_server_dns": _resolve_docker_dns_host(
-            DEFAULT_MASTER_SERVER_HOST,
-            port=DEFAULT_MASTER_SERVER_PORT,
+            master_host,
+            port=master_port,
         ),
-        "master_server_host": DEFAULT_MASTER_SERVER_HOST,
-        "master_server_port": DEFAULT_MASTER_SERVER_PORT,
+        "master_server_host": master_host,
+        "master_server_port": master_port,
     }
     return {
         "linked": all(
@@ -201,10 +252,16 @@ def ensure_blockchain_collections(*, client: Any) -> dict[str, Any]:
     for collection_name in COLLECTION_SCHEMAS:
         db[collection_name].create_index("created_at")
         ensured.append(collection_name)
-    db[BLOCKCHAIN_BLOCKS_COLLECTION].create_index("blockID", unique=True)
+    db[BLOCKCHAIN_BLOCKS_COLLECTION].create_index(
+        "blockID", unique=True, sparse=True
+    )
+    db[BLOCKCHAIN_BLOCKS_COLLECTION].create_index(
+        "New_BlockID", unique=True, sparse=True
+    )
     db[BLOCKCHAIN_BLOCKS_COLLECTION].create_index("status")
     db[LEDGER_RECORDS_COLLECTION].create_index([("created_at", -1)])
     db[LEDGER_RECORDS_COLLECTION].create_index("record_type")
+    db[LEDGER_RECORDS_COLLECTION].create_index("BlockID", sparse=True)
     return {"collections_ensured": ensured}
 
 
@@ -272,7 +329,7 @@ def initialize_blockchain_governance(*, client: Any, force: bool = False) -> dic
             "$set": {
                 "state_id": BLOCKCHAIN_GOVERNANCE_STATE_ID,
                 "initialized": True,
-                "node_min_memory_gb": int(os.environ.get("NODE_MIN_MEMORY_GB", "50")),
+                "node_min_memory_gb": resolve_node_min_memory_gb(),
                 "updated_at": now,
             },
             "$setOnInsert": {"created_at": now},
@@ -406,7 +463,7 @@ def get_blockchain_runtime_status(*, client: Any | None = None) -> dict[str, Any
         return {
             "operational": False,
             "reason": "Blockchain database is unavailable",
-            "mongodb_host": DEFAULT_MONGODB_HOST,
+            "mongodb_host": resolve_mongodb_host(),
             "container_name": resolve_container_name(),
         }
 
@@ -428,7 +485,7 @@ def get_blockchain_runtime_status(*, client: Any | None = None) -> dict[str, Any
             "ledger": ledger_result,
             "containers": containers_result,
             "build_state": build_state,
-            "mongodb_host": DEFAULT_MONGODB_HOST,
+            "mongodb_host": resolve_mongodb_host(),
             "lucidtoken_root": lucidtoken_root_dir().as_posix(),
             "blockchain_secrets": blockchain_secrets_status(),
         }
@@ -438,12 +495,15 @@ def get_blockchain_runtime_status(*, client: Any | None = None) -> dict[str, Any
 
 
 def build_block_system(*, force: bool = False, wait_for_db: bool = True) -> dict[str, Any]:
-    """Build all blockchain container content: genesis, ledger, governance, and tally."""
+    """Build all blockchain container content: pull, secrets, genesis, ledger, governance, tally."""
+    bootstrap = bootstrap_operation_environ()
+
     if is_blockchain_finalized() and not force:
         status = get_blockchain_runtime_status()
         status["build_complete"] = True
         status["skipped"] = True
         status["reason"] = "blockchain system is finalized; build is read-only"
+        status["hardware_pull"] = bootstrap.get("pull")
         return status
 
     assert_blockchain_modifiable(force=force)
@@ -452,7 +512,7 @@ def build_block_system(*, force: bool = False, wait_for_db: bool = True) -> dict
     if mongo is None:
         raise RuntimeError(
             "Blockchain database is unavailable "
-            f"(Docker DNS host={DEFAULT_MONGODB_HOST})"
+            f"(Docker DNS host={resolve_mongodb_host()})"
         )
 
     try:
@@ -479,7 +539,7 @@ def build_block_system(*, force: bool = False, wait_for_db: bool = True) -> dict
 
         finalize_result: dict[str, Any] | None = None
         if (
-            resolve_container_name() == BLOCKCHAIN_FINALIZED_CONTAINER_NAME
+            resolve_container_name() == resolve_finalized_container_name()
             and containers_result.get("linked")
         ):
             finalize_result = mark_blockchain_finalized(client=mongo)
@@ -493,7 +553,6 @@ def build_block_system(*, force: bool = False, wait_for_db: bool = True) -> dict
             containers_result=containers_result,
         )
 
-        secrets_path = write_blockchain_secrets_template(populate_from_env=True)
         routes_result: dict[str, Any] | None = None
         if connect_blockchain_routes is not None:
             try:
@@ -516,9 +575,10 @@ def build_block_system(*, force: bool = False, wait_for_db: bool = True) -> dict
             "finalize": finalize_result,
             "build_state": build_state,
             "lucidtoken_root": lucidtoken_root_dir().as_posix(),
-            "mongodb_host": DEFAULT_MONGODB_HOST,
+            "mongodb_host": resolve_mongodb_host(),
             "blockchain_secrets": blockchain_secrets_status(),
-            "blockchain_secrets_file": secrets_path.as_posix(),
+            "blockchain_secrets_file": bootstrap.get("secrets_file"),
+            "hardware_pull": bootstrap.get("pull"),
             "blockchain_routes": routes_result,
         }
     finally:
@@ -528,7 +588,7 @@ def build_block_system(*, force: bool = False, wait_for_db: bool = True) -> dict
 def run_blockchain_system(*, force: bool = False) -> dict[str, Any]:
     """Container entrypoint: build blockchain system when the container starts."""
     print(f"BuildBlockSystem: container={resolve_container_name() or 'unknown'}")
-    print(f"BuildBlockSystem: mongodb_host={DEFAULT_MONGODB_HOST}")
+    print(f"BuildBlockSystem: mongodb_host={resolve_mongodb_host()}")
     print(f"BuildBlockSystem: lucidtoken_root={lucidtoken_root_dir().as_posix()}")
     result = build_block_system(force=force, wait_for_db=True)
     print("BuildBlockSystem: blockchain system build complete.")

@@ -64,6 +64,7 @@ security: ufw firewall, tor hidden service, clearnet connection
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import secrets
@@ -84,9 +85,17 @@ from config import (
     SECRETS_ENV_PATH,
     SERVER_ENV_PATH,
     TORRC_PATH,
+    apply_secrets_file,
+    ensure_runtime_settings,
+    get_config_value,
+    get_config_value_optional,
     get_mongo_client,
+    optional_env,
+    require_env,
+    require_env_int,
     utc_now,
 )
+from pull_information import bind_operation_environ, pull_realworld_information
 from mongodb_secrets import (
     DEFAULT_MONGODB_SECRETS_NAME,
     verify_mongodb_creation,
@@ -119,7 +128,15 @@ from MasterServerRoutes import (
     SESSION_ROUTES,
     USER_ROUTES,
 )
-from NodeDbSchema import NODE_DB_SCHEMA_FIELDS
+from NodeDbSchema import (
+    NODE_DB_COLLECTION_SCHEMAS,
+    NODE_DB_SCHEMA_FIELDS,
+    NODE_HOSTED_DB_COLLECTION,
+    NODE_HOSTED_DB_FIELDS,
+    NODE_SEED_COLLECTION,
+    NODE_SEED_FIELDS,
+    write_databases_secrets_template,
+)
 
 try:
     from pymongo import MongoClient
@@ -132,8 +149,18 @@ BACKEND_DIR = Path(__file__).resolve().parent
 BUILD_MANIFEST_PATH = BACKEND_DIR / "master_server_build_manifest.json"
 
 ROOT_DIR = LUCID_TOPS_ROOT
-API_GATEWAY_PORT = int(os.environ.get("API_GATEWAY_PORT", "8080"))
-GUI_BRIDGE_PORT = int(os.environ.get("GUI_API_BRIDGE_PORT", "8105"))
+
+
+def _require_launch_env(key: str) -> str:
+    return require_env(key)
+
+
+def _api_gateway_port() -> int:
+    return require_env_int("API_GATEWAY_PORT")
+
+
+def _gui_bridge_port() -> int:
+    return require_env_int("GUI_API_BRIDGE_PORT")
 
 
 SECRET_KEYS: tuple[str, ...] = (
@@ -154,55 +181,99 @@ SECRET_KEYS: tuple[str, ...] = (
     "LUCID_TOKENS_HOLDING_ACCOUNT",
 )
 
-DEFAULT_ALLOWED_ONGOING_SOURCES = (
-    "register.js,node-registration.js,login.js,tier-select.js,connect-handshake.js,"
-    "find-peer.js,find-Peer.js,home_page.js,dashboard.js,settings.js,"
-    "LucidLedger.js,LucidMarket.js,RemoteView.js"
+
+def _apply_master_secrets_from_proxy(secrets_dir: Path) -> dict[str, str]:
+    """Load Proxy-synced Master.secrets into the environment at operation time."""
+    master_path_raw = optional_env("MASTER_SECRETS_FILE")
+    candidates = []
+    if master_path_raw:
+        candidates.append(Path(master_path_raw).expanduser())
+    candidates.extend(
+        [
+            secrets_dir / "Master.secrets",
+            secrets_dir / "master.secrets",
+        ]
+    )
+    for path in candidates:
+        if path.exists():
+            loaded = apply_secrets_file(path)
+            os.environ["MASTER_SECRETS_FILE"] = path.as_posix()
+            return loaded
+    return {}
+
+
+def _resolve_or_create_master_server_id(
+    *,
+    secrets_dir: Path,
+    pull: dict[str, Any],
+    existing: dict[str, str],
+) -> str:
+    """One-time MasterServerID(hash) from hardware facts + entropy; never regenerate."""
+    for source in (
+        existing,
+        _parse_env_file(secrets_dir / DEFAULT_SERVER_SECRETS_NAME),
+        _parse_env_file(Path(optional_env("MASTER_SECRETS_FILE") or secrets_dir / "Master.secrets")),
+    ):
+        value = str(source.get("MASTER_SERVER_ID", "")).strip()
+        if value:
+            return value
+    machine_id = str(pull.get("machine_id") or "").strip()
+    primary_mac = str(pull.get("primary_mac") or "").strip()
+    primary_ip = str(pull.get("primary_ip") or "").strip()
+    if not machine_id or not primary_mac or not primary_ip:
+        raise RuntimeError(
+            "MasterServerID requires machine_id, primary_mac, and primary_ip from hardware pull"
+        )
+    material = f"{machine_id}:{primary_mac}:{primary_ip}:{secrets.token_hex(32)}"
+    return hashlib.sha512(material.encode("utf-8")).hexdigest()
+
+SERVER_CRITICAL_PROFILE_KEYS: tuple[str, ...] = (
+    "UBUNTU_SERVER_VERSION",
+    "HARDWARE_CPU_CORES",
+    "HARDWARE_RAM_GB",
+    "HARDWARE_STORAGE",
+    "HARDWARE_PLATFORM",
+    "NETWORK_BANDWIDTH",
+    "SECURITY_FIREWALL",
+    "SECURITY_TOR_HIDDEN_SERVICE",
+    "SECURITY_CLEARNET_CONNECTION",
 )
 
-DEFAULT_INITIAL_HANDSHAKE_SOURCES = (
-    "register.js,login.js,node-registration.js,tier-select.js"
+SERVER_OPERATIONAL_FLAG_KEYS: tuple[str, ...] = (
+    "OPERATIONAL_UVICORN",
+    "OPERATIONAL_FASTAPI",
+    "OPERATIONAL_MONGODB",
+    "OPERATIONAL_TOR",
+    "OPERATIONAL_CLEARNET",
+    "OPERATIONAL_NODE_CONTAINER_HOST",
+    "OPERATIONAL_BLOCKCHAIN_CONTAINER_HOST",
+    "OPERATIONAL_SESSIONS_CONTAINER_HOST",
+    "OPERATIONAL_OPERATIONS_CONTAINER_HOST",
+    "OPERATIONAL_PAYSYSTEMS_CONTAINER_HOST",
+    "OPERATIONAL_FRONTEND_CONTAINER_HOST",
 )
 
-DEFAULT_DOCKER_SERVICES: tuple[str, ...] = (
-    "lucid-mongodb",
-    "lucid-server-default",
-    "lucid-blockchain",
-    "lucid-sessions",
-    "lucid-operations",
-    "lucid-paysystems",
-    "lucid-frontend",
-)
 
-# Target host / security profile written to server.secrets at operation time
-# (values match the critical-information block in this module's docstring).
-SERVER_CRITICAL_PROFILE: dict[str, str] = {
-    "UBUNTU_SERVER_VERSION": "24.04 LTS",
-    "HARDWARE_CPU_CORES": "4",
-    "HARDWARE_RAM_GB": "8",
-    "HARDWARE_STORAGE": "100GB SSD",
-    "HARDWARE_PLATFORM": "raspberry_pi_5",
-    "NETWORK_BANDWIDTH": "100Mbps",
-    "SECURITY_FIREWALL": "ufw",
-    "SECURITY_TOR_HIDDEN_SERVICE": "true",
-    "SECURITY_CLEARNET_CONNECTION": "true",
-}
+def _server_critical_profile() -> dict[str, str]:
+    # Target host / security profile written to server.secrets at operation time
+    # (values match the critical-information block in this module's docstring).
+    return {key: require_env(key) for key in SERVER_CRITICAL_PROFILE_KEYS}
 
-SERVER_OPERATIONAL_FLAGS: dict[str, str] = {
-    "OPERATIONAL_UVICORN": "true",
-    "OPERATIONAL_FASTAPI": "true",
-    "OPERATIONAL_MONGODB": "true",
-    "OPERATIONAL_TOR": "true",
-    "OPERATIONAL_CLEARNET": "true",
-    "OPERATIONAL_NODE_CONTAINER_HOST": "true",
-    "OPERATIONAL_BLOCKCHAIN_CONTAINER_HOST": "true",
-    "OPERATIONAL_SESSIONS_CONTAINER_HOST": "true",
-    "OPERATIONAL_OPERATIONS_CONTAINER_HOST": "true",
-    "OPERATIONAL_PAYSYSTEMS_CONTAINER_HOST": "true",
-    "OPERATIONAL_FRONTEND_CONTAINER_HOST": "true",
-}
 
-CONNECTION_LAYER_SPECS: tuple[tuple[str, str, dict[str, Any]], ...] = (
+def _server_operational_flags() -> dict[str, str]:
+    return {key: require_env(key) for key in SERVER_OPERATIONAL_FLAG_KEYS}
+
+
+def _enabled_docker_services_from_env() -> tuple[str, ...]:
+    raw = require_env("ENABLED_SERVICES")
+    services = tuple(item.strip() for item in raw.split(",") if item.strip())
+    if not services:
+        raise RuntimeError("ENABLED_SERVICES must list at least one service")
+    return services
+
+def _connection_layer_specs() -> tuple[tuple[str, str, dict[str, Any]], ...]:
+    ensure_runtime_settings()
+    return (
     (
         "master_connection",
         "master_connection_schema",
@@ -235,7 +306,7 @@ CONNECTION_LAYER_SPECS: tuple[tuple[str, str, dict[str, Any]], ...] = (
             "source": "handshake.py",
             "requires_api_key": True,
             "returns": "IDToken",
-            "id_length": 8,
+            "id_length": int(require_env("HANDSHAKE_ID_LENGTH")),
         },
     ),
     (
@@ -251,6 +322,8 @@ CONNECTION_LAYER_SPECS: tuple[tuple[str, str, dict[str, Any]], ...] = (
         },
     ),
 )
+
+CONNECTION_LAYER_SPECS = _connection_layer_specs  # callable; use _connection_layer_specs()
 
 TOR_ROUTES_MANIFEST_FILENAME = "tor-routes.json"
 
@@ -427,7 +500,7 @@ def _tor_service_env_lines(tor_registry: dict[str, Any]) -> list[str]:
         f"MASTER_SERVER_TOR_SERVICE={tor_registry.get('master_server_tor_service', '')}",
         f"TOR_API_SERVICE={tor_registry.get('tor_api_base', '')}",
         f"TOR_GUI_SERVICE={tor_registry.get('tor_gui_base', '')}",
-        f"CLIENT_REQUEST_ROUTE={tor_registry.get('client_request_route', f'{API_PREFIX}/client-request')}",
+        f"CLIENT_REQUEST_ROUTE={tor_registry.get('client_request_route') or require_env('CLIENT_REQUEST_ROUTE')}",
         f"CLIENT_REQUEST_TOR_SERVICE={tor_registry.get('client_request_tor_service', '')}",
         f"CLIENT_REQUEST_TOR_CONFIG={tor_registry.get('client_request_tor_config', '')}",
         f"HANDSHAKE_TOR_SERVICE={tor_registry.get('handshake_tor_service', '')}",
@@ -558,18 +631,69 @@ def _resolve_generated_secrets(secrets_env_path: Path | None = None) -> dict[str
 
 def _resolve_launch_values(launch_config: dict[str, Any] | None) -> dict[str, Any]:
     cfg = launch_config or {}
-    master_port = int(cfg.get("master_server_port", MASTER_SERVER_PORT))
-    gui_port = int(cfg.get("gui_bridge_port", GUI_BRIDGE_PORT))
-    mongodb_host = str(cfg.get("mongodb_host", MONGODB_HOST))
-    mongodb_port = int(cfg.get("mongodb_port", MONGODB_PORT))
-    mongodb_service = str(cfg.get("mongodb_service", "")).strip()
-    network_name = str(cfg.get("docker_network_name", "lucid-stack"))
-    enabled_services = tuple(cfg.get("enabled_services", DEFAULT_DOCKER_SERVICES))
-    root_dir = Path(cfg.get("lucid_tops_root", ROOT_DIR))
-    secrets_dir = Path(cfg.get("secrets_dir", root_dir / "secrets"))
+    pull = pull_realworld_information()
+    bind_operation_environ(pull)
+
+    def _from_cfg_env_or_pull(cfg_key: str, env_key: str, pull_key: str) -> str:
+        if cfg_key in cfg and cfg[cfg_key] is not None and str(cfg[cfg_key]).strip():
+            return str(cfg[cfg_key]).strip()
+        env_value = optional_env(env_key)
+        if env_value:
+            return env_value
+        pull_value = str(pull.get(pull_key) or "").strip()
+        if pull_value:
+            return pull_value
+        raise RuntimeError(
+            f"required launch value {cfg_key}/{env_key} missing after hardware pull"
+        )
+
+    master_port = int(_from_cfg_env_or_pull("master_server_port", "MASTER_SERVER_PORT", "master_server_port"))
+    gui_raw = optional_env("GUI_API_BRIDGE_PORT")
+    if "gui_bridge_port" in cfg and cfg["gui_bridge_port"] is not None:
+        gui_port = int(cfg["gui_bridge_port"])
+    elif gui_raw:
+        gui_port = int(gui_raw)
+    else:
+        gui_port = master_port
+    mongodb_host = _from_cfg_env_or_pull("mongodb_host", "MONGODB_HOST", "mongodb_host")
+    mongodb_port = int(_from_cfg_env_or_pull("mongodb_port", "MONGODB_PORT", "mongodb_port"))
+    mongodb_service = str(cfg.get("mongodb_service", "")).strip() or get_config_value_optional("MONGODB_SERVICE")
+    network_name = _from_cfg_env_or_pull(
+        "docker_network_name", "DOCKER_NETWORK_NAME", "docker_network_name"
+    )
+    if "enabled_services" in cfg and cfg["enabled_services"]:
+        enabled_services = tuple(cfg["enabled_services"])
+    else:
+        try:
+            enabled_services = _enabled_docker_services_from_env()
+        except RuntimeError:
+            enabled_services = tuple(
+                name
+                for name in (
+                    optional_env("MONGODB_SERVICE"),
+                    optional_env("MASTER_SERVER_SERVICE"),
+                    optional_env("PROXY_BACKEND_DNS"),
+                )
+                if name
+            )
+    root_dir = Path(
+        _from_cfg_env_or_pull("lucid_tops_root", "LUCID_TOPS_ROOT", "lucid_tops_root")
+    ).expanduser()
+    if "secrets_dir" in cfg and cfg["secrets_dir"]:
+        secrets_dir = Path(str(cfg["secrets_dir"])).expanduser()
+    else:
+        secrets_dir = Path(
+            optional_env("SECRETS_DIR") or str(pull["secrets_dir"])
+        ).expanduser()
+    databases_dir = Path(
+        optional_env("MONGODB_DATA_MOUNT")
+        or optional_env("LUCID_DATABASES_DIR")
+        or str(pull["databases_dir"])
+    ).expanduser()
     return {
         "root_dir": root_dir,
         "secrets_dir": secrets_dir,
+        "databases_dir": databases_dir,
         "master_server_port": master_port,
         "gui_bridge_port": gui_port,
         "mongodb_host": mongodb_host,
@@ -577,6 +701,7 @@ def _resolve_launch_values(launch_config: dict[str, Any] | None) -> dict[str, An
         "mongodb_service": mongodb_service,
         "docker_network_name": network_name,
         "enabled_services": enabled_services,
+        "hardware_pull": pull,
     }
 
 
@@ -589,11 +714,13 @@ def _build_server_env(
     values = launch_values or _resolve_launch_values(None)
     root_dir = values["root_dir"]
     secrets_dir = values["secrets_dir"]
+    databases_dir = values["databases_dir"]
     master_port = values["master_server_port"]
     gui_port = values["gui_bridge_port"]
     mongodb_host = values["mongodb_host"]
     mongodb_port = values["mongodb_port"]
     network_name = values["docker_network_name"]
+    pull = values["hardware_pull"]
 
     if tor_registry is None:
         onions = _resolve_onion_addresses(root_dir)
@@ -603,93 +730,113 @@ def _build_server_env(
             node_onion=onions.get("node_user") or None,
         )
 
+    bind_host = optional_env("MASTER_SERVER_BIND_HOST") or str(pull.get("primary_ip") or "")
+    if not bind_host:
+        raise RuntimeError("MASTER_SERVER_BIND_HOST missing after hardware pull")
+    socks_host = optional_env("TOR_SOCKS_HOST")
+    socks_port = optional_env("TOR_SOCKS_PORT")
+    if not socks_host or not socks_port:
+        raise RuntimeError(
+            "TOR_SOCKS_HOST/TOR_SOCKS_PORT required from Master.secrets (Proxy) at operation time"
+        )
+    tor_only = optional_env("MASTER_SERVER_TOR_ONLY") or "true"
+    log_level = optional_env("LOG_LEVEL")
+    if not log_level:
+        raise RuntimeError("LOG_LEVEL required from Master.secrets or environment at operation time")
+
     lines = [
         "# =============================================================================",
         "# LucidTops master server - server.env (non-secret runtime configuration)",
         f"# Generated: {utc_now()}",
-        "# Compatible with Dockerfile-layout.txt / master-env-config.txt container mounts",
+        "# Values pulled/created at time of operation (hardware + Proxy Master.secrets)",
         "# =============================================================================",
         "",
         f"LUCID_TOPS_ROOT={root_dir.as_posix()}",
-        "LUCID_PROJECT_ROOT=/app",
-        "BUILD_ARCH=arm64",
-        "BIND_ADDRESS=127.0.0.1",
-        "",
-        "# Host-side paths (Pi SSD mount -> container volume mounts)",
-        f"HOST_TOR_CONFIG_TORRC={(root_dir / 'torrc').as_posix()}",
-        f"HOST_TOR_DATA={root_dir.as_posix()}/data/tor",
-        f"HOST_TOR_LOG={root_dir.as_posix()}/logs",
-        f"HOST_TOR_DIR=/app/var/lib/tor",
-        f"HOST_TOR_ETC_DIR=/app/etc/tor",
-        f"HOST_TOR_LUCID_SERVER_DIR=/app/var/lib/tor/lucid_server",
-        f"HOST_TOR_LUCID_PORTAL_DIR=/app/var/lib/tor/lucid_portal",
-        f"HOST_TOR_LUCID_DEV_DIR=/app/var/lib/tor/lucid_node",
-        f"HOST_TOR_LUCID_BLOCKCHAIN_DIR=/app/var/lib/tor/lucid_blockchain",
-        f"HOST_TOR_LUCID_ADMIN_DIR=/app/var/lib/tor/lucid_admin",
-        f"CONTAINER_ONION_DIR=/app/run/lucid/onion",
-        f"CONFIG_STORAGE_PATH=/app/config",
+        f"LUCID_PROJECT_ROOT={optional_env('LUCID_PROJECT_ROOT') or BACKEND_DIR.parent.as_posix()}",
         f"SECRETS_DIR={secrets_dir.as_posix()}",
+        f"MONGODB_DATA_MOUNT={databases_dir.as_posix()}",
+        f"LUCID_DATABASES_DIR={databases_dir.as_posix()}",
+        f"HOST_PRIMARY_IP={pull.get('primary_ip', '')}",
+        f"HOST_PRIMARY_MAC={pull.get('primary_mac', '')}",
+        f"HOST_MACHINE_ID={pull.get('machine_id', '')}",
+        f"HOST_HOSTNAME={pull.get('hostname', '')}",
+        f"MASTER_SERVER_ID={generated.get('MASTER_SERVER_ID', '')}",
         "",
-        "# Docker DNS service names (infrastructure/containers/* Dockerfiles)",
         f"DOCKER_NETWORK_NAME={network_name}",
         f"MONGODB_HOST={mongodb_host}",
         f"MONGODB_PORT={mongodb_port}",
         f"MONGODB_MAIN_DATABASE_NAME={MASTER_DB_NAME}",
-        "MONGODB_HOST_CONTAINER=lucid-mongodb",
         f"MONGODB_URL=mongodb://{mongodb_host}:{mongodb_port}/{MASTER_DB_NAME}",
         f"LUCID_MONGODB_URL=mongodb://{mongodb_host}:{mongodb_port}",
+        f"MONGODB_VIA_SOCKS5={optional_env('MONGODB_VIA_SOCKS5') or 'true'}",
         "",
-        "# Tor daemon runs inside lucid-server-default (no tor-proxy sidecar)",
-        "TOR_HOST=127.0.0.1",
-        "TOR_SOCKS_HOST=127.0.0.1",
-        "TOR_SOCKS_PORT=9050",
-        "TOR_CONTROL_PORT=9051",
+        "# Tor/SOCKS owned by Proxy; MasterServer consumes via Master.secrets",
+        f"TOR_SOCKS_HOST={socks_host}",
+        f"TOR_SOCKS_PORT={socks_port}",
+        f"TOR_HOST={optional_env('TOR_HOST') or socks_host}",
         "",
-        "# Master server FastAPI + session routes (operations/SessionRoutes.py) — Tor-only",
         f"GUI_API_BRIDGE_PORT={gui_port}",
-        "MASTER_SERVER_TOR_ONLY=true",
-        "MASTER_SERVER_BIND_HOST=127.0.0.1",
-        "MASTER_SERVER_HOST=127.0.0.1",
+        f"MASTER_SERVER_TOR_ONLY={tor_only}",
+        f"MASTER_SERVER_BIND_HOST={bind_host}",
+        f"MASTER_SERVER_HOST={optional_env('MASTER_SERVER_HOST') or bind_host}",
         f"MASTER_SERVER_PORT={master_port}",
-        "MASTER_SERVER_SERVICE_NAME=lucid-server-default",
-        "MASTER_SERVER_HEALTH_PATH=/health",
-        "MASTER_SERVER_INTERNAL_HEALTH_HOST=127.0.0.1",
+        f"LOG_LEVEL={log_level}",
         f"MASTER_SERVER_PUBLIC_ONION={tor_registry.get('master_server_onion', '')}",
-        "API_PUBLIC_PATH=/api/v1",
-        "GUI_PUBLIC_PATH=/gui",
-        "# Internal Docker DNS (container mesh only — not Tor public surface)",
-        f"MASTER_SERVER_INTERNAL_HOST=lucid-server-default",
-        f"MASTER_SERVER_INTERNAL_PORT={master_port}",
         *[
             line
             for line in _tor_service_env_lines(tor_registry)
             if not line.startswith("TOR_ROUTES_MANIFEST=")
         ],
         f"TOR_ROUTES_MANIFEST={(root_dir / 'configs' / TOR_ROUTES_MANIFEST_FILENAME).as_posix()}",
-        "CONNECTION_PROTOCOL=tor-hidden-service",
-        "CONNECTION_TORRENT_LAYER=torrent-over-tor",
-        "CONNECTION_NETWORK=tor",
-        "CONNECTION_TOR_ONLY=true",
-        "CONNECTION_RETURNS=IDToken",
-        "",
-        "# Schema registry references",
-        "MASTER_DB_SCHEMA=MasterDBSchema.py",
-        "NODE_DB_SCHEMA=NodeDbSchema.py",
-        "CONNECTION_PROTOCOL_FILE=connection.py",
-        "HANDSHAKE_PROTOCOL_FILE=handshake.py",
-        "CLIENT_HANDLER_FILE=ClientHandler.py",
-        "",
-        "# Route manifest",
-        f"MASTER_BUILD_MANIFEST={BUILD_MANIFEST_PATH.as_posix()}",
         "SERVER_ENV_FILE=" + (root_dir / "server.env").as_posix(),
         "SECRETS_ENV_FILE=" + (root_dir / "secrets.env").as_posix(),
         *container_secrets_env_lines(secrets_dir),
-        "",
-        "# Runtime secrets: secrets.env (sourced by container entrypoint before uvicorn)",
-        "# Critical operation profile: server.secrets (generated at container operation time)",
-        "# Runtime configuration: config.secrets (editable without code changes)",
-        "# Operations routes: operations.secrets (editable without code changes)",
     ]
+    for key in (
+        "TOR_CONTROL_PORT",
+        "HOST_TOR_CONFIG_TORRC",
+        "HOST_TOR_LUCID_SERVER_DIR",
+        "HOST_TOR_LUCID_PORTAL_DIR",
+        "HOST_TOR_LUCID_DEV_DIR",
+        "CONTAINER_ONION_DIR",
+        "PROXY_BACKEND_DNS",
+        "PROXY_GATE_HEADER_VALUE",
+        "PROXY_NGINX_UPSTREAM_TOKEN",
+        "API_BASE_PATH",
+        "GUI_PREFIX",
+        "CONNECTION_PROTOCOL",
+        "CONNECTION_PROTOCOL_NAME",
+        "CONNECTION_TORRENT_LAYER",
+        "CONNECTION_NETWORK",
+        "CONNECTION_TOR_ONLY",
+        "API_PUBLIC_PATH",
+        "GUI_PUBLIC_PATH",
+        "MASTER_SERVER_SERVICE_NAME",
+        "MASTER_SERVER_HEALTH_PATH",
+        "MASTER_SERVER_INTERNAL_HOST",
+        "MASTER_SERVER_APP",
+        "LOCAL_TOR_FORWARD_HOSTS",
+        "DNS_SELECTED_CONTAINERS",
+        "DNS_NONE_DIRECT_CONTAINERS",
+        "DNS_PROXY_INTERACTIONS",
+        "DNS_PROXYGATE_INTERACTIONS",
+        "DNS_PROXYGATE_DIRECT_BLOCKED",
+        "DNS_BACKEND_SERVICE_NAME",
+        "NODE_MIN_MEMORY_GB",
+        "SESSION_CHUNK_SIZE_BYTES",
+        "CORS_MAX_AGE",
+        "FRONTEND_SOURCE_PREFIX",
+        "HIDDEN_SERVICE_PORT",
+        "BUILD_ARCH",
+        "BIND_ADDRESS",
+    ):
+        value = optional_env(key)
+        if value:
+            lines.append(f"{key}={value}")
+    if optional_env("MASTER_SERVER_INTERNAL_PORT") or master_port:
+        lines.append(
+            f"MASTER_SERVER_INTERNAL_PORT={optional_env('MASTER_SERVER_INTERNAL_PORT') or master_port}"
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -724,31 +871,69 @@ def _patch_operations_secrets_onions(
 def _build_config_secrets_defaults(*, launch_values: dict[str, Any]) -> dict[str, str]:
     master_port = launch_values["master_server_port"]
     gui_port = launch_values["gui_bridge_port"]
-    return {
-        "LOCAL_TOR_FORWARD_HOSTS": "127.0.0.1,localhost,::1",
-        "TOR_HOST": "127.0.0.1",
-        "TOR_SOCKS_HOST": "127.0.0.1",
-        "TOR_SOCKS_PORT": "9050",
-        "TOR_CONTROL_PORT": "9051",
-        "HIDDEN_SERVICE_FORWARD_HOST": "127.0.0.1",
-        "MASTER_SERVER_BIND_HOST": "127.0.0.1",
-        "MASTER_SERVER_HOST": "127.0.0.1",
-        "MASTER_SERVER_PORT": str(master_port),
-        "GUI_API_BRIDGE_PORT": str(gui_port),
-        "ALLOWED_ONGOING_SOURCES": DEFAULT_ALLOWED_ONGOING_SOURCES,
-        "INITIAL_HANDSHAKE_SOURCES": DEFAULT_INITIAL_HANDSHAKE_SOURCES,
-        "REGISTER_SOURCE": "register.js",
-        "NODE_MIN_MEMORY_GB": "50",
-        "SESSION_CHUNK_SIZE_BYTES": "1048576",
-        "MAX_MASTER_CLASS_USERS": "5",
-        "MAX_CONSOLES_PER_NODE_USER": "5",
-        "HANDSHAKE_ID_LENGTH": "8",
-        "HANDSHAKE_ID_TOKEN_BYTES": "32",
-        "HANDSHAKE_API_KEY_MIN_LENGTH": "24",
-        "HANDSHAKE_API_KEY_GENERATION_LENGTH": "24",
-        "NODE_GOV_BANNED_COLLECTION": "node_governance_bans",
-        "NODE_GOV_AUDIT_COLLECTION": "node_governance_audit",
-    }
+    keys = (
+        "LOCAL_TOR_FORWARD_HOSTS",
+        "TOR_HOST",
+        "TOR_SOCKS_HOST",
+        "TOR_SOCKS_PORT",
+        "TOR_CONTROL_PORT",
+        "HIDDEN_SERVICE_FORWARD_HOST",
+        "HIDDEN_SERVICE_PORT",
+        "MASTER_SERVER_BIND_HOST",
+        "MASTER_SERVER_HOST",
+        "ALLOWED_ONGOING_SOURCES",
+        "INITIAL_HANDSHAKE_SOURCES",
+        "REGISTER_SOURCE",
+        "NODE_MIN_MEMORY_GB",
+        "SESSION_CHUNK_SIZE_BYTES",
+        "SESSION_HASH_ALGORITHM",
+        "LEDGER_PREVIOUS_HASH_FIELD",
+        "SESSION_ID_LENGTH",
+        "SESSION_STATUSES",
+        "TALLY_SYNC_INTERVAL_SECONDS",
+        "TALLY_ENTITY_TYPES",
+        "MAX_MASTER_CLASS_USERS",
+        "MAX_CONSOLES_PER_NODE_USER",
+        "HANDSHAKE_ID_LENGTH",
+        "HANDSHAKE_ID_TOKEN_BYTES",
+        "HANDSHAKE_API_KEY_MIN_LENGTH",
+        "HANDSHAKE_API_KEY_GENERATION_LENGTH",
+        "NODE_GOV_BANNED_COLLECTION",
+        "NODE_GOV_AUDIT_COLLECTION",
+        "NODE_GOV_RESTRICTED_OPERATIONS",
+        "NODE_GOV_SESSION_ALLOWED",
+        "NODE_GOV_BLOCKCHAIN_ALLOWED",
+        "HANDSHAKE_ID_TOKENS_COLLECTION",
+        "MASTER_SERVER_TOR_ONLY",
+        "API_BASE_PATH",
+        "GUI_PREFIX",
+        "CLIENT_REQUEST_ROUTE",
+        "ADMIN_API_PREFIX",
+        "MASTER_CLASS_API_PREFIX",
+        "FRONTEND_SOURCE_PREFIX",
+        "CONNECTION_PROTOCOL_NAME",
+        "CONNECTION_PROTOCOL",
+        "CONNECTION_TORRENT_LAYER",
+        "CONNECTION_NETWORK",
+        "CONNECTION_TOR_ONLY",
+        "CONNECTION_LOG_LIMIT",
+        "MASTER_CONNECTION_COLLECTION",
+        "CONNECTION_LOGS_COLLECTION",
+        "CORS_MAX_AGE",
+        "DNS_SELECTED_CONTAINERS",
+        "DNS_NONE_DIRECT_CONTAINERS",
+        "DNS_PROXY_INTERACTIONS",
+        "DNS_PROXYGATE_INTERACTIONS",
+        "DNS_PROXYGATE_DIRECT_BLOCKED",
+        "DNS_BACKEND_SERVICE_NAME",
+        "TIER_IDS",
+        "TIER_USERS_COLLECTION",
+        "MASTER_USER_TIER_ID_FILE",
+    )
+    values = {key: require_env(key) for key in keys}
+    values["MASTER_SERVER_PORT"] = str(master_port)
+    values["GUI_API_BRIDGE_PORT"] = str(gui_port)
+    return values
 
 
 def _resolve_config_secrets(
@@ -756,13 +941,15 @@ def _resolve_config_secrets(
     *,
     launch_values: dict[str, Any],
 ) -> dict[str, str]:
-    defaults = _build_config_secrets_defaults(launch_values=launch_values)
+    from_env = _build_config_secrets_defaults(launch_values=launch_values)
     if config_secrets_path.exists():
         existing = _parse_env_file(config_secrets_path)
-        merged = dict(defaults)
-        merged.update(existing)
+        merged = dict(from_env)
+        for key, value in existing.items():
+            if str(value).strip():
+                merged[key] = value
         return merged
-    return defaults
+    return from_env
 
 
 def _build_config_secrets(
@@ -789,6 +976,7 @@ def _build_config_secrets(
         "TOR_SOCKS_PORT",
         "TOR_CONTROL_PORT",
         "HIDDEN_SERVICE_FORWARD_HOST",
+        "HIDDEN_SERVICE_PORT",
         "MASTER_SERVER_BIND_HOST",
         "MASTER_SERVER_HOST",
         "MASTER_SERVER_PORT",
@@ -803,14 +991,50 @@ def _build_config_secrets(
     for key in (
         "NODE_MIN_MEMORY_GB",
         "SESSION_CHUNK_SIZE_BYTES",
+        "SESSION_HASH_ALGORITHM",
+        "LEDGER_PREVIOUS_HASH_FIELD",
+        "SESSION_ID_LENGTH",
+        "SESSION_STATUSES",
+        "TALLY_SYNC_INTERVAL_SECONDS",
+        "TALLY_ENTITY_TYPES",
         "MAX_MASTER_CLASS_USERS",
         "MAX_CONSOLES_PER_NODE_USER",
         "HANDSHAKE_ID_LENGTH",
         "HANDSHAKE_ID_TOKEN_BYTES",
         "HANDSHAKE_API_KEY_MIN_LENGTH",
         "HANDSHAKE_API_KEY_GENERATION_LENGTH",
+        "HANDSHAKE_ID_TOKENS_COLLECTION",
         "NODE_GOV_BANNED_COLLECTION",
         "NODE_GOV_AUDIT_COLLECTION",
+        "NODE_GOV_RESTRICTED_OPERATIONS",
+        "NODE_GOV_SESSION_ALLOWED",
+        "NODE_GOV_BLOCKCHAIN_ALLOWED",
+        "MASTER_SERVER_TOR_ONLY",
+        "API_BASE_PATH",
+        "GUI_PREFIX",
+        "CLIENT_REQUEST_ROUTE",
+        "ADMIN_API_PREFIX",
+        "MASTER_CLASS_API_PREFIX",
+        "FRONTEND_SOURCE_PREFIX",
+        "CONNECTION_PROTOCOL_NAME",
+        "CONNECTION_PROTOCOL",
+        "CONNECTION_TORRENT_LAYER",
+        "CONNECTION_NETWORK",
+        "CONNECTION_TOR_ONLY",
+        "CONNECTION_LOG_LIMIT",
+        "MASTER_CONNECTION_COLLECTION",
+        "CONNECTION_LOGS_COLLECTION",
+        "CORS_MAX_AGE",
+        "HIDDEN_SERVICE_PORT",
+        "DNS_SELECTED_CONTAINERS",
+        "DNS_NONE_DIRECT_CONTAINERS",
+        "DNS_PROXY_INTERACTIONS",
+        "DNS_PROXYGATE_INTERACTIONS",
+        "DNS_PROXYGATE_DIRECT_BLOCKED",
+        "DNS_BACKEND_SERVICE_NAME",
+        "TIER_IDS",
+        "TIER_USERS_COLLECTION",
+        "MASTER_USER_TIER_ID_FILE",
     ):
         lines.append(f"{key}={values[key]}")
     return "\n".join(lines) + "\n"
@@ -840,8 +1064,8 @@ def _build_secrets_env(
         [
             "",
             "# Master server bootstrap credentials written by LaunchServer.py",
-            "ADMIN_USER_BOOTSTRAP_FILE=AdminUser/admin.txt",
-            "MASTER_CLASS_USER_BOOTSTRAP_FILE=MasterClassUser/master.txt",
+            f"ADMIN_USER_BOOTSTRAP_FILE={require_env('ADMIN_USER_BOOTSTRAP_FILE')}",
+            f"MASTER_CLASS_USER_BOOTSTRAP_FILE={require_env('MASTER_CLASS_USER_BOOTSTRAP_FILE')}",
         ]
     )
     return "\n".join(lines) + "\n"
@@ -871,11 +1095,11 @@ def _build_server_secrets(
         "",
         "# Critical host / security profile",
     ]
-    for key, value in SERVER_CRITICAL_PROFILE.items():
+    for key, value in _server_critical_profile().items():
         lines.append(f"{key}={value}")
 
     lines.extend(["", "# Operational roles (Backend = MasterServer container host)"])
-    for key, value in SERVER_OPERATIONAL_FLAGS.items():
+    for key, value in _server_operational_flags().items():
         lines.append(f"{key}={value}")
 
     lines.extend(
@@ -902,6 +1126,23 @@ def _build_server_secrets(
     for key in SECRET_KEYS:
         lines.append(f"{key}={generated[key]}")
 
+    master_server_id = str(generated.get("MASTER_SERVER_ID", "")).strip()
+    if not master_server_id:
+        raise ValueError("MASTER_SERVER_ID must be produced at operation time")
+    lines.extend(
+        [
+            "",
+            "# MasterServer identity (one-time hash; hardware-derived at first operation)",
+            f"MASTER_SERVER_ID={master_server_id}",
+            f"HOST_PRIMARY_IP={optional_env('HOST_PRIMARY_IP')}",
+            f"HOST_PRIMARY_MAC={optional_env('HOST_PRIMARY_MAC')}",
+            f"HOST_MACHINE_ID={optional_env('HOST_MACHINE_ID')}",
+            f"MONGODB_DATA_MOUNT={launch_values['databases_dir'].as_posix()}",
+            f"MONGODB_VIA_SOCKS5={optional_env('MONGODB_VIA_SOCKS5') or 'true'}",
+            f"MASTER_SECRETS_FILE={optional_env('MASTER_SECRETS_FILE') or (secrets_dir / 'Master.secrets').as_posix()}",
+        ]
+    )
+
     onion_lines: list[str] = []
     for env_key, registry_key in (
         ("MASTER_SERVER_ONION", "master_server_onion"),
@@ -914,8 +1155,19 @@ def _build_server_secrets(
         value = str(registry.get(registry_key, "")).strip()
         if value:
             onion_lines.append(f"{env_key}={value}")
+    for env_key in (
+        "TOR_SOCKS_HOST",
+        "TOR_SOCKS_PORT",
+        "PROXY_GATE_HEADER_VALUE",
+        "PROXY_NGINX_UPSTREAM_TOKEN",
+        "PROXY_BACKEND_DNS",
+        "API_BASE_PATH",
+    ):
+        value = optional_env(env_key)
+        if value:
+            onion_lines.append(f"{env_key}={value}")
     if onion_lines:
-        lines.extend(["", "# Tor hidden-service endpoints (only written when resolved)"])
+        lines.extend(["", "# Tor / Proxy endpoints from Master.secrets or resolved onions"])
         lines.extend(onion_lines)
 
     return "\n".join(lines) + "\n"
@@ -925,35 +1177,44 @@ def _build_torrc(*, launch_values: dict[str, Any] | None = None) -> str:
     values = launch_values or _resolve_launch_values(None)
     master_port = values["master_server_port"]
     gui_port = values["gui_bridge_port"]
+    socks_bind = require_env("TOR_SOCKS_BIND")
+    control_bind = require_env("TOR_CONTROL_BIND")
+    cookie_auth_file = require_env("TOR_COOKIE_AUTH_FILE")
+    data_directory = require_env("TOR_DATA_DIRECTORY")
+    hs_server_dir = require_env("HOST_TOR_LUCID_SERVER_DIR")
+    hs_portal_dir = require_env("HOST_TOR_LUCID_PORTAL_DIR")
+    hs_node_dir = require_env("HOST_TOR_LUCID_DEV_DIR")
+    forward_host = require_env("HIDDEN_SERVICE_FORWARD_HOST")
+    container_torrc_mount = require_env("CONTAINER_TORRC_MOUNT")
     return "\n".join(
         [
             "# LucidTops master torrc - generated by backend/builderMasterServer.py",
-            f"# Host mount: {(values['root_dir'] / 'torrc').as_posix()} -> container /app/var/lib/tor/torrc",
+            f"# Host mount: {(values['root_dir'] / 'torrc').as_posix()} -> container {container_torrc_mount}",
             f"# Generated: {utc_now()}",
             "Log notice stdout",
-            "SocksPort 0.0.0.0:9050",
-            "ControlPort 0.0.0.0:9051",
+            f"SocksPort {socks_bind}",
+            f"ControlPort {control_bind}",
             "CookieAuthentication 1",
-            "CookieAuthFile /app/var/lib/tor/control_auth_cookie",
+            f"CookieAuthFile {cookie_auth_file}",
             "CookieAuthFileGroupReadable 1",
-            "DataDirectory /app/var/lib/tor",
+            f"DataDirectory {data_directory}",
             "RunAsDaemon 0",
             "AvoidDiskWrites 0",
             "",
             "# Master server hidden service (LaunchServer.py writes hostname to CONTAINER_ONION_DIR)",
-            "HiddenServiceDir /app/var/lib/tor/lucid_server",
+            f"HiddenServiceDir {hs_server_dir}",
             "HiddenServiceVersion 3",
-            f"HiddenServicePort 80 127.0.0.1:{master_port}",
+            f"HiddenServicePort 80 {forward_host}:{master_port}",
             "",
             "# Frontend GUI hidden service",
-            "HiddenServiceDir /app/var/lib/tor/lucid_portal",
+            f"HiddenServiceDir {hs_portal_dir}",
             "HiddenServiceVersion 3",
-            f"HiddenServicePort 80 127.0.0.1:{gui_port}",
+            f"HiddenServicePort 80 {forward_host}:{gui_port}",
             "",
             "# NodeUser hidden service",
-            "HiddenServiceDir /app/var/lib/tor/lucid_node",
+            f"HiddenServiceDir {hs_node_dir}",
             "HiddenServiceVersion 3",
-            f"HiddenServicePort 80 127.0.0.1:{master_port}",
+            f"HiddenServicePort 80 {forward_host}:{master_port}",
             "",
         ]
     )
@@ -976,20 +1237,20 @@ def _build_docker_dns_env(*, launch_values: dict[str, Any]) -> str:
         "",
         f"MONGODB_HOST={mongodb_host}",
         f"MONGODB_PORT={mongodb_port}",
-        "MONGODB_SERVICE=lucid-mongodb",
+        f"MONGODB_SERVICE={require_env('MONGODB_SERVICE')}",
         "",
-        "MASTER_SERVER_SERVICE=lucid-server-default",
+        f"MASTER_SERVER_SERVICE={require_env('MASTER_SERVER_SERVICE')}",
         f"MASTER_SERVER_PORT={master_port}",
-        f"MASTER_SERVER_INTERNAL_HOST=lucid-server-default",
+        f"MASTER_SERVER_INTERNAL_HOST={require_env('MASTER_SERVER_INTERNAL_HOST')}",
         f"MASTER_SERVER_INTERNAL_PORT={master_port}",
         "",
         f"GUI_API_BRIDGE_PORT={gui_port}",
-        "GUI_API_BRIDGE_HOST=gui-api-bridge",
+        f"GUI_API_BRIDGE_HOST={require_env('GUI_API_BRIDGE_HOST')}",
         "",
-        "TOR_HOST=127.0.0.1",
-        "TOR_SOCKS_HOST=127.0.0.1",
-        "TOR_SOCKS_PORT=9050",
-        "TOR_CONTROL_PORT=9051",
+        f"TOR_HOST={require_env('TOR_HOST')}",
+        f"TOR_SOCKS_HOST={require_env('TOR_SOCKS_HOST')}",
+        f"TOR_SOCKS_PORT={require_env('TOR_SOCKS_PORT')}",
+        f"TOR_CONTROL_PORT={require_env('TOR_CONTROL_PORT')}",
     ]
     return "\n".join(lines) + "\n"
 
@@ -997,8 +1258,10 @@ def _build_docker_dns_env(*, launch_values: dict[str, Any]) -> str:
 def _build_docker_network_yml(*, launch_values: dict[str, Any]) -> str:
     root_dir = launch_values["root_dir"]
     secrets_dir = launch_values["secrets_dir"]
+    databases_dir = launch_values["databases_dir"]
     network_name = launch_values["docker_network_name"]
     enabled = set(launch_values["enabled_services"])
+    mongo_volume = optional_env("DOCKER_VOLUME_MONGO_DATA") or "lucid_mongo_data"
     lines = [
         "# LucidTops Docker network overlay - generated by backend/builderMasterServer.py",
         f"# Generated: {utc_now()}",
@@ -1009,33 +1272,45 @@ def _build_docker_network_yml(*, launch_values: dict[str, Any]) -> str:
         "    driver: bridge",
         "",
         "volumes:",
-        "  lucid-mongo-data:",
-        "  lucid-tor-data:",
-        "  lucid-onion-data:",
+        f"  {mongo_volume}:",
         "",
         "services:",
     ]
-    if "lucid-mongodb" in enabled:
+    mongodb_service = optional_env("MONGODB_SERVICE")
+    if not mongodb_service:
+        raise RuntimeError("MONGODB_SERVICE must be set from Master.secrets / environment at operation time")
+    master_service = optional_env("MASTER_SERVER_SERVICE") or optional_env("PROXY_BACKEND_DNS")
+    if not master_service:
+        raise RuntimeError(
+            "MASTER_SERVER_SERVICE or PROXY_BACKEND_DNS must be set at operation time"
+        )
+    mongo_image = optional_env("MONGODB_IMAGE")
+    if not mongo_image:
+        raise RuntimeError("MONGODB_IMAGE must be set in environment or Master.secrets at operation time")
+    master_dockerfile = optional_env("MASTER_SERVER_DOCKERFILE")
+    if not master_dockerfile:
+        raise RuntimeError("MASTER_SERVER_DOCKERFILE must be set at operation time")
+    if mongodb_service in enabled or not enabled:
         lines.extend(
             [
-                "  lucid-mongodb:",
-                "    image: mongo:7",
-                "    container_name: lucid-mongodb",
+                f"  {mongodb_service}:",
+                f"    image: {mongo_image}",
+                f"    container_name: {mongodb_service}",
                 "    restart: unless-stopped",
                 f"    networks:",
                 f"      - {network_name}",
                 "    volumes:",
-                "      - lucid-mongo-data:/data/db",
+                f"      - {databases_dir.as_posix()}:{databases_dir.as_posix()}",
             ]
         )
-    if "lucid-server-default" in enabled:
+    if master_service in enabled or not enabled:
         lines.extend(
             [
-                "  lucid-server-default:",
+                f"  {master_service}:",
                 "    build:",
-                "      context: ..",
-                "      dockerfile: backend/Server.dockerfile",
-                "    container_name: lucid-server-default",
+                "      context: /mnt/myssd/LucidTops",
+                f"      dockerfile: {master_dockerfile}",
+                f"    container_name: {master_service}",
                 "    restart: unless-stopped",
                 f"    networks:",
                 f"      - {network_name}",
@@ -1050,43 +1325,45 @@ def _build_docker_network_yml(*, launch_values: dict[str, Any]) -> str:
                 f"      SECRETS_DIR: {secrets_dir.as_posix()}",
                 f"      SERVER_ENV_FILE: {root_dir.as_posix()}/server.env",
                 f"      SECRETS_ENV_FILE: {root_dir.as_posix()}/secrets.env",
-                f"      HOST_TOR_CONFIG_TORRC: {root_dir.as_posix()}/torrc",
+                f"      MONGODB_DATA_MOUNT: {databases_dir.as_posix()}",
+                f"      MASTER_SERVER_PORT: {launch_values['master_server_port']}",
+                f"      MASTER_SERVER_BIND_HOST: {optional_env('MASTER_SERVER_BIND_HOST') or launch_values['hardware_pull']['primary_ip']}",
                 "    volumes:",
                 f"      - {root_dir.as_posix()}:{root_dir.as_posix()}",
-                "      - lucid-tor-data:/app/var/lib/tor",
-                "      - lucid-onion-data:/app/run/lucid/onion",
+                f"      - {secrets_dir.as_posix()}:{secrets_dir.as_posix()}",
+                f"      - {databases_dir.as_posix()}:{databases_dir.as_posix()}",
             ]
         )
-    service_image_map = (
-        ("lucid-blockchain", "lucid-blockchain", "blockchain/Blockchain.dockerfile"),
-        ("lucid-sessions", "lucid-sessions", "sessions/sessions.dockerfile"),
-        ("lucid-operations", "lucid-operations", "operations/Ops.dockerfile"),
-        ("lucid-paysystems", "lucid-paysystems", "paysystems/Pay.dockerfile"),
-        ("lucid-frontend", "lucid-frontend", "frontend/webpage.dockerfile"),
-    )
-    for service_key, container_name, dockerfile in service_image_map:
-        if service_key not in enabled:
-            continue
-        lines.extend(
-            [
-                f"  {service_key}:",
-                "    build:",
-                "      context: ..",
-                f"      dockerfile: {dockerfile}",
-                f"    container_name: {container_name}",
-                "    restart: unless-stopped",
-                "    networks:",
-                f"      - {network_name}",
-                "    env_file:",
-                f"      - {root_dir.as_posix()}/server.env",
-                "    environment:",
-                f"      LUCID_TOPS_ROOT: {root_dir.as_posix()}",
-                f"      SECRETS_DIR: {secrets_dir.as_posix()}",
-                f"      SERVER_SECRETS_FILE: {secrets_dir.as_posix()}/{DEFAULT_SERVER_SECRETS_NAME}",
-                "    volumes:",
-                f"      - {root_dir.as_posix()}:{root_dir.as_posix()}",
-            ]
+    service_image_map_raw = optional_env("DOCKER_SERVICE_DOCKERFILES")
+    if service_image_map_raw:
+        service_image_map = tuple(
+            tuple(part.strip() for part in entry.split("|"))
+            for entry in service_image_map_raw.split(",")
+            if entry.strip()
         )
+        for service_key, container_name, dockerfile in service_image_map:
+            if enabled and service_key not in enabled:
+                continue
+            lines.extend(
+                [
+                    f"  {service_key}:",
+                    "    build:",
+                    "      context: /mnt/myssd/LucidTops",
+                    f"      dockerfile: {dockerfile}",
+                    f"    container_name: {container_name}",
+                    "    restart: unless-stopped",
+                    "    networks:",
+                    f"      - {network_name}",
+                    "    env_file:",
+                    f"      - {root_dir.as_posix()}/server.env",
+                    "    environment:",
+                    f"      LUCID_TOPS_ROOT: {root_dir.as_posix()}",
+                    f"      SECRETS_DIR: {secrets_dir.as_posix()}",
+                    f"      SERVER_SECRETS_FILE: {secrets_dir.as_posix()}/{DEFAULT_SERVER_SECRETS_NAME}",
+                    "    volumes:",
+                    f"      - {root_dir.as_posix()}:{root_dir.as_posix()}",
+                ]
+            )
     return "\n".join(lines) + "\n"
 
 
@@ -1122,7 +1399,10 @@ def _create_master_database(client: Any, generated: dict[str, str]) -> dict[str,
         collection_name: schema_template(fields)
         for collection_name, fields in COLLECTION_SCHEMAS.items()
     }
-    collections["node_hosted_databases"] = schema_template(NODE_DB_SCHEMA_FIELDS)
+    collections[NODE_HOSTED_DB_COLLECTION] = schema_template(NODE_HOSTED_DB_FIELDS)
+    collections[NODE_SEED_COLLECTION] = schema_template(NODE_SEED_FIELDS)
+    for collection_name, fields in NODE_DB_COLLECTION_SCHEMAS.items():
+        collections[collection_name] = schema_template(fields)
     collections["id_tokens"] = schema_template(id_token_fields)
     collections["node_governance_bans"] = schema_template(node_gov_ban_fields)
     collections["node_governance_audit"] = schema_template(node_gov_audit_fields)
@@ -1175,6 +1455,7 @@ def _create_master_database(client: Any, generated: dict[str, str]) -> dict[str,
                 "bootstrap": True,
                 "API_key": generated["API_KEY"],
                 "API_secret": generated["API_SECRET"],
+                "MasterServerID": generated.get("MASTER_SERVER_ID", ""),
                 "userID_schema": list(USER_SCHEMA_FIELDS),
                 "NodeUser_schema": list(NODE_USER_SCHEMA_FIELDS),
                 "adminUser_schema": list(ADMIN_USER_SCHEMA_FIELDS),
@@ -1185,13 +1466,30 @@ def _create_master_database(client: Any, generated: dict[str, str]) -> dict[str,
         upsert=True,
     )
 
+    master_server_id = str(generated.get("MASTER_SERVER_ID", "")).strip()
+    if master_server_id:
+        db.master_identity.update_one(
+            {"MasterServerID": master_server_id},
+            {
+                "$set": {
+                    "MasterServerID": master_server_id,
+                    "HOST_PRIMARY_IP": optional_env("HOST_PRIMARY_IP"),
+                    "HOST_PRIMARY_MAC": optional_env("HOST_PRIMARY_MAC"),
+                    "HOST_MACHINE_ID": optional_env("HOST_MACHINE_ID"),
+                    "updated_at": utc_now(),
+                },
+                "$setOnInsert": {"created_at": utc_now()},
+            },
+            upsert=True,
+        )
+
     return {"database": MASTER_DB_NAME, "collections": list(collections.keys())}
 
 
 def _create_connection_layers(client: Any) -> list[dict[str, str]]:
     db = client[MASTER_DB_NAME]
     created: list[dict[str, str]] = []
-    for connection_col, schema_col, spec in CONNECTION_LAYER_SPECS:
+    for connection_col, schema_col, spec in _connection_layer_specs():
         db[connection_col].update_one(
             {"layer": connection_col},
             {"$set": {"layer": connection_col, "active": True, "updated_at": utc_now(), **spec}},
@@ -1250,8 +1548,8 @@ def _write_manifest(
             "docker_network_name": values["docker_network_name"],
             "enabled_services": list(values["enabled_services"]),
         },
-        "critical_profile": dict(SERVER_CRITICAL_PROFILE),
-        "operational_flags": dict(SERVER_OPERATIONAL_FLAGS),
+        "critical_profile": dict(_server_critical_profile()),
+        "operational_flags": dict(_server_operational_flags()),
         "files": {
             "server_env": (server_env_path or values["root_dir"] / "server.env").as_posix(),
             "secrets_env": (secrets_env_path or values["root_dir"] / "secrets.env").as_posix(),
@@ -1305,7 +1603,10 @@ def _write_manifest(
             "node_users": list(NODE_USER_SCHEMA_FIELDS),
             "admin_users": list(ADMIN_USER_SCHEMA_FIELDS),
             "master_class_users": list(MASTER_CLASS_USER_SCHEMA_FIELDS),
-            "node_hosted_databases": list(NODE_DB_SCHEMA_FIELDS),
+            "node_hosted_databases": list(NODE_HOSTED_DB_FIELDS),
+            "node_seeds": list(NODE_SEED_FIELDS),
+            "node_db_user": list(NODE_DB_SCHEMA_FIELDS),
+            **{name: list(fields) for name, fields in NODE_DB_COLLECTION_SCHEMAS.items()},
             **{name: list(fields) for name, fields in COLLECTION_SCHEMAS.items()},
         },
         "api_key_fingerprint": generated["API_KEY"][:8],
@@ -1320,11 +1621,27 @@ def _get_mongo_client_for_launch(launch_values: dict[str, Any]) -> Any | None:
         f"mongodb://{launch_values['mongodb_host']}:"
         f"{launch_values['mongodb_port']}/{MASTER_DB_NAME}"
     )
+    kwargs: dict[str, Any] = {"serverSelectionTimeoutMS": 3000}
+    via_socks = optional_env("MONGODB_VIA_SOCKS5").lower()
+    use_socks = via_socks in {"1", "true", "yes"} or not via_socks
+    socks_host = optional_env("TOR_SOCKS_HOST")
+    socks_port = optional_env("TOR_SOCKS_PORT")
+    if use_socks and socks_host and socks_port:
+        kwargs["proxyHost"] = socks_host
+        kwargs["proxyPort"] = int(socks_port)
+        socks_user = optional_env("TOR_SOCKS_USERNAME") or optional_env("TOR_SOCKS_USER")
+        socks_pass = optional_env("TOR_SOCKS_PASSWORD")
+        if socks_user:
+            kwargs["proxyUsername"] = socks_user
+        if socks_pass:
+            kwargs["proxyPassword"] = socks_pass
     try:
-        client = MongoClient(url, serverSelectionTimeoutMS=3000)
+        client = MongoClient(url, **kwargs)
         client.admin.command("ping")
         return client
     except PyMongoError:
+        return None
+    except Exception:
         return None
 
 
@@ -1333,6 +1650,8 @@ def build_master_server(launch_config: dict[str, Any] | None = None) -> dict[str
     launch_values = _resolve_launch_values(launch_config)
     root_dir = launch_values["root_dir"]
     secrets_dir = launch_values["secrets_dir"]
+    databases_dir = launch_values["databases_dir"]
+    pull = launch_values["hardware_pull"]
     configs_dir = root_dir / "configs"
     docker_dns_path = configs_dir / "docker-dns.env"
     docker_network_path = configs_dir / "docker-network.yml"
@@ -1346,11 +1665,20 @@ def build_master_server(launch_config: dict[str, Any] | None = None) -> dict[str
 
     root_dir.mkdir(parents=True, exist_ok=True)
     secrets_dir.mkdir(parents=True, exist_ok=True)
-    (root_dir / "data" / "tor").mkdir(parents=True, exist_ok=True)
+    databases_dir.mkdir(parents=True, exist_ok=True)
     (root_dir / "logs").mkdir(parents=True, exist_ok=True)
     configs_dir.mkdir(parents=True, exist_ok=True)
 
+    _apply_master_secrets_from_proxy(secrets_dir)
+
     generated = _resolve_generated_secrets(secrets_env_path)
+    generated["MASTER_SERVER_ID"] = _resolve_or_create_master_server_id(
+        secrets_dir=secrets_dir,
+        pull=pull,
+        existing=generated,
+    )
+    os.environ["MASTER_SERVER_ID"] = generated["MASTER_SERVER_ID"]
+
     config_secrets_values = _resolve_config_secrets(
         config_secrets_path,
         launch_values=launch_values,
@@ -1380,7 +1708,6 @@ def build_master_server(launch_config: dict[str, Any] | None = None) -> dict[str
         config_secrets_values,
         launch_values=launch_values,
     )
-    torrc = _build_torrc(launch_values=launch_values)
     docker_dns_env = _build_docker_dns_env(launch_values=launch_values)
     docker_network_yml = _build_docker_network_yml(launch_values=launch_values)
 
@@ -1393,6 +1720,13 @@ def build_master_server(launch_config: dict[str, Any] | None = None) -> dict[str
 
         write_operations_secrets_template(secrets_dir, populate_from_env=True, force=False)
     except ImportError:
+        pass
+    write_databases_secrets_template(secrets_dir, populate_from_env=True, force=False)
+    try:
+        from BuildConfigs import write_backend_secrets
+
+        write_backend_secrets(secrets_dir, force=False)
+    except Exception:
         pass
     for env_key, value in (
         ("BLOCKCHAIN_SECRET", generated.get("BLOCKCHAIN_SECRET", "")),
@@ -1412,7 +1746,11 @@ def build_master_server(launch_config: dict[str, Any] | None = None) -> dict[str
         frontend_onion=onions.get("frontend"),
         node_onion=onions.get("node_user"),
     )
-    torrc_path.write_text(torrc, encoding="utf-8")
+    # Torrc is owned by Proxy; do not rewrite unless Proxy left an existing host torrc absent.
+    if not torrc_path.exists() and optional_env("HOST_TOR_CONFIG_TORRC"):
+        proxy_torrc = Path(optional_env("HOST_TOR_CONFIG_TORRC")).expanduser()
+        if proxy_torrc.exists() and proxy_torrc.resolve() != torrc_path.resolve():
+            torrc_path.write_text(proxy_torrc.read_text(encoding="utf-8"), encoding="utf-8")
     docker_dns_path.write_text(docker_dns_env, encoding="utf-8")
     docker_network_path.write_text(docker_network_yml, encoding="utf-8")
 
@@ -1423,6 +1761,7 @@ def build_master_server(launch_config: dict[str, Any] | None = None) -> dict[str
         generated["LUCID_TOKENS_HOLDING_ACCOUNT"],
         encoding="utf-8",
     )
+    (secrets_dir / "MasterServerID.txt").write_text(generated["MASTER_SERVER_ID"], encoding="utf-8")
 
     db_result: dict[str, Any] | None = None
     connection_layers: list[dict[str, str]] | None = None
@@ -1494,7 +1833,7 @@ def build_master_server(launch_config: dict[str, Any] | None = None) -> dict[str
         server_env_path=server_env_path,
         secrets_env_path=secrets_env_path,
         mongodb_secrets_path=mongodb_secrets_written,
-        torrc_path=torrc_path,
+        torrc_path=torrc_path if torrc_path.exists() else None,
         tor_registry=tor_registry,
         tor_routes_path=tor_routes_path,
         server_secrets_path=server_secrets_path,
@@ -1502,11 +1841,16 @@ def build_master_server(launch_config: dict[str, Any] | None = None) -> dict[str
 
     return {
         "root_dir": root_dir.as_posix(),
+        "databases_dir": databases_dir.as_posix(),
         "server_env": server_env_path.as_posix(),
         "secrets_env": secrets_env_path.as_posix(),
         "server_secrets": server_secrets_path.as_posix(),
         "config_secrets": config_secrets_path.as_posix(),
         "operations_secrets": operations_secrets_path.as_posix(),
+        "master_secrets": optional_env("MASTER_SECRETS_FILE"),
+        "MasterServerID": generated["MASTER_SERVER_ID"],
+        "hardware_primary_ip": pull.get("primary_ip"),
+        "hardware_primary_mac": pull.get("primary_mac"),
         "mongodb_secrets": (
             mongodb_secrets_written.as_posix()
             if mongodb_secrets_written is not None
@@ -1515,7 +1859,7 @@ def build_master_server(launch_config: dict[str, Any] | None = None) -> dict[str
         "mongodb_secrets_written": mongodb_secrets_written is not None,
         "mongodb_verified": bool(mongodb_verification and mongodb_verification.get("verified")),
         "container_secrets": container_secrets_status(secrets_dir=secrets_dir),
-        "torrc": torrc_path.as_posix(),
+        "torrc": torrc_path.as_posix() if torrc_path.exists() else "",
         "docker_dns_env": docker_dns_path.as_posix(),
         "docker_network_yml": docker_network_path.as_posix(),
         "tor_routes": tor_routes_path.as_posix(),
@@ -1525,7 +1869,7 @@ def build_master_server(launch_config: dict[str, Any] | None = None) -> dict[str
         "database_initialized": db_result is not None,
         "fastapi_app_ready": app_ready,
         "steps_completed": 20,
-        "critical_profile": dict(SERVER_CRITICAL_PROFILE),
+        "critical_profile": dict(_server_critical_profile()),
         "launch_config": {
             "master_server_port": launch_values["master_server_port"],
             "gui_bridge_port": launch_values["gui_bridge_port"],
@@ -1544,7 +1888,7 @@ def main() -> int:
     if not result["database_initialized"]:
         print(
             "  note: MongoDB was not reachable; env/tor/manifest written. "
-            "Re-run on Pi after lucid-mongodb container is up.",
+            "Re-run on Pi after MongoDB container is up.",
             file=sys.stderr,
         )
     return 0

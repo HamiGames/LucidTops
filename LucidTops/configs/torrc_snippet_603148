@@ -1,0 +1,14 @@
+# LucidTops Tor daemon - generated 2026-09-08T02:46:19.609894+00:00
+# Docker Network: lucid_pickme_5e603148
+# Hardware IP/MAC (pulled): 192.168.0.236 / e0:d5:5e:60:31:48
+SocksPort 64812
+ControlPort 64813
+CookieAuthentication 1
+HiddenServiceDir C:/Desktop/personal/Lucid_server_2026/Lucid_server_2026/LucidTops/tor/hidden_service/master_server
+HiddenServicePort 64814 192.168.0.236:64816
+HiddenServiceDir C:/Desktop/personal/Lucid_server_2026/Lucid_server_2026/LucidTops/tor/hidden_service/frontend
+HiddenServicePort 64814 192.168.0.236:64814
+HiddenServiceDir C:/Desktop/personal/Lucid_server_2026/Lucid_server_2026/LucidTops/tor/hidden_service/node_user
+HiddenServicePort 64814 192.168.0.236:64814
+HiddenServiceDir C:/Desktop/personal/Lucid_server_2026/Lucid_server_2026/LucidTops/tor/hidden_service/rdp
+HiddenServicePort 64814 192.168.0.236:64814

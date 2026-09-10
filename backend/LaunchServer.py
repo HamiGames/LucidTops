@@ -25,44 +25,31 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from builderMasterServer import (
-    DEFAULT_DOCKER_SERVICES,
-    TOR_ROUTES_MANIFEST_FILENAME,
-    _get_mongo_client_for_launch,
-    apply_tor_service_env_updates,
-    build_master_server,
-)
-from config import (
-    CONTAINER_ONION_DIR,
-    DEFAULT_CONFIG_SECRETS_NAME,
-    LUCID_TOPS_ROOT,
-    MASTER_SERVER_PORT,
-    SERVER_ENV_PATH,
-    TOR_HIDDEN_SERVICE_DIRS,
-    apply_secrets_file,
-    get_config_int,
-    get_config_value,
-    get_master_db,
-    utc_now,
-)
-from MasterDBSchema import ADMIN_USERS_COLLECTION, MASTER_CLASS_USERS_COLLECTION
-
 BACKEND_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BACKEND_DIR.parent
 ADMIN_USER_DIR = PROJECT_ROOT / "AdminUser"
 MASTER_CLASS_USER_DIR = PROJECT_ROOT / "MasterClassUser"
 
-MAX_MASTER_CLASS_USERS = get_config_int("MAX_MASTER_CLASS_USERS", 5)
-DEFAULT_GUI_BRIDGE_PORT = get_config_int("GUI_API_BRIDGE_PORT", 8105)
-DEFAULT_MONGODB_PORT = get_config_int("MONGODB_PORT", 27017)
-DEFAULT_DOCKER_NETWORK = get_config_value("DOCKER_NETWORK_NAME", "lucid-stack")
-HOST_TOR_SERVICE_DIRS: dict[str, str] = {
-    "master_server": "lucid_server",
-    "frontend": "lucid_portal",
-    "node_user": "lucid_node",
+HOST_TOR_SERVICE_DIR_ENV_KEYS: dict[str, str] = {
+    "master_server": "HOST_TOR_SERVICE_DIR_MASTER",
+    "frontend": "HOST_TOR_SERVICE_DIR_FRONTEND",
+    "node_user": "HOST_TOR_SERVICE_DIR_NODE",
 }
-TOR_HOSTNAME_POLL_SECONDS = 45
-TOR_HOSTNAME_POLL_INTERVAL = 2.0
+
+
+def _require_env(key: str) -> str:
+    value = os.environ.get(key, "").strip()
+    if not value:
+        raise RuntimeError(f"required environment variable {key} is missing")
+    return value
+
+
+def _require_env_int(key: str) -> int:
+    raw = _require_env(key)
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"environment variable {key} must be an integer") from exc
 
 
 @dataclass
@@ -74,7 +61,7 @@ class LaunchConfig:
     mongodb_host: str
     mongodb_port: int
     docker_network_name: str
-    enabled_services: tuple[str, ...] = field(default_factory=lambda: DEFAULT_DOCKER_SERVICES)
+    enabled_services: tuple[str, ...]
     start_tor: bool = False
     non_interactive: bool = False
 
@@ -93,14 +80,19 @@ class LaunchConfig:
 
 def _prompt_value(
     label: str,
-    default: str,
+    current: str,
     *,
     non_interactive: bool,
 ) -> str:
     if non_interactive:
-        return default
-    entered = input(f"{label} [{default}]: ").strip()
-    return entered or default
+        if not current.strip():
+            raise RuntimeError(f"non-interactive launch requires a value for: {label}")
+        return current.strip()
+    entered = input(f"{label} [{current}]: ").strip()
+    value = entered or current
+    if not value.strip():
+        raise RuntimeError(f"required launch value missing for: {label}")
+    return value.strip()
 
 
 def _prompt_yes_no(label: str, default: bool, *, non_interactive: bool) -> bool:
@@ -115,63 +107,87 @@ def _prompt_yes_no(label: str, default: bool, *, non_interactive: bool) -> bool:
 
 def collect_launch_config(args: argparse.Namespace) -> LaunchConfig:
     """Collect ports, services, and paths from the console or CLI flags."""
-    default_root = args.root or os.environ.get("LUCID_TOPS_ROOT", LUCID_TOPS_ROOT.as_posix())
-    default_master_port = str(
+    from pull_information import bind_operation_environ, pull_realworld_information
+
+    pull = pull_realworld_information()
+    bind_operation_environ(pull)
+
+    root_hint = (
+        args.root
+        or os.environ.get("LUCID_TOPS_ROOT", "").strip()
+        or str(pull.get("lucid_tops_root") or "")
+    )
+    master_port_hint = str(
         args.master_port
-        or os.environ.get("MASTER_SERVER_PORT", MASTER_SERVER_PORT)
-    )
-    default_gui_port = str(
-        args.gui_port or os.environ.get("GUI_API_BRIDGE_PORT", DEFAULT_GUI_BRIDGE_PORT)
-    )
-    default_mongodb_host = args.mongodb_host or os.environ.get("MONGODB_HOST", "lucid-mongodb")
-    default_mongodb_port = str(
-        args.mongodb_port or os.environ.get("MONGODB_PORT", DEFAULT_MONGODB_PORT)
-    )
-    default_network = args.network or os.environ.get("DOCKER_NETWORK_NAME", DEFAULT_DOCKER_NETWORK)
-    default_services = args.services or os.environ.get(
-        "ENABLED_SERVICES",
-        ",".join(DEFAULT_DOCKER_SERVICES),
-    )
+        or os.environ.get("MASTER_SERVER_PORT", "")
+        or pull.get("master_server_port")
+        or ""
+    ).strip()
+    gui_port_hint = str(
+        args.gui_port or os.environ.get("GUI_API_BRIDGE_PORT", "") or master_port_hint
+    ).strip()
+    mongodb_host_hint = (
+        args.mongodb_host
+        or os.environ.get("MONGODB_HOST", "")
+        or str(pull.get("mongodb_host") or "")
+    ).strip()
+    mongodb_port_hint = str(
+        args.mongodb_port
+        or os.environ.get("MONGODB_PORT", "")
+        or pull.get("mongodb_port")
+        or ""
+    ).strip()
+    network_hint = (
+        args.network
+        or os.environ.get("DOCKER_NETWORK_NAME", "")
+        or str(pull.get("docker_network_name") or "")
+    ).strip()
+    services_hint = (args.services or os.environ.get("ENABLED_SERVICES", "")).strip()
     non_interactive = args.yes
 
     if not non_interactive:
         print("LucidTops LaunchServer — console configuration")
-        print("Press Enter to accept defaults shown in [brackets].")
+        print(
+            f"Hardware pull: IP={pull.get('primary_ip')} MAC={pull.get('primary_mac')} "
+            f"host={pull.get('hostname')}"
+        )
+        print("Press Enter to accept values shown in [brackets] when provided by env/flags/pull.")
 
-    root_text = _prompt_value("LucidTops root directory", default_root, non_interactive=non_interactive)
+    root_text = _prompt_value("LucidTops root directory", root_hint, non_interactive=non_interactive)
     master_port_text = _prompt_value(
         "Master server port",
-        default_master_port,
+        master_port_hint,
         non_interactive=non_interactive,
     )
     gui_port_text = _prompt_value(
         "GUI bridge port",
-        default_gui_port,
+        gui_port_hint,
         non_interactive=non_interactive,
     )
     mongodb_host = _prompt_value(
         "MongoDB Docker DNS host",
-        default_mongodb_host,
+        mongodb_host_hint,
         non_interactive=non_interactive,
     )
     mongodb_port_text = _prompt_value(
         "MongoDB port",
-        default_mongodb_port,
+        mongodb_port_hint,
         non_interactive=non_interactive,
     )
     network_name = _prompt_value(
         "Docker network name",
-        default_network,
+        network_hint,
         non_interactive=non_interactive,
     )
     services_text = _prompt_value(
         "Enabled services (comma-separated)",
-        default_services,
+        services_hint,
         non_interactive=non_interactive,
     )
+    # Tor daemon is owned by Proxy; default off for MasterServer launch.
     start_tor = _prompt_yes_no(
         "Start local Tor daemon for hidden-service bootstrap",
-        args.start_tor,
+        False if not getattr(args, "start_tor", False) else args.start_tor,
         non_interactive=non_interactive,
     )
 
@@ -180,11 +196,21 @@ def collect_launch_config(args: argparse.Namespace) -> LaunchConfig:
         service.strip()
         for service in services_text.split(",")
         if service.strip()
-    ) or DEFAULT_DOCKER_SERVICES
+    )
+    if not enabled:
+        raise RuntimeError("ENABLED_SERVICES must list at least one service")
+
+    secrets_dir_hint = (
+        args.secrets_dir
+        or os.environ.get("SECRETS_DIR", "")
+        or str(pull.get("secrets_dir") or "")
+    ).strip()
+    if not secrets_dir_hint:
+        raise RuntimeError("SECRETS_DIR must be provided via --secrets-dir, environment, or hardware pull")
 
     return LaunchConfig(
         lucid_tops_root=root_path,
-        secrets_dir=Path(args.secrets_dir or os.environ.get("SECRETS_DIR", root_path / "secrets")),
+        secrets_dir=Path(secrets_dir_hint).expanduser(),
         master_server_port=int(master_port_text),
         gui_bridge_port=int(gui_port_text),
         mongodb_host=mongodb_host,
@@ -202,9 +228,7 @@ def _apply_launch_config_to_process_env(config: LaunchConfig) -> None:
     os.environ["SECRETS_DIR"] = config.secrets_dir.as_posix()
     os.environ["SERVER_ENV_FILE"] = str(config.lucid_tops_root / "server.env")
     os.environ["SECRETS_ENV_FILE"] = str(config.lucid_tops_root / "secrets.env")
-    os.environ["CONFIG_SECRETS_FILE"] = str(
-        config.secrets_dir / DEFAULT_CONFIG_SECRETS_NAME
-    )
+    os.environ["CONFIG_SECRETS_FILE"] = str(config.secrets_dir / "config.secrets")
     os.environ["OPERATIONS_SECRETS_FILE"] = str(config.secrets_dir / "operations.secrets")
     os.environ["HOST_TOR_CONFIG_TORRC"] = str(config.lucid_tops_root / "torrc")
     os.environ["MASTER_SERVER_PORT"] = str(config.master_server_port)
@@ -217,10 +241,11 @@ def _apply_launch_config_to_process_env(config: LaunchConfig) -> None:
 
 def _host_tor_paths(config: LaunchConfig) -> dict[str, Path]:
     tor_root = config.lucid_tops_root / "data" / "tor"
-    return {
-        key: tor_root / dirname
-        for key, dirname in HOST_TOR_SERVICE_DIRS.items()
-    }
+    paths: dict[str, Path] = {}
+    for key, env_key in HOST_TOR_SERVICE_DIR_ENV_KEYS.items():
+        dirname = _require_env(env_key)
+        paths[key] = tor_root / dirname
+    return paths
 
 
 def _ensure_tor_hidden_service_directories(config: LaunchConfig) -> list[str]:
@@ -234,14 +259,16 @@ def _ensure_tor_hidden_service_directories(config: LaunchConfig) -> list[str]:
 
 
 def _build_host_torrc(config: LaunchConfig) -> Path:
+    from config import get_config_int, get_config_value, utc_now
+
     tor_root = config.lucid_tops_root / "data" / "tor"
     host_torrc = config.lucid_tops_root / "configs" / "torrc.host"
     host_torrc.parent.mkdir(parents=True, exist_ok=True)
     paths = _host_tor_paths(config)
-    forward_host = get_config_value("HIDDEN_SERVICE_FORWARD_HOST", "127.0.0.1")
-    socks_host = get_config_value("TOR_HOST", "127.0.0.1")
-    socks_port = get_config_int("TOR_SOCKS_PORT", 9050)
-    control_port = get_config_int("TOR_CONTROL_PORT", 9051)
+    forward_host = get_config_value("HIDDEN_SERVICE_FORWARD_HOST")
+    socks_host = get_config_value("TOR_HOST")
+    socks_port = get_config_int("TOR_SOCKS_PORT")
+    control_port = get_config_int("TOR_CONTROL_PORT")
     lines = [
         "# LucidTops host bootstrap torrc - generated by backend/LaunchServer.py",
         f"# Generated: {utc_now()}",
@@ -292,9 +319,16 @@ def _start_tor_daemon(config: LaunchConfig) -> dict[str, Any]:
     }
 
 
+def _tor_hostname_poll_settings() -> tuple[int, float]:
+    return _require_env_int("TOR_HOSTNAME_POLL_SECONDS"), float(
+        _require_env("TOR_HOSTNAME_POLL_INTERVAL")
+    )
+
+
 def _wait_for_onion_hostnames(config: LaunchConfig) -> dict[str, str | None]:
-    deadline = time.time() + TOR_HOSTNAME_POLL_SECONDS
-    addresses: dict[str, str | None] = {key: None for key in HOST_TOR_SERVICE_DIRS}
+    poll_seconds, poll_interval = _tor_hostname_poll_settings()
+    deadline = time.time() + poll_seconds
+    addresses: dict[str, str | None] = {key: None for key in HOST_TOR_SERVICE_DIR_ENV_KEYS}
     host_paths = _host_tor_paths(config)
     while time.time() < deadline:
         for key, path in host_paths.items():
@@ -303,7 +337,7 @@ def _wait_for_onion_hostnames(config: LaunchConfig) -> dict[str, str | None]:
             addresses[key] = _read_onion_address(path)
         if all(addresses.values()):
             break
-        time.sleep(TOR_HOSTNAME_POLL_INTERVAL)
+        time.sleep(poll_interval)
     return addresses
 
 
@@ -314,7 +348,7 @@ def _sync_onion_files(config: LaunchConfig, addresses: dict[str, str | None]) ->
     for key, onion in addresses.items():
         if not onion:
             continue
-        service_dir = HOST_TOR_SERVICE_DIRS.get(key, key)
+        service_dir = _require_env(HOST_TOR_SERVICE_DIR_ENV_KEYS[key])
         path = onion_dir / f"{service_dir}.onion"
         path.write_text(onion + "\n", encoding="utf-8")
         written.append(path.as_posix())
@@ -350,7 +384,18 @@ def _read_onion_address(hidden_service_dir: Path) -> str | None:
         return None
 
 
+def _onion_stem_map() -> dict[str, str]:
+    return {
+        _require_env("HOST_TOR_SERVICE_DIR_MASTER"): "master_server",
+        _require_env("HOST_TOR_SERVICE_DIR_FRONTEND"): "frontend",
+        _require_env("HOST_TOR_SERVICE_DIR_NODE"): "node_user",
+    }
+
+
 def _collect_onion_addresses(config: LaunchConfig | None = None) -> dict[str, str | None]:
+    from config import CONTAINER_ONION_DIR, TOR_HIDDEN_SERVICE_DIRS, ensure_runtime_settings
+
+    ensure_runtime_settings()
     addresses: dict[str, str | None] = {}
     if config is not None:
         for name, path in _host_tor_paths(config).items():
@@ -358,26 +403,17 @@ def _collect_onion_addresses(config: LaunchConfig | None = None) -> dict[str, st
     for name, path in TOR_HIDDEN_SERVICE_DIRS.items():
         if not addresses.get(name):
             addresses[name] = _read_onion_address(path)
+    stem_map = _onion_stem_map()
     container_dir = CONTAINER_ONION_DIR
     if container_dir.exists():
         for item in container_dir.glob("*.onion"):
-            stem = item.stem
-            mapped = {
-                "lucid_server": "master_server",
-                "lucid_portal": "frontend",
-                "lucid_node": "node_user",
-            }.get(stem, stem)
+            mapped = stem_map.get(item.stem, item.stem)
             addresses[mapped] = item.read_text(encoding="utf-8").strip()
     if config is not None:
         onion_dir = config.lucid_tops_root / "data" / "tor" / "onion"
         if onion_dir.exists():
             for item in onion_dir.glob("*.onion"):
-                stem = item.stem
-                mapped = {
-                    "lucid_server": "master_server",
-                    "lucid_portal": "frontend",
-                    "lucid_node": "node_user",
-                }.get(stem, stem)
+                mapped = stem_map.get(item.stem, item.stem)
                 if not addresses.get(mapped):
                     addresses[mapped] = item.read_text(encoding="utf-8").strip()
     return addresses
@@ -388,6 +424,9 @@ def _update_server_env_onions(
     *,
     server_env_path: Path | None = None,
 ) -> None:
+    from builderMasterServer import TOR_ROUTES_MANIFEST_FILENAME, apply_tor_service_env_updates
+    from config import SERVER_ENV_PATH
+
     env_path = server_env_path or SERVER_ENV_PATH
     if not env_path.exists():
         return
@@ -404,6 +443,8 @@ def _write_account_file(
     filename: str,
     accounts: list[dict[str, str]],
 ) -> Path:
+    from config import utc_now
+
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / filename
     lines = [
@@ -421,6 +462,9 @@ def _write_account_file(
 
 
 def _create_admin_user(client: Any) -> Path | None:
+    from config import get_master_db, utc_now
+    from MasterDBSchema import ADMIN_USERS_COLLECTION
+
     db = get_master_db(client)
     if db[ADMIN_USERS_COLLECTION].count_documents({}) >= 1:
         existing_path = ADMIN_USER_DIR / "admin.txt"
@@ -453,15 +497,19 @@ def _create_admin_user(client: Any) -> Path | None:
 
 
 def _create_master_class_users(client: Any) -> Path | None:
+    from config import get_config_int, get_master_db, utc_now
+    from MasterDBSchema import MASTER_CLASS_USERS_COLLECTION
+
+    max_users = get_config_int("MAX_MASTER_CLASS_USERS")
     db = get_master_db(client)
     existing_count = db[MASTER_CLASS_USERS_COLLECTION].count_documents({})
-    if existing_count >= MAX_MASTER_CLASS_USERS:
+    if existing_count >= max_users:
         existing_path = MASTER_CLASS_USER_DIR / "master.txt"
         return existing_path if existing_path.exists() else None
 
     accounts: list[dict[str, str]] = []
     now = utc_now()
-    to_create = MAX_MASTER_CLASS_USERS - existing_count
+    to_create = max_users - existing_count
     for index in range(1, to_create + 1):
         mc_id = secrets.token_hex(4)
         password = secrets.token_urlsafe(16)
@@ -499,6 +547,12 @@ def launch_server(
 ) -> dict[str, Any]:
     """Run builder, onion setup, bootstrap accounts, and optionally start the server."""
     _apply_launch_config_to_process_env(config)
+
+    from builderMasterServer import (
+        _get_mongo_client_for_launch,
+        build_master_server,
+    )
+
     tor_dirs = _ensure_tor_hidden_service_directories(config)
 
     build_result = build_master_server(config.as_builder_dict())

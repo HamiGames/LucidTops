@@ -7,11 +7,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from config import MASTER_DB_NAME, utc_now
-
-DEFAULT_LUCID_TOPS_ROOT = Path("/mnt/myssd/LucidTops")
-LUCID_TOPS_ROOT = Path(os.environ.get("LUCID_TOPS_ROOT", DEFAULT_LUCID_TOPS_ROOT)).expanduser()
-SECRETS_DIR = Path(os.environ.get("SECRETS_DIR", LUCID_TOPS_ROOT / "secrets"))
+from config import SECRETS_DIR, ensure_runtime_settings, require_env, utc_now
 
 DEFAULT_MONGODB_SECRETS_NAME = "mongodb.secrets"
 MONGODB_SECRETS_FILE_ENV = "MONGODB_SECRETS_FILE"
@@ -28,6 +24,12 @@ MONGODB_SECRETS_KEYS: tuple[str, ...] = (
     "MONGODB_VERIFIED_AT",
     "MONGODB_COLLECTIONS",
     "LUCID_MONGODB_URL",
+    "MONGODB_VIA_SOCKS5",
+    "TOR_SOCKS_HOST",
+    "TOR_SOCKS_PORT",
+    "TOR_SOCKS_USERNAME",
+    "TOR_SOCKS_PASSWORD",
+    "MONGODB_DATA_MOUNT",
 )
 
 
@@ -61,51 +63,61 @@ def load_mongodb_secrets(*, reload: bool = False) -> dict[str, str]:
     return _load_mongodb_secrets_cached()
 
 
-def resolve_secret(key: str, *, default: str = "") -> str:
+def resolve_secret(key: str) -> str:
     env_value = os.environ.get(key, "").strip()
     if env_value:
         return env_value
     file_value = load_mongodb_secrets().get(key.upper(), "").strip()
     if file_value:
         return file_value
-    return default
+    raise RuntimeError(
+        f"required MongoDB secret {key} is missing from environment and mongodb.secrets"
+    )
+
+
+def resolve_secret_optional(key: str) -> str:
+    env_value = os.environ.get(key, "").strip()
+    if env_value:
+        return env_value
+    return load_mongodb_secrets().get(key.upper(), "").strip()
 
 
 def resolve_mongodb_host() -> str:
-    return resolve_secret("MONGODB_HOST", default="")
+    return resolve_secret("MONGODB_HOST")
 
 
 def resolve_mongodb_port() -> int:
-    raw = resolve_secret("MONGODB_PORT", default="")
-    if not raw:
-        return 0
+    raw = resolve_secret("MONGODB_PORT")
     try:
         return int(raw)
-    except ValueError:
-        return 0
+    except ValueError as exc:
+        raise RuntimeError("MONGODB_PORT must be an integer") from exc
 
 
 def resolve_mongodb_url() -> str:
-    return resolve_secret("MONGODB_URL", default="")
+    return resolve_secret("MONGODB_URL")
 
 
 def resolve_mongodb_service() -> str:
-    return resolve_secret("MONGODB_SERVICE", default="")
+    return resolve_secret_optional("MONGODB_SERVICE")
 
 
 def resolve_mongodb_verified() -> bool:
-    return resolve_secret("MONGODB_VERIFIED", default="").lower() in {"1", "true", "yes"}
+    return resolve_secret_optional("MONGODB_VERIFIED").lower() in {"1", "true", "yes"}
 
 
 def mongodb_secrets_status() -> dict[str, Any]:
     path = mongodb_secrets_path()
+    host = resolve_secret_optional("MONGODB_HOST")
+    port_raw = resolve_secret_optional("MONGODB_PORT")
+    port = int(port_raw) if port_raw.isdigit() else 0
     return {
         "secrets_file": path.as_posix(),
         "secrets_file_exists": path.exists(),
         "mongodb_verified": resolve_mongodb_verified(),
-        "mongodb_host": resolve_mongodb_host(),
-        "mongodb_port": resolve_mongodb_port(),
-        "mongodb_url_configured": bool(resolve_mongodb_url()),
+        "mongodb_host": host,
+        "mongodb_port": port,
+        "mongodb_url_configured": bool(resolve_secret_optional("MONGODB_URL")),
         "mongodb_service": resolve_mongodb_service(),
     }
 
@@ -118,7 +130,7 @@ def _resolve_mongodb_service_name(launch_values: dict[str, Any]) -> str:
         name = str(service).strip()
         if name and "mongodb" in name.lower():
             return name
-    return ""
+    return require_env("MONGODB_SERVICE")
 
 
 def verify_mongodb_creation(
@@ -127,6 +139,9 @@ def verify_mongodb_creation(
     launch_values: dict[str, Any],
     db_result: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    ensure_runtime_settings()
+    from config import MASTER_DB_NAME
+
     host = str(launch_values["mongodb_host"])
     port = int(launch_values["mongodb_port"])
     database = MASTER_DB_NAME
@@ -216,6 +231,28 @@ def build_verified_mongodb_secrets(
         secret_value = str(generated.get(secret_key, "")).strip()
         if secret_value:
             values[secret_key] = secret_value
+
+    socks_host = os.environ.get("TOR_SOCKS_HOST", "").strip()
+    socks_port = os.environ.get("TOR_SOCKS_PORT", "").strip()
+    if socks_host and socks_port:
+        values["TOR_SOCKS_HOST"] = socks_host
+        values["TOR_SOCKS_PORT"] = socks_port
+        values["MONGODB_VIA_SOCKS5"] = os.environ.get("MONGODB_VIA_SOCKS5", "true").strip() or "true"
+    socks_user = os.environ.get("TOR_SOCKS_USERNAME", "").strip() or os.environ.get(
+        "TOR_SOCKS_USER", ""
+    ).strip()
+    socks_pass = os.environ.get("TOR_SOCKS_PASSWORD", "").strip() or str(
+        generated.get("TOR_SOCKS_PASSWORD", "")
+    ).strip()
+    if socks_user:
+        values["TOR_SOCKS_USERNAME"] = socks_user
+    if socks_pass:
+        values["TOR_SOCKS_PASSWORD"] = socks_pass
+    data_mount = os.environ.get("MONGODB_DATA_MOUNT", "").strip() or str(
+        launch_values.get("databases_dir", "")
+    ).strip()
+    if data_mount:
+        values["MONGODB_DATA_MOUNT"] = data_mount
 
     return values
 

@@ -24,7 +24,6 @@ All configuration data is pulled from outside the container (via the DockerfileD
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
@@ -43,6 +42,7 @@ from config import (
     get_tor_api_service,
     get_tor_gui_service,
     get_master_server_tor_service,
+    resolve_master_server_id,
     resolve_master_server_onion,
 )
 from ConnectionRoutes import register_connection_routes
@@ -61,6 +61,10 @@ def create_app() -> FastAPI:
     """Assemble the Tor-only master server FastAPI application."""
     onion = resolve_master_server_onion()
     tor_service = get_master_server_tor_service()
+    try:
+        master_server_id = resolve_master_server_id()
+    except RuntimeError:
+        master_server_id = ""
 
     servers = []
     if tor_service:
@@ -84,7 +88,9 @@ def create_app() -> FastAPI:
             "status": "ok",
             "service": "master_server",
             "network": "tor",
+            "proxy_mediated": "true",
             "tor_only": str(MASTER_SERVER_TOR_ONLY).lower(),
+            "MasterServerID": master_server_id,
             "master_server_onion": onion or "",
             "tor_api_service": get_tor_api_service(),
             "tor_gui_service": get_tor_gui_service(),
@@ -102,13 +108,15 @@ def run_server() -> None:
     """Run uvicorn bound to localhost; Tor hidden service forwards *.onion traffic."""
     import uvicorn
 
-    app_path = os.environ.get("MASTER_SERVER_APP", "main:create_app")
+    from config import require_env
+
+    app_path = require_env("MASTER_SERVER_APP")
     uvicorn.run(
         app_path,
         factory=True,
         host=MASTER_SERVER_BIND_HOST,
         port=MASTER_SERVER_PORT,
-        log_level=os.environ.get("LOG_LEVEL", "info").lower(),
+        log_level=require_env("LOG_LEVEL").lower(),
     )
 
 

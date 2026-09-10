@@ -42,10 +42,12 @@ fi
 
 SECRETS_DIR="${SECRETS_DIR:-/mnt/myssd/LucidTops/secrets}"
 MONGODB_SECRETS="${MONGODB_SECRETS_FILE:-${SECRETS_DIR}/mongodb.secrets}"
+DATABASES_SECRETS="${DATABASES_SECRETS_FILE:-${SECRETS_DIR}/databases.secrets}"
 BLOCKCHAIN_SECRETS="${BLOCKCHAIN_SECRETS_FILE:-${SECRETS_DIR}/blockchain.secrets}"
 PAYMENTS_SECRETS="${PAYMENTS_SECRETS_FILE:-${SECRETS_DIR}/payments.secrets}"
 
 _source_secrets_if_present "${MONGODB_SECRETS}"
+_source_secrets_if_present "${DATABASES_SECRETS}"
 _source_secrets_if_present "${BLOCKCHAIN_SECRETS}"
 _source_secrets_if_present "${PAYMENTS_SECRETS}"
 

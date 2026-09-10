@@ -11,11 +11,17 @@ tally system:
 - the tally system is used to determine the winner of the block creation process by the world
 - the tally system is used to determine the winner of the block creation process by the universe
 
-- the tally is found in the shared database (seeded every 30seconds to all NodeUsers and MasterServer)
-- each session data processed will add a tally point to the tally (tally.py) for the NodeUser, master server, AdminUser, and MasterClassUser who processed the session data
-- each win in the tally system will reset the tally for the ID that created the block (block-smash.py)
-- the tally system will be used to determine the winner of the block creation process by the master server ( must be verified against a sessionID log)
-- 
+- the tally is found in the shared database (seeded on TALLY_SYNC_INTERVAL_SECONDS from secrets; Blockchain.txt: 3 minutes)
+- each session data processed will add a tally point / chunk_count to the tally (tally.py) for the NodeUser, master server, AdminUser, and MasterClassUser who processed the session data
+- each win in the tally system will reset the tally for the ID that created the block
+- the tally system will be used to determine the winner of the block creation process (must be verified against a sessionID log)
+- selection criteria: highest session-data-chunks produced = Block creator_id
+
+RULES of CODE CREATION:
+- No hardcoded values, all values are created at time of operation.
+- No placeholder values, all values are created at time of operation.
+- No sensitive data, all data is stored in the secrets file.
+- NO pull from GIT repository, all values are created at time of operation.
 """
 
 from __future__ import annotations
@@ -39,13 +45,15 @@ from blockchain_schema import (  # noqa: E402
     TALLY_RECORDS_COLLECTION,
     TALLY_RECORDS_FIELDS,
     TALLY_SYNC_COLLECTION,
-    TALLY_SYNC_INTERVAL_SECONDS,
     schema_template,
+)
+from blockchain_secrets import (  # noqa: E402
+    resolve_tally_sync_interval_seconds,
+    resolve_tally_sync_target,
 )
 from configBlock import get_blockchain_db, get_mongo_client, utc_now  # noqa: E402
 
 TALLY_PROCESSOR_ENTITY_TYPES: tuple[str, ...] = TALLY_ENTITY_TYPES
-DEFAULT_TALLY_TARGET = "all"
 
 
 def _parse_iso_timestamp(value: str) -> datetime | None:
@@ -71,11 +79,14 @@ def add_tally_point(
     entity_id: str,
     session_id: str | None = None,
     session_id_verified: bool | None = None,
+    chunk_count: int = 0,
     client: Any,
 ) -> dict[str, Any]:
-    """Add one tally point for an entity that processed session data."""
+    """Add one tally point (and optional chunk_count) for an entity that processed session data."""
     if entity_type not in TALLY_PROCESSOR_ENTITY_TYPES:
         raise ValueError(f"Unsupported tally entity_type: {entity_type}")
+    if not entity_id or not str(entity_id).strip():
+        raise ValueError("entity_id is required (real NodeID/MasterServerID/AdminID/MasterUserID)")
 
     now = utc_now()
     verified = session_id_verified
@@ -88,7 +99,7 @@ def add_tally_point(
             "entity_id": entity_id,
             "updated_at": now,
         },
-        "$inc": {"tally_points": 1},
+        "$inc": {"tally_points": 1, "chunk_count": max(int(chunk_count), 0)},
         "$setOnInsert": {
             "created_at": now,
             "taskTokens": [],
@@ -200,12 +211,14 @@ def get_tally_snapshot(*, client: Any) -> list[dict[str, Any]]:
 def seed_tally_sync(
     *,
     client: Any,
-    target: str = DEFAULT_TALLY_TARGET,
+    target: str | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
-    """Seed tally snapshot to NodeUsers and MasterServer (every 30 seconds)."""
+    """Seed tally snapshot to NodeUsers and MasterServer (interval from secrets)."""
     db = get_blockchain_db(client)
     now = utc_now()
+    sync_target = resolve_tally_sync_target() if target is None else target
+    sync_interval = resolve_tally_sync_interval_seconds()
 
     if not force:
         latest = db[TALLY_SYNC_COLLECTION].find_one({}, sort=[("seeded_at", -1)])
@@ -213,12 +226,12 @@ def seed_tally_sync(
             seeded_at = _parse_iso_timestamp(latest["seeded_at"])
             if seeded_at is not None:
                 elapsed = datetime.now(timezone.utc) - seeded_at.astimezone(timezone.utc)
-                if elapsed.total_seconds() < TALLY_SYNC_INTERVAL_SECONDS:
+                if elapsed.total_seconds() < sync_interval:
                     latest.pop("_id", None)
                     return {
                         "skipped": True,
                         "reason": (
-                            f"Tally sync interval is {TALLY_SYNC_INTERVAL_SECONDS}s; "
+                            f"Tally sync interval is {sync_interval}s; "
                             "use force=True to seed immediately"
                         ),
                         "last_sync": latest,
@@ -228,9 +241,9 @@ def seed_tally_sync(
     sync_record = {
         "sync_batch_id": secrets.token_hex(8),
         "seeded_at": now,
-        "seed_interval_seconds": TALLY_SYNC_INTERVAL_SECONDS,
+        "seed_interval_seconds": sync_interval,
         "tally_snapshot": snapshot,
-        "target": target,
+        "target": sync_target,
         "created_at": now,
     }
     db[TALLY_SYNC_COLLECTION].insert_one(sync_record)
@@ -239,8 +252,8 @@ def seed_tally_sync(
         "skipped": False,
         "sync_batch_id": sync_record["sync_batch_id"],
         "seeded_at": now,
-        "seed_interval_seconds": TALLY_SYNC_INTERVAL_SECONDS,
-        "target": target,
+        "seed_interval_seconds": sync_interval,
+        "target": sync_target,
         "record_count": len(snapshot),
         "sync_record": sync_record,
     }
@@ -249,12 +262,13 @@ def seed_tally_sync(
 def _tally_score(record: dict[str, Any]) -> tuple[int, int]:
     task_tokens = record.get("taskTokens") or []
     token_count = len(task_tokens) if isinstance(task_tokens, list) else 0
+    chunk_count = int(record.get("chunk_count") or 0)
     points = int(record.get("tally_points") or 0)
-    return points, token_count
+    return chunk_count or points, token_count
 
 
 def select_tally_winner(*, client: Any) -> dict[str, Any]:
-    """Select block creation winner from tally_points and taskTokens."""
+    """Select block creation winner from session-data-chunks / tally_points / taskTokens."""
     db = get_blockchain_db(client)
     candidates = list(
         db[TALLY_RECORDS_COLLECTION].find(
@@ -264,27 +278,45 @@ def select_tally_winner(*, client: Any) -> dict[str, Any]:
     )
     if not candidates:
         return {
-            "winner_entity_type": "master_server",
-            "winner_entity_id": "master_server",
-            "tally_verified": True,
+            "winner_entity_type": None,
+            "winner_entity_id": None,
+            "tally_verified": False,
             "tally_points": 0,
             "taskTokens": [],
             "sessionID": None,
+            "chunk_count": 0,
+            "empty_tally": True,
         }
 
     winner = max(candidates, key=_tally_score)
+    entity_id = str(winner.get("entity_id") or "").strip()
+    entity_type = str(winner.get("entity_type") or "").strip()
+    if not entity_id or not entity_type:
+        return {
+            "winner_entity_type": None,
+            "winner_entity_id": None,
+            "tally_verified": False,
+            "tally_points": 0,
+            "taskTokens": [],
+            "sessionID": None,
+            "chunk_count": 0,
+            "empty_tally": True,
+        }
+
     session_id = winner.get("sessionID")
     verified = bool(winner.get("sessionID_verified")) and verify_tally_session_id(
         client=client,
         session_id=session_id if isinstance(session_id, str) else None,
     )
     return {
-        "winner_entity_type": winner.get("entity_type") or "master_server",
-        "winner_entity_id": winner.get("entity_id") or "master_server",
+        "winner_entity_type": entity_type,
+        "winner_entity_id": entity_id,
         "tally_verified": verified,
         "tally_points": int(winner.get("tally_points") or 0),
         "taskTokens": list(winner.get("taskTokens") or []),
         "sessionID": session_id,
+        "chunk_count": int(winner.get("chunk_count") or 0),
+        "empty_tally": False,
     }
 
 
@@ -294,7 +326,7 @@ def reset_tally_for_winner(
     entity_id: str,
     client: Any,
 ) -> dict[str, Any]:
-    """Reset tally for the ID that created the block (block-smash.py win reset)."""
+    """Reset tally for the ID that created the block."""
     now = utc_now()
     get_blockchain_db(client)[TALLY_RECORDS_COLLECTION].update_one(
         {"entity_type": entity_type, "entity_id": entity_id},
@@ -302,6 +334,7 @@ def reset_tally_for_winner(
             "$set": {
                 "tally_points": 0,
                 "taskTokens": [],
+                "chunk_count": 0,
                 "last_win_at": now,
                 "last_reset_at": now,
                 "updated_at": now,
@@ -322,22 +355,38 @@ def reset_tally_for_winner(
 
 
 def validate_tally_for_block_creation(*, client: Any, is_genesis: bool = False) -> dict[str, Any]:
-    """Validate tally winner for block creation (sessionID log + taskTokens)."""
+    """Validate tally winner for block creation (sessionID log + chunks/taskTokens)."""
     winner = select_tally_winner(client=client)
     task_tokens = winner.get("taskTokens") or []
     token_count = len(task_tokens) if isinstance(task_tokens, list) else 0
     tally_points = int(winner.get("tally_points") or 0)
+    chunk_count = int(winner.get("chunk_count") or 0)
 
-    if not is_genesis and not winner.get("tally_verified"):
+    if is_genesis:
+        return {
+            "winner_entity_type": winner.get("winner_entity_type"),
+            "winner_entity_id": winner.get("winner_entity_id"),
+            "tally_verified": True,
+            "tally_points": tally_points,
+            "taskTokens": list(task_tokens) if isinstance(task_tokens, list) else [],
+            "taskToken_count": token_count,
+            "chunk_count": chunk_count,
+            "sessionID": winner.get("sessionID"),
+            "genesis": True,
+        }
+
+    if winner.get("empty_tally") or not winner.get("winner_entity_id"):
+        raise PermissionError(
+            "Block creation requires a tally winner with a real creator_id"
+        )
+
+    if not winner.get("tally_verified"):
         raise PermissionError("Tally winner must be verified against sessionID log")
 
-    if not is_genesis and token_count <= 0 and tally_points <= 0:
-        winner_type = str(winner.get("winner_entity_type") or "")
-        if winner_type != "master_server":
-            raise PermissionError(
-                "Block creation requires taskTokens in the tally record system "
-                "for the corresponding NodeUser or master server"
-            )
+    if token_count <= 0 and tally_points <= 0 and chunk_count <= 0:
+        raise PermissionError(
+            "Block creation requires session-data-chunks or taskTokens in the tally record system"
+        )
 
     return {
         "winner_entity_type": winner.get("winner_entity_type"),
@@ -346,6 +395,7 @@ def validate_tally_for_block_creation(*, client: Any, is_genesis: bool = False) 
         "tally_points": tally_points,
         "taskTokens": list(task_tokens) if isinstance(task_tokens, list) else [],
         "taskToken_count": token_count,
+        "chunk_count": chunk_count,
         "sessionID": winner.get("sessionID"),
     }
 
@@ -360,7 +410,7 @@ def main() -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     seed_parser = subparsers.add_parser("seed", help="Seed tally snapshot to NodeUsers and MasterServer")
-    seed_parser.add_argument("--target", default=DEFAULT_TALLY_TARGET)
+    seed_parser.add_argument("--target", default=None)
     seed_parser.add_argument("--force", action="store_true")
 
     subparsers.add_parser("snapshot", help="Print current tally snapshot")

@@ -244,12 +244,19 @@ def create_master_server_routers() -> dict[str, Any]:
     """Create all master-server FastAPI routers grouped by subsystem."""
     from fastapi import APIRouter
 
+    from config import get_config_value
+
+    api_prefix = get_config_value("API_BASE_PATH")
+    gui_prefix = get_config_value("GUI_PREFIX")
+    admin_prefix = get_config_value("ADMIN_API_PREFIX")
+    master_class_prefix = get_config_value("MASTER_CLASS_API_PREFIX")
+
     return {
-        "api": _build_api_router(APIRouter(prefix="/api/v1")),
-        "gui": _build_gui_router(APIRouter(prefix="/gui")),
-        "admin": _build_simple_router(APIRouter(prefix="/admin"), ADMIN_ROUTES, "admin-system"),
+        "api": _build_api_router(APIRouter(prefix=api_prefix)),
+        "gui": _build_gui_router(APIRouter(prefix=gui_prefix)),
+        "admin": _build_simple_router(APIRouter(prefix=admin_prefix), ADMIN_ROUTES, "admin-system"),
         "master_class": _build_simple_router(
-            APIRouter(prefix="/master-class"), MASTER_CLASS_ROUTES, "master-class-system"
+            APIRouter(prefix=master_class_prefix), MASTER_CLASS_ROUTES, "master-class-system"
         ),
     }
 

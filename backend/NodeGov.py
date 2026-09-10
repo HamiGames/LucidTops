@@ -24,6 +24,14 @@ Rules for the NodeUser:
 - A NodeUser may trade LucidTokens for other currencies (USD, XRP, Tron) at the LucidMarket system (LucidMarket.py)
 - A NodeUser may use the LucidToken to pay for the tier system for use of the session system (session.py)(value of a token is based on the jackpot system (jackpot.py))
 
+operational requirements:
+- uses nginx reverse proxy system
+- uses DockerDNS for network communication
+- uses Tor Hidden Service and Docker Network for network communications as a fallback
+- uses MongoDB 7.0.0 or higher for database storage
+- requires registration with the MasterServer (uvicorn server and FastAPI system) to be operational
+
+
 
 """
 
@@ -56,15 +64,17 @@ NodeOperation = Literal[
     "ledger_modify_past",
 ]
 
-BANNED_OPERATIONS_COLLECTION = get_config_value(
-    "NODE_GOV_BANNED_COLLECTION", "node_governance_bans"
-)
-NODE_GOV_AUDIT_COLLECTION = get_config_value(
-    "NODE_GOV_AUDIT_COLLECTION", "node_governance_audit"
-)
+BANNED_OPERATIONS_COLLECTION_KEY = "NODE_GOV_BANNED_COLLECTION"
+NODE_GOV_AUDIT_COLLECTION_KEY = "NODE_GOV_AUDIT_COLLECTION"
 
-_DEFAULT_RESTRICTED: frozenset[NodeOperation] = frozenset(
+_KNOWN_NODE_OPERATIONS: frozenset[str] = frozenset(
     {
+        "session",
+        "blockchain_read",
+        "blockchain_create",
+        "ledger_read",
+        "ledger_write",
+        "database_seed",
         "database_modify",
         "session_modify",
         "block_modify",
@@ -72,36 +82,42 @@ _DEFAULT_RESTRICTED: frozenset[NodeOperation] = frozenset(
     }
 )
 
-_DEFAULT_SESSION_ALLOWED: frozenset[NodeOperation] = frozenset({"session", "session_modify"})
-_DEFAULT_BLOCKCHAIN_ALLOWED: frozenset[NodeOperation] = frozenset(
-    {
-        "blockchain_read",
-        "blockchain_create",
-        "ledger_read",
-        "ledger_write",
-    }
-)
+
+def _banned_operations_collection() -> str:
+    return get_config_value(BANNED_OPERATIONS_COLLECTION_KEY)
+
+
+def _node_gov_audit_collection() -> str:
+    return get_config_value(NODE_GOV_AUDIT_COLLECTION_KEY)
 
 
 def _restricted_node_operations() -> frozenset[NodeOperation]:
-    configured = get_config_list("NODE_GOV_RESTRICTED_OPERATIONS", _DEFAULT_RESTRICTED)
-    return frozenset(op for op in configured if op in _DEFAULT_RESTRICTED) or _DEFAULT_RESTRICTED
+    configured = get_config_list("NODE_GOV_RESTRICTED_OPERATIONS")
+    return frozenset(op for op in configured if op in _KNOWN_NODE_OPERATIONS)  # type: ignore[misc]
 
 
 def _session_allowed_operations() -> frozenset[NodeOperation]:
-    configured = get_config_list("NODE_GOV_SESSION_ALLOWED", _DEFAULT_SESSION_ALLOWED)
-    return frozenset(op for op in configured if op in _DEFAULT_SESSION_ALLOWED) or _DEFAULT_SESSION_ALLOWED
+    configured = get_config_list("NODE_GOV_SESSION_ALLOWED")
+    return frozenset(op for op in configured if op in _KNOWN_NODE_OPERATIONS)  # type: ignore[misc]
 
 
 def _blockchain_allowed_operations() -> frozenset[NodeOperation]:
-    configured = get_config_list("NODE_GOV_BLOCKCHAIN_ALLOWED", _DEFAULT_BLOCKCHAIN_ALLOWED)
-    return (
-        frozenset(op for op in configured if op in _DEFAULT_BLOCKCHAIN_ALLOWED)
-        or _DEFAULT_BLOCKCHAIN_ALLOWED
-    )
+    configured = get_config_list("NODE_GOV_BLOCKCHAIN_ALLOWED")
+    return frozenset(op for op in configured if op in _KNOWN_NODE_OPERATIONS)  # type: ignore[misc]
 
 
-NODE_MIN_MEMORY_GB = get_config_int("NODE_MIN_MEMORY_GB", 50)
+def _node_min_memory_gb() -> int:
+    return get_config_int("NODE_MIN_MEMORY_GB")
+
+
+def __getattr__(name: str) -> Any:
+    if name == "BANNED_OPERATIONS_COLLECTION":
+        return _banned_operations_collection()
+    if name == "NODE_GOV_AUDIT_COLLECTION":
+        return _node_gov_audit_collection()
+    if name == "NODE_MIN_MEMORY_GB":
+        return _node_min_memory_gb()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _mask_credential(value: str) -> str:
@@ -130,7 +146,7 @@ def verify_node_memory_requirement(reported_memory_gb: int | None) -> bool:
     """Minimum recommended NodeUser console memory is 50 GB."""
     if reported_memory_gb is None:
         return False
-    return reported_memory_gb >= NODE_MIN_MEMORY_GB
+    return reported_memory_gb >= _node_min_memory_gb()
 
 
 def is_node_banned(node_user_id: str, *, client: Any | None = None) -> bool:
@@ -138,7 +154,7 @@ def is_node_banned(node_user_id: str, *, client: Any | None = None) -> bool:
     if mongo is None:
         return True
     try:
-        record = get_master_db(mongo)[BANNED_OPERATIONS_COLLECTION].find_one(
+        record = get_master_db(mongo)[_banned_operations_collection()].find_one(
             {"NodeUserID": node_user_id, "banned": True}
         )
         return record is not None
@@ -162,7 +178,7 @@ def ban_node_user(node_user_id: str, reason: str, *, client: Any | None = None) 
         )
     try:
         db = get_master_db(mongo)
-        db[BANNED_OPERATIONS_COLLECTION].update_one(
+        db[_banned_operations_collection()].update_one(
             {"NodeUserID": node_user_id},
             {
                 "$set": {
@@ -176,7 +192,7 @@ def ban_node_user(node_user_id: str, reason: str, *, client: Any | None = None) 
             },
             upsert=True,
         )
-        db[NODE_GOV_AUDIT_COLLECTION].insert_one(
+        db[_node_gov_audit_collection()].insert_one(
             {
                 "NodeUserID": node_user_id,
                 "action": "ban",
@@ -218,7 +234,7 @@ def validate_node_operation(
     if operation in _blockchain_allowed_operations() and operation == "blockchain_create":
         if not verify_node_memory_requirement(reported_memory_gb):
             raise PermissionError(
-                f"NodeUser console must meet {NODE_MIN_MEMORY_GB}GB memory requirement"
+                f"NodeUser console must meet {_node_min_memory_gb()}GB memory requirement"
             )
 
     if operation == "ledger_write" and not is_latest_block_creator:
@@ -230,7 +246,7 @@ def validate_node_operation(
         "NodeUserID": node_user_id,
         "operation": operation,
         "permitted": True,
-        "memory_requirement_gb": NODE_MIN_MEMORY_GB,
+        "memory_requirement_gb": _node_min_memory_gb(),
         "memory_verified": verify_node_memory_requirement(reported_memory_gb),
     }
 

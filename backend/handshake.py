@@ -59,14 +59,32 @@ except ImportError:  # pragma: no cover
     PyMongoError = Exception  # type: ignore[misc, assignment]
 
 HANDSHAKE_PROTOCOL = "handshake"
-ID_LENGTH = get_config_int("HANDSHAKE_ID_LENGTH", 8)
-ID_TOKEN_BYTES = get_config_int("HANDSHAKE_ID_TOKEN_BYTES", 32)
 
-MASTER_DB_NAME = get_config_value("MONGODB_MAIN_DATABASE_NAME", "lucid_master")
-ID_TOKENS_COLLECTION = get_config_value("HANDSHAKE_ID_TOKENS_COLLECTION", "id_tokens")
 
-API_KEY_MIN_LENGTH = get_config_int("HANDSHAKE_API_KEY_MIN_LENGTH", 24)
-API_KEY_GENERATION_LENGTH = get_config_int("HANDSHAKE_API_KEY_GENERATION_LENGTH", 24)
+def _handshake_id_length() -> int:
+    return get_config_int("HANDSHAKE_ID_LENGTH")
+
+
+def _handshake_id_token_bytes() -> int:
+    return get_config_int("HANDSHAKE_ID_TOKEN_BYTES")
+
+
+def _handshake_master_db_name() -> str:
+    return get_config_value("MONGODB_MAIN_DATABASE_NAME")
+
+
+def _handshake_id_tokens_collection() -> str:
+    return get_config_value("HANDSHAKE_ID_TOKENS_COLLECTION")
+
+
+def _api_key_min_length() -> int:
+    return get_config_int("HANDSHAKE_API_KEY_MIN_LENGTH")
+
+
+def _api_key_generation_length() -> int:
+    return get_config_int("HANDSHAKE_API_KEY_GENERATION_LENGTH")
+
+
 API_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 
 HANDSHAKE_REQUIRED_FIELDS: tuple[str, ...] = (
@@ -75,27 +93,23 @@ HANDSHAKE_REQUIRED_FIELDS: tuple[str, ...] = (
     "connection_type",
 )
 
-_DEFAULT_ONGOING_SOURCES = frozenset(
-    {
-        "register.js",
-        "node-registration.js",
-        "login.js",
-        "tier-select.js",
-        "connect-handshake.js",
-        "find-peer.js",
-        "find-Peer.js",
-        "home_page.js",
-        "dashboard.js",
-        "settings.js",
-        "LucidLedger.js",
-        "LucidMarket.js",
-        "RemoteView.js",
-    }
-)
-
 
 def get_allowed_ongoing_sources() -> frozenset[str]:
-    return get_config_list("ALLOWED_ONGOING_SOURCES", _DEFAULT_ONGOING_SOURCES)
+    return get_config_list("ALLOWED_ONGOING_SOURCES")
+
+
+def __getattr__(name: str) -> Any:
+    mapping = {
+        "ID_LENGTH": _handshake_id_length,
+        "ID_TOKEN_BYTES": _handshake_id_token_bytes,
+        "MASTER_DB_NAME": _handshake_master_db_name,
+        "ID_TOKENS_COLLECTION": _handshake_id_tokens_collection,
+        "API_KEY_MIN_LENGTH": _api_key_min_length,
+        "API_KEY_GENERATION_LENGTH": _api_key_generation_length,
+    }
+    if name in mapping:
+        return mapping[name]()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 ConnectionType = Literal["initial", "ongoing"]
@@ -122,11 +136,13 @@ def _utc_now() -> str:
 # --- includes: the process of generating the API key ---
 
 
-def generate_api_key(length: int = API_KEY_GENERATION_LENGTH) -> str:
+def generate_api_key(length: int | None = None) -> str:
+    if length is None:
+        length = _api_key_generation_length()
     """Generate a URL-safe API key compatible with builderMasterServer.py secrets."""
-    if length < API_KEY_MIN_LENGTH:
+    if length < _api_key_min_length():
         raise ValueError(
-            f"API key generation length must be at least {API_KEY_MIN_LENGTH} characters"
+            f"API key generation length must be at least {_api_key_min_length()} characters"
         )
     return secrets.token_urlsafe(length)
 
@@ -138,7 +154,7 @@ def validate_api_key_format(api_key: str) -> bool:
     """Validate that an API key matches the required handshake format."""
     if not api_key or not isinstance(api_key, str):
         return False
-    if len(api_key) < API_KEY_MIN_LENGTH:
+    if len(api_key) < _api_key_min_length():
         return False
     return API_KEY_PATTERN.fullmatch(api_key) is not None
 
@@ -158,7 +174,7 @@ def _mongo_client() -> Any | None:
 
 def _load_api_key_from_database(client: Any) -> str | None:
     try:
-        record = client[MASTER_DB_NAME].master_credentials.find_one({"bootstrap": True})
+        record = client[_handshake_master_db_name()].master_credentials.find_one({"bootstrap": True})
     except PyMongoError:
         return None
     if not record:
@@ -196,7 +212,9 @@ def validate_api_key(api_key: str, *, client: Any | None = None) -> bool:
 # --- includes: the process of deriving the userID and nodeID from the API key ---
 
 
-def _derive_entity_id(api_key: str, entity: str, length: int = ID_LENGTH) -> str:
+def _derive_entity_id(api_key: str, entity: str, length: int | None = None) -> str:
+    if length is None:
+        length = _handshake_id_length()
     digest = hashlib.sha256(f"{api_key}:{entity}".encode("utf-8")).digest()
     alphabet = string.digits + string.ascii_lowercase
     value = int.from_bytes(digest, "big")
@@ -212,8 +230,8 @@ def derive_user_and_node_ids(api_key: str) -> dict[str, str]:
     if not validate_api_key_format(api_key):
         raise ValueError("API key must be in the correct format before deriving IDs")
     return {
-        "userID": _derive_entity_id(api_key, "user", ID_LENGTH),
-        "nodeID": _derive_entity_id(api_key, "node", ID_LENGTH),
+        "userID": _derive_entity_id(api_key, "user"),
+        "nodeID": _derive_entity_id(api_key, "node"),
     }
 
 
@@ -222,7 +240,7 @@ def derive_user_and_node_ids(api_key: str) -> dict[str, str]:
 
 def create_id_tokens() -> tuple[str, str]:
     """Create proof-of-authentication IDTokens for the user and node."""
-    return secrets.token_urlsafe(ID_TOKEN_BYTES), secrets.token_urlsafe(ID_TOKEN_BYTES)
+    return secrets.token_urlsafe(_handshake_id_token_bytes()), secrets.token_urlsafe(_handshake_id_token_bytes())
 
 
 # --- includes: the process of validating the handshake source ---
@@ -247,7 +265,7 @@ def validate_handshake_source(source: str, connection_type: ConnectionType) -> b
 
 
 def _id_tokens_collection(client: Any) -> Any:
-    return client[MASTER_DB_NAME][ID_TOKENS_COLLECTION]
+    return client[_handshake_master_db_name()][_handshake_id_tokens_collection()]
 
 
 def store_id_tokens_in_master_database(
@@ -465,15 +483,22 @@ def create_handshake_router() -> Any:
     return router
 
 
-def register_handshake_routes(app: Any, *, api_prefix: str = "/api/v1", gui_prefix: str = "/gui") -> None:
+def register_handshake_routes(
+    app: Any,
+    *,
+    api_prefix: str | None = None,
+    gui_prefix: str | None = None,
+) -> None:
     """Attach handshake routes to a FastAPI application (Docker master-server container)."""
+    resolved_api_prefix = api_prefix if api_prefix is not None else get_config_value("API_BASE_PATH")
+    resolved_gui_prefix = gui_prefix if gui_prefix is not None else get_config_value("GUI_PREFIX")
     api_router = APIRouter(tags=["handshake"])
 
     @api_router.post("/handshake")
     def api_handshake_endpoint(payload: HandshakeRequest) -> dict[str, str]:
         return _handle_handshake(payload)
 
-    app.include_router(api_router, prefix=api_prefix)
+    app.include_router(api_router, prefix=resolved_api_prefix)
 
     gui_router = APIRouter(tags=["gui"])
 
@@ -481,7 +506,7 @@ def register_handshake_routes(app: Any, *, api_prefix: str = "/api/v1", gui_pref
     def gui_connect_handshake_endpoint(payload: ConnectHandshakeRequest) -> dict[str, str]:
         return _handle_connect_handshake(payload)
 
-    app.include_router(gui_router, prefix=gui_prefix)
+    app.include_router(gui_router, prefix=resolved_gui_prefix)
 
 
 def _handle_handshake(payload: HandshakeRequest) -> dict[str, str]:

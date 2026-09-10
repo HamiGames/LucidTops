@@ -18,6 +18,16 @@ connection operations:
 - check userID and nodeID connection status
 - check userID and nodeID connection configuration
 - check userID and nodeID connection logs
+
+operational requirements:
+- uses nginx reverse proxy system to route requests to the MasterServer (uvicorn server and FastAPI system)
+- uses DockerDNS for network communication
+- uses Tor Hidden Service and Docker Network for network communication
+- uses MongoDB 7.0.0 or higher for database storage
+- uses the MasterServer (uvicorn server and FastAPI system) for initial handshake and connection validation
+- uses NodeNet (docker network) for other communications if available
+
+
 """
 
 from __future__ import annotations
@@ -30,12 +40,15 @@ from connection import (
     get_connection_status,
     get_tor_connection_config,
     normalize_onion_address,
+    resolve_connection_network,
     resolve_onion_for_entity,
     validate_onion_address,
     validate_tor_endpoint,
 )
 from config import (
     API_PREFIX,
+    get_config_int,
+    get_config_value,
     get_master_db,
     get_mongo_client,
     get_tor_api_service,
@@ -78,9 +91,16 @@ CONNECTION_ROUTES: tuple[str, ...] = (
     "/connection/ids/connection-logs",
 )
 
-MASTER_CONNECTION_COLLECTION = "master_connection"
-CONNECTION_LOGS_COLLECTION = "connection_logs"
-CONNECTION_LOG_LIMIT = 100
+def master_connection_collection() -> str:
+    return get_config_value("MASTER_CONNECTION_COLLECTION")
+
+
+def connection_logs_collection() -> str:
+    return get_config_value("CONNECTION_LOGS_COLLECTION")
+
+
+def connection_log_limit() -> int:
+    return get_config_int("CONNECTION_LOG_LIMIT")
 
 
 if BaseModel is not object:
@@ -265,10 +285,10 @@ def _connection_records_for_ids(db: Any, *, user_id: str, node_id: str) -> list[
             clauses.append({"session_key": session_key.strip()})
 
     cursor = (
-        db[MASTER_CONNECTION_COLLECTION]
+        db[master_connection_collection()]
         .find({"$or": clauses})
         .sort("updated_at", -1)
-        .limit(CONNECTION_LOG_LIMIT)
+        .limit(connection_log_limit())
     )
     seen: set[str] = set()
     records: list[dict[str, Any]] = []
@@ -292,17 +312,17 @@ def _build_connection_logs(
 
     if session_key:
         dedicated = list(
-            db[CONNECTION_LOGS_COLLECTION]
+            db[connection_logs_collection()]
             .find({"session_key": session_key})
             .sort("recorded_at", -1)
-            .limit(CONNECTION_LOG_LIMIT)
+            .limit(connection_log_limit())
         )
         for entry in dedicated:
             serialized = _serialize_document(entry)
             if serialized:
                 logs.append(serialized)
 
-        connection = db[MASTER_CONNECTION_COLLECTION].find_one({"session_key": session_key})
+        connection = db[master_connection_collection()].find_one({"session_key": session_key})
         if connection:
             serialized = _serialize_document(connection)
             if serialized:
@@ -320,7 +340,7 @@ def _build_connection_logs(
             db[SESSION_ID_LOG_COLLECTION]
             .find({"sessionKey": session_key})
             .sort("recorded_at", -1)
-            .limit(CONNECTION_LOG_LIMIT)
+            .limit(connection_log_limit())
         )
         for entry in session_logs:
             serialized = _serialize_document(entry)
@@ -378,7 +398,7 @@ def _build_connection_logs(
                 }
             )
 
-    return logs[:CONNECTION_LOG_LIMIT]
+    return logs[:connection_log_limit()]
 
 
 def get_connection_logs(session_key: str) -> dict[str, Any]:
@@ -387,14 +407,14 @@ def get_connection_logs(session_key: str) -> dict[str, Any]:
         raise ValueError("session_key must not be empty")
 
     def _query(db: Any) -> dict[str, Any]:
-        connection = db[MASTER_CONNECTION_COLLECTION].find_one({"session_key": cleaned})
+        connection = db[master_connection_collection()].find_one({"session_key": cleaned})
         if not connection:
             raise LookupError("Connection session not found")
         logs = _build_connection_logs(db, session_key=cleaned)
         return {
             "session_key": cleaned,
             "status": "connected" if connection.get("active") else "inactive",
-            "network": "tor",
+            "network": resolve_connection_network(),
             "tor_only": True,
             "log_count": len(logs),
             "logs": logs,
@@ -411,7 +431,7 @@ def check_registrations(*, admin_id_token: str) -> dict[str, Any]:
         node_count = db[NODE_USERS_COLLECTION].count_documents({})
         token_user_count = db[ID_TOKENS_COLLECTION].count_documents({"entity": "user"})
         token_node_count = db[ID_TOKENS_COLLECTION].count_documents({"entity": "node"})
-        active_connections = db[MASTER_CONNECTION_COLLECTION].count_documents({"active": True})
+        active_connections = db[master_connection_collection()].count_documents({"active": True})
         return {
             "adminUserID": admin.get("adminUserID"),
             "registrations": {
@@ -421,7 +441,7 @@ def check_registrations(*, admin_id_token: str) -> dict[str, Any]:
                 "id_tokens_node": token_node_count,
                 "active_connections": active_connections,
             },
-            "network": "tor",
+            "network": resolve_connection_network(),
             "tor_only": True,
             "timestamp": utc_now(),
         }
@@ -462,7 +482,7 @@ def check_user_and_node_status(
                 "tier": (node_reg or {}).get("tier"),
                 "updated_at": (node_reg or node_token or {}).get("updated_at"),
             },
-            "network": "tor",
+            "network": resolve_connection_network(),
             "tor_only": True,
             "timestamp": utc_now(),
         }
@@ -519,7 +539,7 @@ def check_user_and_node_registration(
             "node_registration": safe_node,
             "user_id_token_recorded": user_token is not None,
             "node_id_token_recorded": node_token is not None,
-            "network": "tor",
+            "network": resolve_connection_network(),
             "tor_only": True,
             "timestamp": utc_now(),
         }
@@ -549,7 +569,7 @@ def check_user_and_node_connection_status(
             "active_connection_count": len(active),
             "status": "connected" if active else "inactive",
             "latest_connection": latest,
-            "network": "tor",
+            "network": resolve_connection_network(),
             "tor_only": True,
             "timestamp": utc_now(),
         }
@@ -579,7 +599,7 @@ def check_user_and_node_connection_configuration(
                 "protocol": latest.get("protocol") or tor_config.get("protocol"),
                 "transport": latest.get("transport") or tor_config.get("transport"),
                 "torrent_layer": latest.get("torrent_layer") or tor_config.get("torrent_layer"),
-                "network": "tor",
+                "network": resolve_connection_network(),
                 "tor_only": True,
                 "onion_address": latest.get("onion_address") or tor_config.get("master_server_onion"),
                 "tor_api_service": latest.get("tor_api_service") or tor_config.get("tor_api_service"),
@@ -615,7 +635,7 @@ def check_user_and_node_connection_logs(
             "nodeID": ids["nodeID"],
             "log_count": len(logs),
             "logs": logs,
-            "network": "tor",
+            "network": resolve_connection_network(),
             "tor_only": True,
             "timestamp": utc_now(),
         }
@@ -636,7 +656,7 @@ def create_connection_router(*, api_prefix: str = "") -> Any:
         config["master_server_tor_service"] = get_master_server_tor_service()
         config["tor_api_service"] = get_tor_api_service()
         config["tor_gui_service"] = get_tor_gui_service()
-        config["network"] = "tor"
+        config["network"] = resolve_connection_network()
         config["tor_only"] = True
         return config
 
@@ -649,7 +669,7 @@ def create_connection_router(*, api_prefix: str = "") -> Any:
             "valid": valid,
             "format_valid": validate_onion_address(payload.onion_address),
             "tor_only": True,
-            "network": "tor",
+            "network": resolve_connection_network(),
         }
 
     @router.get("/connection/status/{session_key}")

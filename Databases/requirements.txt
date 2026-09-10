@@ -1,0 +1,4 @@
+# LucidTops Databases orchestration — pymongo clients + SOCKS5 for Tor-zone access
+pymongo>=4.6.0,<5.0.0
+PySocks>=1.7.1,<2.0.0
+python-dotenv>=1.0.0,<2.0.0

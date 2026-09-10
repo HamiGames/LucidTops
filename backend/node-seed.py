@@ -1,4 +1,4 @@
-f"""Fundamental functions to create NodeUserID and configure node database with NodeDatabaseID, 
+"""Fundamental functions to create NodeUserID and configure node database with NodeDatabaseID, 
 uses the MasterServer (LucidTopsDB) as the seed source for the NodeDB (NodeUser)
 information inclusions:
 UserID=True

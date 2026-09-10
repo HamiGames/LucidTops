@@ -48,43 +48,17 @@ from handshake import (
 )
 from WebPageLink import resolve_web_page_link, validate_web_page_link
 
-ALLOWED_REGISTER_SOURCE = get_config_value("REGISTER_SOURCE", "register.js")
-
-_DEFAULT_INITIAL_HANDSHAKE_SOURCES = frozenset(
-    {
-        "register.js",
-        "login.js",
-        "node-registration.js",
-        "tier-select.js",
-    }
-)
+def get_allowed_register_source() -> str:
+    return get_config_value("REGISTER_SOURCE")
 
 
 def get_initial_handshake_sources() -> frozenset[str]:
-    return get_config_list("INITIAL_HANDSHAKE_SOURCES", _DEFAULT_INITIAL_HANDSHAKE_SOURCES)
+    return get_config_list("INITIAL_HANDSHAKE_SOURCES")
 
 
 def get_allowed_ongoing_sources() -> frozenset[str]:
-    return get_config_list(
-        "ALLOWED_ONGOING_SOURCES",
-        frozenset(
-            {
-                "register.js",
-                "node-registration.js",
-                "login.js",
-                "tier-select.js",
-                "connect-handshake.js",
-                "find-peer.js",
-                "find-Peer.js",
-                "home_page.js",
-                "dashboard.js",
-                "settings.js",
-                "LucidLedger.js",
-                "LucidMarket.js",
-                "RemoteView.js",
-            }
-        ),
-    )
+    return get_config_list("ALLOWED_ONGOING_SOURCES")
+
 
 CLIENT_REQUIRED_FIELDS: tuple[str, ...] = (
     "source",
@@ -92,7 +66,17 @@ CLIENT_REQUIRED_FIELDS: tuple[str, ...] = (
     "payload",
 )
 
-CLIENT_REQUEST_ROUTE = "/client-request"
+
+def get_client_request_route() -> str:
+    return get_config_value("CLIENT_REQUEST_ROUTE")
+
+
+def __getattr__(name: str) -> Any:
+    if name == "ALLOWED_REGISTER_SOURCE":
+        return get_allowed_register_source()
+    if name == "CLIENT_REQUEST_ROUTE":
+        return get_client_request_route()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _normalize_source(source: str) -> str:
@@ -191,14 +175,14 @@ def _client_tor_envelope(*, source: str, payload: dict[str, Any]) -> dict[str, A
     """Attach Tor-only metadata for javascript frontend consumers (*.onion, not clearnet)."""
     link = resolve_web_page_link(source)
     onion = resolve_master_server_onion()
-    api_segment = link.get("api_path") or CLIENT_REQUEST_ROUTE
+    api_segment = link.get("api_path") or get_client_request_route()
     api_path = (
         api_segment
         if api_segment.startswith(API_PREFIX)
         else f"{API_PREFIX}{api_segment if api_segment.startswith('/') else f'/{api_segment}'}"
     )
     body: dict[str, Any] = {
-        "route": CLIENT_REQUEST_ROUTE,
+        "route": get_client_request_route(),
         "subsystem": "client-handler",
         "service": "master_server",
         "network": "tor",
@@ -235,7 +219,7 @@ def validate_client_request(
         raise ValueError("source and api_key are required")
 
     normalized = _normalize_source(source)
-    if require_register and normalized != ALLOWED_REGISTER_SOURCE:
+    if require_register and normalized != get_allowed_register_source():
         raise PermissionError("Request must originate from frontend/register.js")
 
     if not validate_web_page_link(normalized):
@@ -397,12 +381,12 @@ def get_client_handler_tor_config() -> dict[str, Any]:
     """Return Tor config for javascript frontend bootstrap over *.onion."""
     config = get_tor_connection_config()
     tor_manifest = load_tor_routes_manifest()
-    client_request_path = f"{API_PREFIX}{CLIENT_REQUEST_ROUTE}"
+    client_request_path = f"{API_PREFIX}{get_client_request_route()}"
     config["client_request_route"] = client_request_path
     config["client_request_tor_service"] = get_client_request_tor_service()
     config["client_request_tor_config"] = tor_manifest.get(
         "client_request_tor_config",
-        f"{API_PREFIX}{CLIENT_REQUEST_ROUTE}/tor-config",
+        f"{API_PREFIX}{get_client_request_route()}/tor-config",
     )
     if tor_manifest.get("routes"):
         config["tor_routes"] = tor_manifest["routes"]
@@ -434,12 +418,13 @@ def _client_handler_error(exc: Exception) -> None:
     raise exc
 
 
-def register_client_handler_routes(app: Any, *, api_prefix: str = "/api/v1") -> None:
+def register_client_handler_routes(app: Any, *, api_prefix: str | None = None) -> None:
     """Register client handler endpoints on the FastAPI app (Tor-only, javascript compatible)."""
     if APIRouter is None or HTTPException is None or status is None or Request is None:
         raise RuntimeError("fastapi is required to register client handler routes")
 
-    router = APIRouter(prefix=api_prefix, tags=["client-handler"])
+    resolved_api_prefix = api_prefix if api_prefix is not None else get_config_value("API_BASE_PATH")
+    router = APIRouter(prefix=resolved_api_prefix, tags=["client-handler"])
 
     @router.get("/client-request/tor-config")
     def client_tor_config_endpoint() -> dict[str, Any]:

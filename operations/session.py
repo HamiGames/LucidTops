@@ -5,6 +5,7 @@ session requirements:
 -2 or more session records must be present in the session 
 - the session data must be compressed using a sha512 hash function
 - the session must have ended before compression can occur
+- SessionID_status:"complete" is required before session-data chunking into New_BlockID
 - the session must have a valid sessionID
 - the session must have a valid sessionKey 
 - all fields in the session must be complete and valid
@@ -21,9 +22,14 @@ limitations:
 - the session will not comence without a valid sessionTime
 - the session will not comence without a valid sessionDate
 - the session will not comence without 2 or more UserID's
+- New_BlockID creation requires SessionID_status complete (operations/session_to_block.py)
 
-
-
+RULES of CODE CREATION:
+- No hardcoded values, all values are created at time of operation.
+- No placeholder values, all values are created at time of operation.
+- No sensitive data, all data is stored in the secrets file.
+- NO pull from GIT repository, all values are created at time of operation.
+- DO NOT EDIT THE COMMENTS, THEY ARE FOR DOCUMENTATION ONLY.
 
 """
 
@@ -57,20 +63,17 @@ from sessions.SessionCore import (
     validate_session_key,
 )
 from sessions.sessionID import generate_session_id, validate_session_id
-from operations_secrets import resolve_session_id_length, resolve_session_key_min_length
+from operations_secrets import (
+    resolve_session_id_length,
+    resolve_session_key_min_length,
+    resolve_session_required_fields,
+    resolve_session_statuses,
+)
 
 SESSION_ID_LENGTH = resolve_session_id_length()
 SESSION_KEY_MIN_LENGTH = resolve_session_key_min_length()
-SESSION_REQUIRED_FIELDS = (
-    "sessionID",
-    "sessionKey",
-    "sessionData",
-    "sessionStatus",
-    "sessionType",
-    "sessionTime",
-    "sessionDate",
-)
-SESSION_STATUSES = frozenset({"pending", "active", "ended", "compressed"})
+SESSION_REQUIRED_FIELDS = resolve_session_required_fields()
+SESSION_STATUSES = resolve_session_statuses()
 
 __all__ = (
     "agree_session",

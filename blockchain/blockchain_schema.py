@@ -7,6 +7,12 @@ Ledger system requirements (legder.py):
 - ledger records are included in block creation (session_payload + block record)
 - visible publicly via the LucidLedger website
 - written by master server and NodeUser under blockGov governance rules
+RULES of CODE CREATION:
+- No hardcoded values, all values are created at time of operation.
+- No placeholder values, all values are created at time of operation.
+- No sensitive data, all data is stored in the secrets file.
+- NO pull from GIT repository, all values are created at time of operation.
+- DO NOT EDIT THE COMMENTS, THEY ARE FOR DOCUMENTATION ONLY.
 """
 
 from __future__ import annotations
@@ -26,8 +32,33 @@ TASK_TOKENS_COLLECTION = "task_tokens"
 
 # --- ledger hashing ---
 
-HASH_ALGORITHM = "sha512"
-GENESIS_PREVIOUS_HASH = "0" * 128
+def resolve_hash_algorithm() -> str:
+    from blockchain_secrets import resolve_blockchain_hash_algorithm
+
+    return resolve_blockchain_hash_algorithm()
+
+
+def resolve_genesis_previous_hash() -> str:
+    from blockchain_secrets import require_secret
+
+    return require_secret("GENESIS_PREVIOUS_HASH")
+
+
+def resolve_tally_sync_interval() -> int:
+    from blockchain_secrets import resolve_tally_sync_interval_seconds
+
+    return resolve_tally_sync_interval_seconds()
+
+
+def __getattr__(name: str):
+    if name == "TALLY_SYNC_INTERVAL_SECONDS":
+        return resolve_tally_sync_interval()
+    if name == "HASH_ALGORITHM":
+        return resolve_hash_algorithm()
+    if name == "GENESIS_PREVIOUS_HASH":
+        return resolve_genesis_previous_hash()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 # --- ledger record types (append_ledger_record / LucidLedger) ---
 
@@ -40,8 +71,14 @@ LEDGER_RECORD_TYPES: tuple[str, ...] = (
 )
 
 # --- block lifecycle statuses ---
+# awaiting_block / new_block = New_BlockID stage; confirmed / genesis = BlockID stage
 
-BLOCK_STATUSES: tuple[str, ...] = ("awaiting_block", "confirmed", "genesis")
+BLOCK_STATUSES: tuple[str, ...] = (
+    "awaiting_block",
+    "new_block",
+    "confirmed",
+    "genesis",
+)
 
 # --- blockchain state identifiers ---
 
@@ -57,8 +94,6 @@ TALLY_ENTITY_TYPES: tuple[str, ...] = (
     "master_class_user",
 )
 
-TALLY_SYNC_INTERVAL_SECONDS = 30
-
 # --- session statuses referenced by ledger block creation ---
 
 SESSION_STATUSES: tuple[str, ...] = (
@@ -73,6 +108,9 @@ SESSION_STATUSES: tuple[str, ...] = (
 
 LEDGER_RECORDS_FIELDS: tuple[str, ...] = (
     "sessionID",
+    "BlockID",
+    "New_BlockID",
+    "creator_id",
     "aggregate_hash",
     "hash_algorithm",
     "record_type",
@@ -81,6 +119,7 @@ LEDGER_RECORDS_FIELDS: tuple[str, ...] = (
 
 BLOCKCHAIN_BLOCKS_FIELDS: tuple[str, ...] = (
     "blockID",
+    "New_BlockID",
     "chainID",
     "sessionID",
     "aggregate_hash",
@@ -89,15 +128,20 @@ BLOCKCHAIN_BLOCKS_FIELDS: tuple[str, ...] = (
     "previous_block_hash",
     "block_hash",
     "status",
+    "creator_id",
     "winner_entity_type",
     "winner_entity_id",
     "tally_verified",
     "session_payload",
+    "chunk_count",
+    "packet",
     "lucid_tokens_minted",
     "block_reward",
+    "tokens_log_path",
     "image_schema_profile",
     "created_at",
     "updated_at",
+    "confirmed_at",
 )
 
 BLOCKCHAIN_STATE_FIELDS: tuple[str, ...] = (
@@ -118,6 +162,7 @@ LUCID_TOKEN_FIELDS: tuple[str, ...] = (
     "owner_id",
     "blockID",
     "image_path",
+    "tokens_log_path",
     "hash_algorithm",
     "status",
     "created_at",
@@ -173,6 +218,7 @@ TALLY_RECORDS_FIELDS: tuple[str, ...] = (
     "entity_id",
     "tally_points",
     "taskTokens",
+    "chunk_count",
     "sessionID",
     "sessionID_verified",
     "last_win_at",
