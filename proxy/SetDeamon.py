@@ -392,19 +392,26 @@ def ensure_hidden_service_dirs() -> dict[str, str]:
 
 def build_nginx_reverse_proxy_config() -> Path:
     """
-    Write nginx reverse-proxy config for:
+    Write a complete nginx config (events + http) for:
     - Tor Hidden Service + Docker Network
     - MasterServer (uvicorn / FastAPI) via Proxy container
     - NodeUser (NodeUserID hosted database) via Proxy container
     - Frontend -> selected containers only (documentation/proxy.txt)
 
-    Sensitive tokens remain in proxy.secrets - never embedded in this file.
-    All bind/upstream values come from pull-created proxy.secrets.
+    Must be a full main config so `nginx -t -c <file>` succeeds (upstream/server
+    only legal inside http{}). Sensitive tokens stay in proxy.secrets.
     """
     if not get_proxy_secret("HARDWARE_PRIMARY_IP"):
         _ensure_operational_secrets()
     conf_path = Path(_require("NGINX_CONF_PATH")).expanduser()
     conf_path.parent.mkdir(parents=True, exist_ok=True)
+
+    configs_dir = Path(_require("PROXY_CONFIGS_DIR")).expanduser()
+    configs_dir.mkdir(parents=True, exist_ok=True)
+    run_dir = Path(_require("LUCID_TOPS_ROOT")).expanduser() / "run" / "nginx"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    log_dir = Path(_require("LUCID_TOPS_ROOT")).expanduser() / "logs" / "nginx"
+    log_dir.mkdir(parents=True, exist_ok=True)
 
     listen_port = _require("PROXY_NGINX_LISTEN_PORT")
     proxy_port = _require("PROXY_PORT")
@@ -424,14 +431,23 @@ def build_nginx_reverse_proxy_config() -> Path:
     hardware_mac = _require("HARDWARE_PRIMARY_MAC")
     selected = ",".join(sorted(_selected_containers()))
     blocked = ",".join(sorted(_none_linking_containers()))
+    pid_file = (run_dir / "nginx.pid").as_posix()
+    error_log = (log_dir / "error.log").as_posix()
+    access_log = (log_dir / "access.log").as_posix()
+    mime_types = Path("/etc/nginx/mime.types")
+    mime_line = (
+        f"    include {mime_types.as_posix()};"
+        if mime_types.is_file()
+        else "    # mime.types not on host — default_type only"
+    )
 
     deny_blocks: list[str] = []
     for name in sorted(_none_linking_containers()):
         deny_blocks.append(
             f"""
-    location /{name}/ {{
-        return 403;
-    }}
+        location /{name}/ {{
+            return 403;
+        }}
 """
         )
     deny_section = "".join(deny_blocks)
@@ -442,51 +458,68 @@ def build_nginx_reverse_proxy_config() -> Path:
 # Selected: {selected}
 # None-linking blocked: {blocked}
 # Sensitive values: see proxy.secrets (not stored in this file)
+# Valid standalone main config for: nginx -t -c <this-file> / nginx -c <this-file>
 
-upstream lucid_proxy_fastapi {{
-    server {fastapi_upstream}:{proxy_port};
-    keepalive {keepalive_proxy};
+worker_processes auto;
+error_log {error_log} warn;
+pid {pid_file};
+
+events {{
+    worker_connections 1024;
 }}
 
-upstream lucid_frontend {{
-    server {frontend_dns}:{frontend_port};
-    keepalive {keepalive_frontend};
-}}
+http {{
+{mime_line}
+    default_type  application/octet-stream;
+    sendfile      on;
+    keepalive_timeout 65;
+    access_log {access_log};
 
-server {{
-    listen {listen_port};
-    server_name _;
-
-    client_max_body_size {client_max_body};
-    proxy_http_version 1.1;
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_set_header Connection "";
-
-    location {api_prefix}/ {{
-        proxy_pass http://lucid_proxy_fastapi;
+    upstream lucid_proxy_fastapi {{
+        server {fastapi_upstream}:{proxy_port};
+        keepalive {keepalive_proxy};
     }}
 
-    location {loc_proxy} {{
-        proxy_pass http://lucid_proxy_fastapi;
+    upstream lucid_frontend {{
+        server {frontend_dns}:{frontend_port};
+        keepalive {keepalive_frontend};
     }}
 
-    location {loc_api} {{
-        proxy_pass http://lucid_proxy_fastapi;
-    }}
+    server {{
+        listen {listen_port};
+        server_name _;
 
-    location {loc_rdp} {{
-        proxy_pass http://lucid_proxy_fastapi;
-    }}
+        client_max_body_size {client_max_body};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection "";
 
-    location {loc_node} {{
-        proxy_pass http://lucid_proxy_fastapi;
-    }}
+        location {api_prefix}/ {{
+            proxy_pass http://lucid_proxy_fastapi;
+        }}
+
+        location {loc_proxy} {{
+            proxy_pass http://lucid_proxy_fastapi;
+        }}
+
+        location {loc_api} {{
+            proxy_pass http://lucid_proxy_fastapi;
+        }}
+
+        location {loc_rdp} {{
+            proxy_pass http://lucid_proxy_fastapi;
+        }}
+
+        location {loc_node} {{
+            proxy_pass http://lucid_proxy_fastapi;
+        }}
 {deny_section}
-    location / {{
-        proxy_pass http://lucid_frontend;
+        location / {{
+            proxy_pass http://lucid_frontend;
+        }}
     }}
 }}
 """
