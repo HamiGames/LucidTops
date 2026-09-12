@@ -1,21 +1,11 @@
-""" launch the connection to the frontend/home_page.js via the *.onion address created from the master server launch script
-steps:
-1. start tor connection on the user's device
-2. connect to the frontend/home_page.js via the *.onion address or api route
-3. authenticate the user via the api route
-4. authorize the user via the api route
-5. transfer the user to the frontend/home_page.js
-6. display the user's dashboard
-7. display the user's settings
-8. display the user's profile
-9. display the user's messages
-10. display the user's notifications
-11. display the user's alerts
-12. display the user's errors
-13. display the user's logs
-14. display the user's alerts
-"""
+"""Launch AdminGui connection to frontend/AdminHome via the *.onion address.
 
+steps:
+1. start tor connection on the admin console
+2. connect to the frontend AdminHome page via the *.onion address
+3. authenticate the AdminID via TokenID validation (caller responsibility)
+4. open TorBrowser to AdminHome
+"""
 
 from __future__ import annotations
 
@@ -37,7 +27,7 @@ if str(_DIR) not in sys.path:
 def _load_local(module_name: str, filename: str | None = None) -> Any:
     file_name = filename or f"{module_name}.py"
     path = _DIR / file_name
-    registry = f"lucid_useronly_{module_name}"
+    registry = f"lucid_admingui_{module_name}"
     if registry in sys.modules:
         return sys.modules[registry]
     spec = importlib.util.spec_from_file_location(registry, path)
@@ -50,14 +40,16 @@ def _load_local(module_name: str, filename: str | None = None) -> Any:
     return module
 
 
-_user_secrets = _load_local("user_secrets")
-require_user_secret = _user_secrets.require_user_secret
-get_user_secret = _user_secrets.get_user_secret
-load_user_secrets = _user_secrets.load_user_secrets
-user_status = _user_secrets.user_status
-ensure_user_secrets_from_pull = _user_secrets.ensure_user_secrets_from_pull
+_admin_secrets = _load_local("admin_secrets")
+require_admin_secret = _admin_secrets.require_admin_secret
+get_admin_secret = _admin_secrets.get_admin_secret
+load_admin_secrets = _admin_secrets.load_admin_secrets
+admin_status = _admin_secrets.admin_status
+ensure_admin_secrets_from_pull = _admin_secrets.ensure_admin_secrets_from_pull
 
-_install = _load_local("install")
+_firewall = _load_local("firewall_allow")
+_download_auth = _load_local("download_auth")
+_validate = _load_local("validate_admin")
 
 
 def utc_now() -> str:
@@ -65,15 +57,15 @@ def utc_now() -> str:
 
 
 def session_state_path() -> Path:
-    configured = get_user_secret("USERONLY_SESSION_STATE_FILE")
+    configured = get_admin_secret("ADMINGUI_SESSION_STATE_FILE")
     if configured:
         return Path(configured).expanduser()
-    secrets_dir = get_user_secret("SECRETS_DIR")
+    secrets_dir = get_admin_secret("SECRETS_DIR")
     if not secrets_dir:
         raise RuntimeError(
-            "USERONLY_SESSION_STATE_FILE or SECRETS_DIR missing — create at time of operation"
+            "ADMINGUI_SESSION_STATE_FILE or SECRETS_DIR missing — create at time of operation"
         )
-    return Path(secrets_dir) / "useronly_session.state"
+    return Path(secrets_dir) / "admingui_session.state"
 
 
 def _read_session_state() -> dict[str, Any]:
@@ -104,30 +96,22 @@ def _clear_session_state() -> None:
 
 
 def _identity_from_secrets() -> dict[str, str]:
-    user_id = get_user_secret("USER_ID")
-    node_id = get_user_secret("NODE_ID")
-    token_id = get_user_secret("TOKEN_ID")
-    role = get_user_secret("USER_ROLE")
-    if not role:
-        if node_id:
-            role = "node"
-        elif user_id:
-            role = "user"
+    admin_id = get_admin_secret("ADMIN_ID") or get_admin_secret("ADMINID")
+    token_id = get_admin_secret("TOKEN_ID")
+    role = get_admin_secret("USER_ROLE") or ("admin" if admin_id else "")
     return {
-        "user_id": user_id,
-        "node_id": node_id,
+        "admin_id": admin_id,
         "token_id": token_id,
         "role": role,
-        "active_id": node_id or user_id,
     }
 
 
-def frontend_onion_url() -> str:
-    ensure_user_secrets_from_pull()
-    load_user_secrets(reload=True)
-    onion = require_user_secret("FRONTEND_ONION")
-    home = require_user_secret("FRONTEND_HOME_PAGE_PATH")
-    scheme = require_user_secret("USER_FRONTEND_SCHEME")
+def frontend_admin_url() -> str:
+    ensure_admin_secrets_from_pull()
+    load_admin_secrets(reload=True)
+    onion = require_admin_secret("FRONTEND_ONION")
+    home = require_admin_secret("FRONTEND_ADMIN_HOME_PATH")
+    scheme = require_admin_secret("ADMIN_FRONTEND_SCHEME")
     if not onion.endswith(".onion"):
         raise RuntimeError(
             "FRONTEND_ONION is not a valid onion address — must be pulled from console secrets"
@@ -136,8 +120,8 @@ def frontend_onion_url() -> str:
 
 
 def start_tor_background() -> dict[str, Any]:
-    ensure_user_secrets_from_pull()
-    cmd = require_user_secret("USER_TOR_START_COMMAND")
+    ensure_admin_secrets_from_pull()
+    cmd = require_admin_secret("ADMIN_TOR_START_COMMAND")
     proc = subprocess.Popen(cmd, shell=True)  # noqa: S602 — command from secrets
     return {"status": "started", "command": cmd, "pid": proc.pid, "started_at": utc_now()}
 
@@ -168,21 +152,19 @@ def _terminate_pid(pid: int) -> dict[str, Any]:
         return {"pid": pid, "status": "error", "error": str(exc)}
 
 
-def launch_user_session(
-    *, user_id: str | None = None, id_token: str | None = None
-) -> dict[str, Any]:
-    ensure_user_secrets_from_pull()
-    _install.ensure_user_secrets_present()
+def launch_admin_session() -> dict[str, Any]:
+    ensure_admin_secrets_from_pull()
+    _download_auth.require_download_auth_verified()
+    validation = _validate.require_validated_admin()
     identity = _identity_from_secrets()
-    resolved_user = user_id or identity.get("active_id") or None
-    resolved_token = id_token or identity.get("token_id") or None
 
+    firewall = _firewall.allowlist_tor_browser_firewall()
     tor = start_tor_background()
-    url = frontend_onion_url()
-    browser_cmd_template = require_user_secret("USER_TOR_BROWSER_COMMAND")
+    url = frontend_admin_url()
+    browser_cmd_template = require_admin_secret("ADMIN_TOR_BROWSER_COMMAND")
     if "{url}" not in browser_cmd_template:
         raise RuntimeError(
-            "USER_TOR_BROWSER_COMMAND missing {url} token — recreate secrets at time of operation"
+            "ADMIN_TOR_BROWSER_COMMAND missing {url} token — recreate secrets at time of operation"
         )
     browser_cmd = browser_cmd_template.replace("{url}", url)
     proc = subprocess.Popen(browser_cmd, shell=True)  # noqa: S602 — command from secrets
@@ -192,9 +174,8 @@ def launch_user_session(
         "url": url,
         "tor_pid": tor.get("pid"),
         "browser_pid": proc.pid,
-        "user_id": resolved_user,
-        "node_id": identity.get("node_id") or "",
-        "token_id": resolved_token or "",
+        "admin_id": identity.get("admin_id") or "",
+        "token_id": identity.get("token_id") or "",
         "role": identity.get("role") or "",
         "launched_at": utc_now(),
     }
@@ -204,21 +185,21 @@ def launch_user_session(
         "status": "launched",
         "url": url,
         "tor": tor,
+        "firewall": firewall,
         "browser_pid": proc.pid,
-        "user_id": resolved_user,
-        "node_id": identity.get("node_id") or "",
-        "token_id": resolved_token or "",
+        "admin_id": identity.get("admin_id") or "",
+        "token_id": identity.get("token_id") or "",
         "role": identity.get("role") or "",
-        "authenticated": bool(resolved_user and resolved_token),
+        "validated": validation,
         "session_state": state_path.as_posix(),
-        **user_status(),
+        **admin_status(),
         "launched_at": utc_now(),
     }
 
 
-def disconnect_user_session() -> dict[str, Any]:
+def disconnect_admin_session() -> dict[str, Any]:
     """Exit Frontend TorBrowser window and stop Tor subprocesses started by Connect."""
-    ensure_user_secrets_from_pull()
+    ensure_admin_secrets_from_pull()
     state = _read_session_state()
     results: list[dict[str, Any]] = []
 
@@ -235,21 +216,21 @@ def disconnect_user_session() -> dict[str, Any]:
         "terminated": results,
         "previous": {
             "url": state.get("url", ""),
-            "user_id": state.get("user_id", ""),
-            "node_id": state.get("node_id", ""),
+            "admin_id": state.get("admin_id", ""),
             "role": state.get("role", ""),
         },
         "disconnected_at": utc_now(),
-        **user_status(),
+        **admin_status(),
     }
 
 
 def connection_status() -> dict[str, Any]:
-    ensure_user_secrets_from_pull()
+    ensure_admin_secrets_from_pull()
     state = _read_session_state()
     return {
         "connected": bool(state.get("browser_pid")),
         "session": state,
-        **user_status(),
+        **admin_status(),
+        "download_auth_verified": _download_auth.is_download_auth_verified(),
         "checked_at": utc_now(),
     }

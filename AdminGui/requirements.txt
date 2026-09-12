@@ -1,0 +1,10 @@
+# AdminGui runtime dependencies (explicit — do not assume OS packages are present).
+# OS-native (must be installed on the console / image):
+#   - python3 (3.11+)
+#   - python3-tk / tkinter (Windows: included with python.org installer; Linux: python3-tk)
+#   - tk, libx11-6, libxext6, libxrender1, libxtst6, libxi6 (Linux Tk GUI)
+#   - tor / Tor Browser (discovered at time of operation via pull_information)
+#   - docker CLI (only when validating MasterServer co-location on the host)
+#
+# Pip packages used by AdminGui modules:
+PySocks>=1.7.1

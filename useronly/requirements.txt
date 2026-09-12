@@ -1,0 +1,9 @@
+# UserOnly runtime dependencies (explicit — do not assume OS packages are present).
+# OS-native (must be installed on the console / image):
+#   - python3 (3.11+)
+#   - python3-tk / tkinter (Windows: included with python.org installer; Linux: python3-tk)
+#   - tk, libx11-6, libxext6, libxrender1, libxtst6, libxi6 (Linux Tk GUI)
+#   - tor / Tor Browser (discovered at time of operation via pull_information)
+#
+# Pip packages used by useronly modules:
+# (stdlib only — no third-party pip packages required)

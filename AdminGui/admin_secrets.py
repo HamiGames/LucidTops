@@ -1,8 +1,8 @@
-"""Load useronly launch/install configuration from registration.secrets / ID.secrets.
+"""Load AdminGui launch/auth configuration from admingui.secrets / ID.secrets / admin_auth.secrets.
+
 the ID.secrets stores the UserID, NodeID, MasterUserID, MasterServerID and AdminID once the user has been authenticated and verified.
 this file also holds a TokenID as proof of authentication and verification.
 this file must be verified against the MasterServer's LucidTops_UserDB, to ensure no modifications have been made to the file since the last verification.
-
 """
 
 from __future__ import annotations
@@ -13,12 +13,12 @@ from pathlib import Path
 from typing import Any
 
 
-REGISTRATION_SECRETS_FILE_ENV = "REGISTRATION_SECRETS_FILE"
-REGISTRATION_SECRETS_NAME_ENV = "REGISTRATION_SECRETS_NAME"
+ADMIN_SECRETS_FILE_ENV = "ADMIN_SECRETS_FILE"
+ADMIN_SECRETS_NAME_ENV = "ADMIN_SECRETS_NAME"
+ADMIN_AUTH_SECRETS_FILE_ENV = "ADMIN_AUTH_SECRETS_FILE"
+ADMIN_AUTH_SECRETS_NAME_ENV = "ADMIN_AUTH_SECRETS_NAME"
 ID_SECRETS_FILE_ENV = "ID_SECRETS_FILE"
 ID_SECRETS_NAME_ENV = "ID_SECRETS_NAME"
-USER_SECRETS_FILE_ENV = "USER_SECRETS_FILE"
-USER_SECRETS_NAME_ENV = "USER_SECRETS_NAME"
 SECRETS_DIR_ENV = "SECRETS_DIR"
 LUCID_TOPS_ROOT_ENV = "LUCID_TOPS_ROOT"
 
@@ -73,15 +73,12 @@ def _resolve_named_secrets(file_env: str, name_env: str) -> Path:
     return secrets_dir() / name
 
 
-def user_secrets_path() -> Path:
-    try:
-        return _resolve_named_secrets(USER_SECRETS_FILE_ENV, USER_SECRETS_NAME_ENV)
-    except RuntimeError:
-        return _resolve_named_secrets(REGISTRATION_SECRETS_FILE_ENV, REGISTRATION_SECRETS_NAME_ENV)
+def admin_secrets_path() -> Path:
+    return _resolve_named_secrets(ADMIN_SECRETS_FILE_ENV, ADMIN_SECRETS_NAME_ENV)
 
 
-def registration_secrets_path() -> Path:
-    return _resolve_named_secrets(REGISTRATION_SECRETS_FILE_ENV, REGISTRATION_SECRETS_NAME_ENV)
+def admin_auth_secrets_path() -> Path:
+    return _resolve_named_secrets(ADMIN_AUTH_SECRETS_FILE_ENV, ADMIN_AUTH_SECRETS_NAME_ENV)
 
 
 def id_secrets_path() -> Path:
@@ -89,9 +86,9 @@ def id_secrets_path() -> Path:
 
 
 @lru_cache(maxsize=1)
-def _load_user_secrets_cached() -> dict[str, str]:
+def _load_admin_secrets_cached() -> dict[str, str]:
     merged: dict[str, str] = {}
-    for resolver in (user_secrets_path, registration_secrets_path, id_secrets_path):
+    for resolver in (admin_secrets_path, admin_auth_secrets_path, id_secrets_path):
         try:
             path = resolver()
         except RuntimeError:
@@ -100,7 +97,7 @@ def _load_user_secrets_cached() -> dict[str, str]:
             merged.update(parse_secrets_file(path))
     if not merged:
         raise RuntimeError(
-            "user/registration/ID secrets missing — create at time of operation"
+            "admin/admin_auth/ID secrets missing — create at time of operation"
         )
     for key, value in merged.items():
         if not _env(key):
@@ -108,81 +105,86 @@ def _load_user_secrets_cached() -> dict[str, str]:
     return merged
 
 
-def load_user_secrets(*, reload: bool = False) -> dict[str, str]:
+def load_admin_secrets(*, reload: bool = False) -> dict[str, str]:
     if reload:
-        _load_user_secrets_cached.cache_clear()
-    return _load_user_secrets_cached()
+        _load_admin_secrets_cached.cache_clear()
+    return _load_admin_secrets_cached()
 
 
-def get_user_secret(key: str) -> str:
+def get_admin_secret(key: str) -> str:
     env_value = _env(key)
     if env_value:
         return env_value
-    return load_user_secrets().get(key.upper(), "").strip()
+    return load_admin_secrets().get(key.upper(), "").strip()
 
 
-def require_user_secret(key: str) -> str:
-    value = get_user_secret(key)
+def require_admin_secret(key: str) -> str:
+    value = get_admin_secret(key)
     if not value:
         raise RuntimeError(
-            f"{key} missing from environment/user secrets — "
+            f"{key} missing from environment/admin secrets — "
             "value must be created at time of operation"
         )
     return value
 
 
-def user_status() -> dict[str, Any]:
-    role = get_user_secret("USER_ROLE")
-    if not role:
-        if get_user_secret("NODE_ID"):
-            role = "node"
-        elif get_user_secret("USER_ID"):
-            role = "user"
+def admin_status() -> dict[str, Any]:
+    role = get_admin_secret("USER_ROLE")
+    if not role and get_admin_secret("ADMIN_ID"):
+        role = "admin"
+    colocated_raw = get_admin_secret("MASTER_SERVER_COLOCATED")
     return {
-        "frontend_onion_configured": bool(get_user_secret("FRONTEND_ONION")),
-        "home_page_path": get_user_secret("FRONTEND_HOME_PAGE_PATH"),
-        "register_path": get_user_secret("FRONTEND_REGISTER_PATH"),
-        "hardware_ip": get_user_secret("HARDWARE_PRIMARY_IP"),
-        "hardware_mac": get_user_secret("HARDWARE_PRIMARY_MAC"),
-        "session_state_file": get_user_secret("USERONLY_SESSION_STATE_FILE"),
-        "user_id": get_user_secret("USER_ID"),
-        "node_id": get_user_secret("NODE_ID"),
-        "token_id": get_user_secret("TOKEN_ID"),
+        "frontend_onion_configured": bool(get_admin_secret("FRONTEND_ONION")),
+        "admin_home_path": get_admin_secret("FRONTEND_ADMIN_HOME_PATH"),
+        "hardware_ip": get_admin_secret("HARDWARE_PRIMARY_IP"),
+        "hardware_mac": get_admin_secret("HARDWARE_PRIMARY_MAC"),
+        "session_state_file": get_admin_secret("ADMINGUI_SESSION_STATE_FILE"),
+        "admin_id": get_admin_secret("ADMIN_ID"),
+        "token_id": get_admin_secret("TOKEN_ID"),
         "user_role": role,
-        "tor_bin": get_user_secret("USER_TOR_BIN"),
-        "tor_browser_bin": get_user_secret("USER_TOR_BROWSER_BIN"),
+        "tor_bin": get_admin_secret("ADMIN_TOR_BIN"),
+        "tor_browser_bin": get_admin_secret("ADMIN_TOR_BROWSER_BIN"),
+        "master_server_colocated": colocated_raw in {"1", "true", "True", "yes"},
+        "download_auth_email_configured": bool(
+            get_admin_secret("ADMIN_DOWNLOAD_AUTH_EMAIL")
+        ),
+        "userdb_validate_url_configured": bool(
+            get_admin_secret("ADMIN_USERDB_VALIDATE_URL")
+        ),
     }
 
 
-def ensure_user_secrets_from_pull(*, reload: bool = True) -> dict[str, str]:
+def ensure_admin_secrets_from_pull(*, reload: bool = True) -> dict[str, str]:
     """Pull hardware + build secrets when missing; then load into process env."""
     path_ready = False
     try:
-        path_ready = (
-            user_secrets_path().exists()
-            or registration_secrets_path().exists()
-        )
+        path_ready = admin_secrets_path().exists()
     except RuntimeError:
         path_ready = False
     if not path_ready:
-        from pull_information import build_all_useronly_secrets, pull_realworld_information
+        from pull_information import (
+            build_all_admingui_secrets,
+            pull_realworld_information,
+        )
 
-        build_all_useronly_secrets(pull_realworld_information())
+        build_all_admingui_secrets(pull_realworld_information())
     else:
-        # Refresh bind paths / hardware when env not yet configured for this process.
         try:
             id_path = id_secrets_path()
-            reg_path = registration_secrets_path()
+            auth_path = admin_auth_secrets_path()
         except RuntimeError:
-            from pull_information import build_all_useronly_secrets, pull_realworld_information
+            from pull_information import (
+                build_all_admingui_secrets,
+                pull_realworld_information,
+            )
 
-            build_all_useronly_secrets(pull_realworld_information())
+            build_all_admingui_secrets(pull_realworld_information())
         else:
-            if not id_path.exists() or not reg_path.exists():
+            if not id_path.exists() or not auth_path.exists():
                 from pull_information import (
-                    build_all_useronly_secrets,
+                    build_all_admingui_secrets,
                     pull_realworld_information,
                 )
 
-                build_all_useronly_secrets(pull_realworld_information())
-    return load_user_secrets(reload=reload)
+                build_all_admingui_secrets(pull_realworld_information())
+    return load_admin_secrets(reload=reload)

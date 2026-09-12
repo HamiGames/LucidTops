@@ -1,0 +1,276 @@
+LucidTops Docker build commands
+Source: documentation/fixes.txt section 16
+Host: Raspberry Pi 5 via SSH
+Origin directory (mandatory): cd /mnt/myssd/LucidTops
+Platform: linux/arm64
+Context (mandatory): /mnt/myssd/LucidTops
+No GIT pull. All operational values from hardware pull → secrets at time of operation.
+PaySystems/Pay.dockerfile is OUT OF SCOPE for this document.
+
+==============================================================================
+0. SHARED OPERATION SEQUENCE (every container)
+==============================================================================
+
+A) Origin
+  cd /mnt/myssd/LucidTops
+
+B) §16.7 Rebuild wipe (run when the image already exists)
+  IMAGE_TAG=<tag for this container>
+  CONTAINER_NAME=<runtime name if any>
+  docker ps -aq --filter ancestor="${IMAGE_TAG}" | xargs -r docker stop
+  docker ps -aq --filter ancestor="${IMAGE_TAG}" | xargs -r docker rm
+  docker images -q "${IMAGE_TAG}" | xargs -r docker rmi -f
+  # Wipe generated volumes/content for that service (paths come from that
+  # container's secrets / SECRETS_DIR — do not hardcode volume IDs here).
+
+C) Hardware pull (time of operation)
+  Run the folder's pull script (see each section). Confirm:
+    /mnt/myssd/LucidTops/<directory>/secrets/*.secrets
+  exists and contains IP/MAC/DockerDNS/network names written by pull.
+
+D) §16.4 Docker networks
+  # Read network name from the secrets file written by pull (example key name
+  # DOCKER_NETWORK_NAME — actual key is whatever that folder's secrets writer uses).
+  NETWORK_NAME=$(grep -E '^DOCKER_NETWORK_NAME=' /mnt/myssd/LucidTops/<directory>/secrets/*.secrets | head -1 | cut -d= -f2-)
+  docker network inspect "${NETWORK_NAME}" >/dev/null 2>&1 \
+    || docker network create "${NETWORK_NAME}"
+
+E) Build
+  Always: --no-cache --platform linux/arm64 -f <dockerfile> -t <tag> /mnt/myssd/LucidTops
+
+F) Run
+  Bind-mount secrets + LucidTops SSD; attach --network from secrets (NETWORK_NAME above).
+  Do not bake IP/MAC/ports/onion into the image.
+
+==============================================================================
+1. backend — Server.dockerfile
+==============================================================================
+Image tag: lucid-server-default:v1.0.0
+Secrets:   /mnt/myssd/LucidTops/backend/secrets
+Pull:      python3 /mnt/myssd/LucidTops/backend/pull_information.py
+
+Wipe then:
+  docker build --no-cache --platform linux/arm64 \
+    -f /mnt/myssd/LucidTops/backend/Server.dockerfile \
+    -t lucid-server-default:v1.0.0 \
+    /mnt/myssd/LucidTops
+
+Run (network + mounts from secrets at operation):
+  NETWORK_NAME=$(grep -E '^DOCKER_NETWORK_NAME=' /mnt/myssd/LucidTops/backend/secrets/*.secrets | head -1 | cut -d= -f2-)
+  docker run -d --name lucid-server-default \
+    --network "${NETWORK_NAME}" \
+    -v /mnt/myssd/LucidTops:/mnt/myssd/LucidTops \
+    -v /mnt/myssd/LucidTops/backend/secrets:/mnt/myssd/LucidTops/backend/secrets \
+    -e SECRETS_DIR=/mnt/myssd/LucidTops/backend/secrets \
+    -e LUCID_TOPS_ROOT=/mnt/myssd/LucidTops \
+    lucid-server-default:v1.0.0
+
+==============================================================================
+2. frontend — webpage.dockerfile
+==============================================================================
+Image tag: lucid-frontend:v1.0.0
+Secrets:   /mnt/myssd/LucidTops/frontend/secrets
+Pull:      python3 /mnt/myssd/LucidTops/frontend/pull_information.py
+
+  docker build --no-cache --platform linux/arm64 \
+    -f /mnt/myssd/LucidTops/frontend/webpage.dockerfile \
+    -t lucid-frontend:v1.0.0 \
+    /mnt/myssd/LucidTops
+
+  NETWORK_NAME=$(grep -E '^DOCKER_NETWORK_NAME=' /mnt/myssd/LucidTops/frontend/secrets/*.secrets | head -1 | cut -d= -f2-)
+  docker run -d --name lucid-frontend \
+    --network "${NETWORK_NAME}" \
+    -v /mnt/myssd/LucidTops:/mnt/myssd/LucidTops \
+    -v /mnt/myssd/LucidTops/frontend/secrets:/mnt/myssd/LucidTops/frontend/secrets \
+    -e SECRETS_DIR=/mnt/myssd/LucidTops/frontend/secrets \
+    -e LUCID_TOPS_ROOT=/mnt/myssd/LucidTops \
+    lucid-frontend:v1.0.0
+
+==============================================================================
+3. sessions — sessions.dockerfile
+==============================================================================
+Image tag: lucid-sessions:v1.0.0
+Secrets:   /mnt/myssd/LucidTops/sessions/secrets
+Pull:      python3 /mnt/myssd/LucidTops/sessions/sessions_pull_information.py
+
+  docker build --no-cache --platform linux/arm64 \
+    -f /mnt/myssd/LucidTops/sessions/sessions.dockerfile \
+    -t lucid-sessions:v1.0.0 \
+    /mnt/myssd/LucidTops
+
+  NETWORK_NAME=$(grep -E '^DOCKER_NETWORK_NAME=' /mnt/myssd/LucidTops/sessions/secrets/*.secrets | head -1 | cut -d= -f2-)
+  docker run -d --name lucid-sessions \
+    --network "${NETWORK_NAME}" \
+    -v /mnt/myssd/LucidTops:/mnt/myssd/LucidTops \
+    -v /mnt/myssd/LucidTops/sessions/secrets:/mnt/myssd/LucidTops/sessions/secrets \
+    -e SECRETS_DIR=/mnt/myssd/LucidTops/sessions/secrets \
+    -e LUCID_TOPS_ROOT=/mnt/myssd/LucidTops \
+    lucid-sessions:v1.0.0
+
+==============================================================================
+4. proxy — proxy.dockerfile
+==============================================================================
+Image tag: lucid-proxy:v1.0.0
+Secrets:   /mnt/myssd/LucidTops/proxy/secrets
+Pull:      python3 /mnt/myssd/LucidTops/proxy/Bootstrap.py
+           (Bootstrap.pull_information writes proxy.secrets / Master.secrets)
+
+Build-args (required at time of operation — no Dockerfile defaults for BASE_IMAGE):
+  # Resolve from hardware pull / Bootstrap output into the shell before build:
+  #   BASE_IMAGE=...     # real base image available on this Pi
+  #   APT_PACKAGES=...   # OS packages required on this hardware (space-separated)
+  # Optional: PIP_PACKAGES=...
+
+  docker build --no-cache --platform linux/arm64 \
+    -f /mnt/myssd/LucidTops/proxy/proxy.dockerfile \
+    --build-arg BASE_IMAGE="${BASE_IMAGE}" \
+    --build-arg APT_PACKAGES="${APT_PACKAGES}" \
+    -t lucid-proxy:v1.0.0 \
+    /mnt/myssd/LucidTops
+
+  NETWORK_NAME=$(grep -E '^DOCKER_NETWORK_NAME=' /mnt/myssd/LucidTops/proxy/secrets/*.secrets | head -1 | cut -d= -f2-)
+  docker run -d --name lucid-proxy \
+    --network "${NETWORK_NAME}" \
+    -v /mnt/myssd/LucidTops:/mnt/myssd/LucidTops \
+    -v /mnt/myssd/LucidTops/proxy/secrets:/mnt/myssd/LucidTops/proxy/secrets \
+    -e SECRETS_DIR=/mnt/myssd/LucidTops/proxy/secrets \
+    -e LUCID_TOPS_ROOT=/mnt/myssd/LucidTops \
+    lucid-proxy:v1.0.0
+
+==============================================================================
+5. Rdp — Rdp.dockerfile
+==============================================================================
+Image tag: lucid-rdp:v1.0.0
+Secrets:   /mnt/myssd/LucidTops/Rdp/secrets
+Pull:      python3 /mnt/myssd/LucidTops/Rdp/createRDP.py
+           (createRDP.pull_information writes rdp.secrets)
+
+Build-args (required at time of operation — no Dockerfile defaults for BASE_IMAGE):
+  #   BASE_IMAGE=...     # from pull/output on this Pi
+  #   APT_PACKAGES=...   # from pull/output on this Pi
+
+  docker build --no-cache --platform linux/arm64 \
+    -f /mnt/myssd/LucidTops/Rdp/Rdp.dockerfile \
+    --build-arg BASE_IMAGE="${BASE_IMAGE}" \
+    --build-arg APT_PACKAGES="${APT_PACKAGES}" \
+    -t lucid-rdp:v1.0.0 \
+    /mnt/myssd/LucidTops
+
+  NETWORK_NAME=$(grep -E '^DOCKER_NETWORK_NAME=' /mnt/myssd/LucidTops/Rdp/secrets/*.secrets | head -1 | cut -d= -f2-)
+  docker run -d --name lucid-rdp \
+    --network "${NETWORK_NAME}" \
+    -v /mnt/myssd/LucidTops:/mnt/myssd/LucidTops \
+    -v /mnt/myssd/LucidTops/Rdp/secrets:/mnt/myssd/LucidTops/Rdp/secrets \
+    -e SECRETS_DIR=/mnt/myssd/LucidTops/Rdp/secrets \
+    -e LUCID_TOPS_ROOT=/mnt/myssd/LucidTops \
+    lucid-rdp:v1.0.0
+
+==============================================================================
+6. Databases — Databases.dockerfile
+==============================================================================
+Image tag: lucid-databases-orchestrator:v1.0.0
+Secrets:   /mnt/myssd/LucidTops/Databases/secrets
+Pull:      python3 /mnt/myssd/LucidTops/Databases/pull_information.py
+
+  docker build --no-cache --platform linux/arm64 \
+    -f /mnt/myssd/LucidTops/Databases/Databases.dockerfile \
+    -t lucid-databases-orchestrator:v1.0.0 \
+    /mnt/myssd/LucidTops
+
+  NETWORK_NAME=$(grep -E '^DOCKER_NETWORK_NAME=' /mnt/myssd/LucidTops/Databases/secrets/*.secrets | head -1 | cut -d= -f2-)
+  docker run -d --name lucid-databases-orchestrator \
+    --network "${NETWORK_NAME}" \
+    -v /mnt/myssd/LucidTops:/mnt/myssd/LucidTops \
+    -v /mnt/myssd/LucidTops/Databases/secrets:/mnt/myssd/LucidTops/Databases/secrets \
+    -e SECRETS_DIR=/mnt/myssd/LucidTops/Databases/secrets \
+    -e LUCID_TOPS_ROOT=/mnt/myssd/LucidTops \
+    lucid-databases-orchestrator:v1.0.0
+
+==============================================================================
+7. AdminGui — admingui.dockerfile
+==============================================================================
+Image tag: lucid-admingui:v1.0.0
+Secrets:   /mnt/myssd/LucidTops/AdminGui/secrets
+Pull:      python3 /mnt/myssd/LucidTops/AdminGui/pull_information.py
+
+  docker build --no-cache --platform linux/arm64 \
+    -f /mnt/myssd/LucidTops/AdminGui/admingui.dockerfile \
+    -t lucid-admingui:v1.0.0 \
+    /mnt/myssd/LucidTops
+
+  NETWORK_NAME=$(grep -E '^DOCKER_NETWORK_NAME=' /mnt/myssd/LucidTops/AdminGui/secrets/*.secrets | head -1 | cut -d= -f2-)
+  docker run -d --name lucid-admingui \
+    --network "${NETWORK_NAME}" \
+    -v /mnt/myssd/LucidTops:/mnt/myssd/LucidTops \
+    -v /mnt/myssd/LucidTops/AdminGui/secrets:/mnt/myssd/LucidTops/AdminGui/secrets \
+    -e SECRETS_DIR=/mnt/myssd/LucidTops/AdminGui/secrets \
+    -e LUCID_TOPS_ROOT=/mnt/myssd/LucidTops \
+    lucid-admingui:v1.0.0
+
+==============================================================================
+8. useronly — useronly.dockerfile
+==============================================================================
+Image tag: lucid-useronly:v1.0.0
+Secrets:   /mnt/myssd/LucidTops/useronly/secrets
+Pull:      python3 /mnt/myssd/LucidTops/useronly/pull_information.py
+
+  docker build --no-cache --platform linux/arm64 \
+    -f /mnt/myssd/LucidTops/useronly/useronly.dockerfile \
+    -t lucid-useronly:v1.0.0 \
+    /mnt/myssd/LucidTops
+
+  NETWORK_NAME=$(grep -E '^DOCKER_NETWORK_NAME=' /mnt/myssd/LucidTops/useronly/secrets/*.secrets | head -1 | cut -d= -f2-)
+  docker run -d --name lucid-useronly \
+    --network "${NETWORK_NAME}" \
+    -v /mnt/myssd/LucidTops:/mnt/myssd/LucidTops \
+    -v /mnt/myssd/LucidTops/useronly/secrets:/mnt/myssd/LucidTops/useronly/secrets \
+    -e SECRETS_DIR=/mnt/myssd/LucidTops/useronly/secrets \
+    -e LUCID_TOPS_ROOT=/mnt/myssd/LucidTops \
+    lucid-useronly:v1.0.0
+
+==============================================================================
+9. blockchain — Blockchain.dockerfile
+==============================================================================
+Image tag: lucid-blockchain:v1.0.0
+Secrets:   /mnt/myssd/LucidTops/blockchain/secrets
+Pull:      python3 /mnt/myssd/LucidTops/blockchain/pull_information.py
+
+  docker build --no-cache --platform linux/arm64 \
+    -f /mnt/myssd/LucidTops/blockchain/Blockchain.dockerfile \
+    -t lucid-blockchain:v1.0.0 \
+    /mnt/myssd/LucidTops
+
+  NETWORK_NAME=$(grep -E '^DOCKER_NETWORK_NAME=' /mnt/myssd/LucidTops/blockchain/secrets/*.secrets | head -1 | cut -d= -f2-)
+  docker run -d --name lucid-blockchain \
+    --network "${NETWORK_NAME}" \
+    -v /mnt/myssd/LucidTops:/mnt/myssd/LucidTops \
+    -v /mnt/myssd/LucidTops/blockchain/secrets:/mnt/myssd/LucidTops/blockchain/secrets \
+    -e SECRETS_DIR=/mnt/myssd/LucidTops/blockchain/secrets \
+    -e LUCID_TOPS_ROOT=/mnt/myssd/LucidTops \
+    lucid-blockchain:v1.0.0
+
+==============================================================================
+10. operations — Ops.dockerfile
+==============================================================================
+Image tag: lucid-operations:v1.0.0
+Secrets:   /mnt/myssd/LucidTops/operations/secrets
+Pull:      python3 /mnt/myssd/LucidTops/operations/ops_pull_information.py
+
+  docker build --no-cache --platform linux/arm64 \
+    -f /mnt/myssd/LucidTops/operations/Ops.dockerfile \
+    -t lucid-operations:v1.0.0 \
+    /mnt/myssd/LucidTops
+
+  NETWORK_NAME=$(grep -E '^DOCKER_NETWORK_NAME=' /mnt/myssd/LucidTops/operations/secrets/*.secrets | head -1 | cut -d= -f2-)
+  docker run -d --name lucid-operations \
+    --network "${NETWORK_NAME}" \
+    -v /mnt/myssd/LucidTops:/mnt/myssd/LucidTops \
+    -v /mnt/myssd/LucidTops/operations/secrets:/mnt/myssd/LucidTops/operations/secrets \
+    -e SECRETS_DIR=/mnt/myssd/LucidTops/operations/secrets \
+    -e LUCID_TOPS_ROOT=/mnt/myssd/LucidTops \
+    lucid-operations:v1.0.0
+
+==============================================================================
+EXCLUDED
+==============================================================================
+PaySystems/Pay.dockerfile — not covered by this build document.

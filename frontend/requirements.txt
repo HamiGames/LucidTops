@@ -1,0 +1,8 @@
+# Frontend container — Python deps for pull/bootstrap/tunnel (nginx serves static JS).
+# OS-native (apk on alpine image — do not assume present):
+#   - python3
+#   - py3-pip
+#   - nginx (provided by base image nginx:1.27-alpine)
+#
+# Pip packages used by frontend Python modules:
+# (stdlib only — pull_information, bootstrap_frontend, frontend_secrets, tunnel)

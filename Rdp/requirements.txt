@@ -1,6 +1,10 @@
 # LucidTops Rdp container — pip deps for Rdp/*.py modules only.
 # Used by: RdpRoutes (fastapi), RunRdp (uvicorn), ScreenShare (mss/opencv),
 # Mouse/keyboard (pynput), FileShare (aiofiles), socks/stem for Tor paths.
+#
+# OS-native (supplied at time of operation via APT_PACKAGES build-arg — do not assume present):
+#   resolve from hardware pull / createRDP (display, audio, and related packages as required)
+#
 fastapi>=0.110.0,<1.0.0
 uvicorn[standard]>=0.27.0,<1.0.0
 httpx>=0.27.0,<1.0.0
