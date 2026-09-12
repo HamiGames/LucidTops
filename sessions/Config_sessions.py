@@ -1,10 +1,11 @@
 """ the script that writes the session secrets to the session secrets file (session.secrets) on the host machine (hardward using a configurable Path)
-[Path]: mnt/myssd/LucidTops/secrets
-[File]: session.secrets
+[Path]: mnt/myssd/LucidTops/sessions/secrets
+[File]: sessions.secrets
 [Content]: sessions container configurational requirements, for the sessions container to operate correctly.
 Requirements:
 - the session secrets file will be written to the host machine (hardward using a configurable Path)
-- the session secrets file will be written to the session secrets file (session.secrets) on the host machine (hardward using a configurable Path)
+- the session secrets file will be written to the session secrets file (sessions.secrets) on the host machine (hardward using a configurable Path)
+- Seed DockerDNS / network / master endpoints from Server/Secrets/Master.secrets + proxy.secrets
 - NO Hardcoded values, all values are created at time of operation.
 - No place holder values, all values are created at time of operation.
 
@@ -34,10 +35,28 @@ import os
 from pathlib import Path
 from typing import Any
 
-from .sessions_pull_information import (
-    get_sessions_pull,
-    pull_sessions_hardware,
-)
+try:
+    from .sessions_pull_information import (
+        get_sessions_pull,
+        load_master_and_proxy_seed,
+        map_seed_to_sessions_keys,
+        master_secrets_path,
+        proxy_secrets_path,
+        pull_sessions_hardware,
+        resolve_lucid_tops_root,
+        sessions_secrets_dir,
+    )
+except ImportError:  # entrypoint: python -c "from Config_sessions import ..."
+    from sessions_pull_information import (  # type: ignore[no-redef]
+        get_sessions_pull,
+        load_master_and_proxy_seed,
+        map_seed_to_sessions_keys,
+        master_secrets_path,
+        proxy_secrets_path,
+        pull_sessions_hardware,
+        resolve_lucid_tops_root,
+        sessions_secrets_dir,
+    )
 
 
 def _env(key: str) -> str:
@@ -71,13 +90,34 @@ def _pick(existing: dict[str, str], *keys: str) -> str:
     return ""
 
 
+def _seed_prior_from_master_and_proxy(
+    lucid_root: Path, prior: dict[str, str]
+) -> dict[str, str]:
+    """
+    Seed sessions.secrets from Server/Secrets/Master.secrets + proxy.secrets.
+
+    Precedence for non-empty values: existing sessions.secrets (prior) > Master > proxy.
+    """
+    seed = map_seed_to_sessions_keys(load_master_and_proxy_seed(lucid_root))
+    if not seed:
+        return prior
+    merged = dict(seed)
+    for key, value in prior.items():
+        if value:
+            merged[key] = value
+    # Record seed file paths for operators (not sensitive payloads).
+    merged.setdefault("MASTER_SECRETS_FILE", master_secrets_path(lucid_root).as_posix())
+    merged.setdefault("PROXY_SECRETS_FILE", proxy_secrets_path(lucid_root).as_posix())
+    return merged
+
+
 def apply_pull_to_sessions_configuration(
     *,
     pull: dict[str, Any] | None = None,
     prior: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """
-    Derive sessions.secrets values solely from hardware pull + live DockerDNS.
+    Derive sessions.secrets from Master/proxy seed + hardware pull + live DockerDNS.
     Protocol facts required by fixes.txt (SessionID int(10), LucidTops_SessionsDB)
     are written into secrets at time of operation — never left as source placeholders.
     """
@@ -91,8 +131,11 @@ def apply_pull_to_sessions_configuration(
             "apply_pull_to_sessions_configuration failed — HARDWARE primary IP/MAC required"
         )
 
-    secrets_dir = Path(str(info["secrets_dir"]))
-    lucid_root = Path(str(info["lucid_tops_root"]))
+    lucid_root = resolve_lucid_tops_root(info)
+    secrets_dir = sessions_secrets_dir(lucid_root)
+    secrets_dir.mkdir(parents=True, exist_ok=True)
+
+    existing = _seed_prior_from_master_and_proxy(lucid_root, existing)
 
     bind_host = (
         _pick(existing, "SESSIONS_BIND_HOST")
@@ -108,20 +151,21 @@ def apply_pull_to_sessions_configuration(
         )
 
     docker_dns = (
-        _pick(existing, "SESSIONS_DOCKER_DNS_NAME")
+        _pick(existing, "SESSIONS_DOCKER_DNS_NAME", "PROXY_SESSIONS_DNS")
         or str(info.get("sessions_docker_dns_name") or primary_ip)
     )
     master_host = (
-        _pick(existing, "MASTER_SERVER_INTERNAL_HOST")
+        _pick(existing, "MASTER_SERVER_INTERNAL_HOST", "PROXY_BACKEND_DNS")
         or str(info.get("master_server_internal_host") or primary_ip)
     )
     master_port = (
-        _pick(existing, "MASTER_SERVER_INTERNAL_PORT")
+        _pick(existing, "MASTER_SERVER_INTERNAL_PORT", "MASTER_SERVER_PORT")
         or str(info.get("master_server_internal_port") or "")
     )
     if not master_port:
         raise RuntimeError(
-            "MASTER_SERVER_INTERNAL_PORT missing — must be pulled at time of operation"
+            "MASTER_SERVER_INTERNAL_PORT missing — must be seeded from "
+            "Master.secrets/proxy.secrets or pulled at time of operation"
         )
 
     url_scheme = _pick(existing, "MASTER_SERVER_URL_SCHEME", "SESSIONS_URL_SCHEME")
@@ -129,7 +173,7 @@ def apply_pull_to_sessions_configuration(
         url_scheme = "http" if not info.get("tor_listen") else "http"
 
     operations_dns = (
-        _pick(existing, "OPERATIONS_DOCKER_DNS_NAME")
+        _pick(existing, "OPERATIONS_DOCKER_DNS_NAME", "PROXY_OPERATIONS_DNS")
         or str(info.get("operations_docker_dns_name") or "")
     )
     operations_port = (
@@ -142,7 +186,7 @@ def apply_pull_to_sessions_configuration(
         operations_handoff_path = "/session-end"
 
     rdp_dns = (
-        _pick(existing, "RDP_DOCKER_DNS_NAME")
+        _pick(existing, "RDP_DOCKER_DNS_NAME", "PROXY_RDP_DNS")
         or str(info.get("rdp_docker_dns_name") or "")
     )
 
@@ -159,8 +203,8 @@ def apply_pull_to_sessions_configuration(
             network_name = f"lucid-{hostname.lower()}"
         else:
             raise RuntimeError(
-                "DOCKER_NETWORK_NAME missing — must be pulled from Docker or machine_id "
-                "at time of operation"
+                "DOCKER_NETWORK_NAME missing — must be seeded from Master.secrets/"
+                "proxy.secrets or pulled from Docker/machine_id at time of operation"
             )
 
     service_name = _pick(existing, "SESSIONS_SERVICE_NAME")
@@ -232,12 +276,13 @@ def apply_pull_to_sessions_configuration(
         )
 
     operator_master_type = _pick(existing, "TALLY_ENTITY_TYPE_MASTER") or "MasterServerID"
-    operator_master_id = _pick(existing, "TALLY_ENTITY_ID_MASTER")
+    operator_master_id = _pick(existing, "TALLY_ENTITY_ID_MASTER", "MASTER_SERVER_ID")
     if not operator_master_id:
         operator_master_id = str(info.get("machine_id") or "").strip()
     if not operator_master_id:
         raise RuntimeError(
-            "TALLY_ENTITY_ID_MASTER / machine_id missing — must be pulled at time of operation"
+            "TALLY_ENTITY_ID_MASTER / machine_id missing — must be seeded from "
+            "Master.secrets or pulled at time of operation"
         )
 
     container_name = (
@@ -286,6 +331,10 @@ def apply_pull_to_sessions_configuration(
         "HOST_PRIMARY_MAC": primary_mac,
         "LUCID_TOPS_ROOT": lucid_root.as_posix(),
         "SECRETS_DIR": secrets_dir.as_posix(),
+        "MASTER_SECRETS_FILE": _pick(existing, "MASTER_SECRETS_FILE")
+        or master_secrets_path(lucid_root).as_posix(),
+        "PROXY_SECRETS_FILE": _pick(existing, "PROXY_SECRETS_FILE")
+        or proxy_secrets_path(lucid_root).as_posix(),
         "DOCKER_NETWORK_NAME": network_name,
         "OPERATIONS_DOCKER_DNS_NAME": operations_dns,
         "OPERATIONS_BIND_PORT": operations_port,
@@ -293,6 +342,25 @@ def apply_pull_to_sessions_configuration(
         "OPERATIONS_SESSION_HANDOFF_PATH": operations_handoff_path,
         "RDP_DOCKER_DNS_NAME": rdp_dns,
     }
+
+    # Carry through Proxy/Master DockerDNS + Tor/Mongo facts when present in seed.
+    for carry_key in (
+        "PROXY_BACKEND_DNS",
+        "PROXY_SESSIONS_DNS",
+        "PROXY_OPERATIONS_DNS",
+        "PROXY_RDP_DNS",
+        "MASTER_SERVER_PORT",
+        "MASTER_SERVER_ONION",
+        "TOR_SOCKS_HOST",
+        "TOR_SOCKS_PORT",
+        "MONGODB_HOST",
+        "MONGODB_PORT",
+        "MONGODB_URL",
+        "MONGODB_MAIN_DATABASE_NAME",
+    ):
+        value = _pick(existing, carry_key)
+        if value:
+            resolved[carry_key] = value
 
     # Operator credentials for operations handoff — must exist at operation time (env/secrets).
     for op_key in (
@@ -315,7 +383,8 @@ def sessions_secrets_path_from_pull(info: dict[str, Any] | None = None) -> Path:
     override = _env("SESSIONS_SECRETS_FILE")
     if override:
         return Path(override).expanduser()
-    secrets_dir = Path(str(pull["secrets_dir"]))
+    lucid_root = resolve_lucid_tops_root(pull)
+    secrets_dir = sessions_secrets_dir(lucid_root)
     name = _env("SESSIONS_SECRETS_NAME")
     if not name:
         container = _env("SESSIONS_CONTAINER_NAME")
@@ -329,10 +398,17 @@ def write_session_secrets(
     force: bool = False,
     pull: dict[str, Any] | None = None,
 ) -> Path:
-    """Write session secrets file on the host from operation-time pull only."""
+    """
+    Write sessions.secrets on the host from Master/proxy seed + operation-time pull.
+
+    Seed: Server/Secrets/Master.secrets + proxy.secrets
+    Target: sessions/secrets/sessions.secrets (or SESSIONS_SECRETS_FILE)
+    """
     info = pull if pull is not None else pull_sessions_hardware(bind_environ=True)
+    lucid_root = resolve_lucid_tops_root(info)
     path = (
-        Path(secrets_dir) / (
+        Path(secrets_dir)
+        / (
             _env("SESSIONS_SECRETS_NAME")
             or (
                 f"{_env('SESSIONS_CONTAINER_NAME')}.secrets"
@@ -353,6 +429,7 @@ def write_session_secrets(
         )
         if not needs_fill:
             os.environ["SESSIONS_SECRETS_FILE"] = path.as_posix()
+            os.environ["SECRETS_DIR"] = path.parent.as_posix()
             return path
 
     try:
@@ -367,7 +444,9 @@ def write_session_secrets(
         "# LucidTops sessions.secrets - loaded by sessions/sessionID.py",
         f"# Generated: {_utc_now()}",
         f"# Container: {resolved.get('SESSIONS_CONTAINER_NAME', 'sessions')}",
-        "# Values are created at operation time from hardware pull — no placeholders.",
+        f"# Seeded from: {resolved.get('MASTER_SECRETS_FILE', master_secrets_path(lucid_root).as_posix())}",
+        f"# Seeded from: {resolved.get('PROXY_SECRETS_FILE', proxy_secrets_path(lucid_root).as_posix())}",
+        "# Values are created at operation time from Master/proxy seed + hardware pull — no placeholders.",
         "",
     ]
     for key in sorted(resolved.keys()):
@@ -377,6 +456,7 @@ def write_session_secrets(
     if os.name != "nt":
         os.chmod(path, 0o600)
     os.environ["SESSIONS_SECRETS_FILE"] = path.as_posix()
+    os.environ["SECRETS_DIR"] = path.parent.as_posix()
     return path
 
 
@@ -394,6 +474,8 @@ def session_secrets_status() -> dict[str, Any]:
             "secrets_file_exists": path.exists(),
             "error": str(exc),
             "keys_present": list(loaded.keys()),
+            "master_secrets_file": str(info.get("master_secrets_file") or ""),
+            "proxy_secrets_file": str(info.get("proxy_secrets_file") or ""),
         }
     present: list[str] = []
     missing: list[str] = []
@@ -412,6 +494,8 @@ def session_secrets_status() -> dict[str, Any]:
         "missing_keys": missing,
         "hardware_primary_ip": info.get("primary_ip"),
         "hardware_primary_mac": info.get("primary_mac"),
+        "master_secrets_file": str(info.get("master_secrets_file") or ""),
+        "proxy_secrets_file": str(info.get("proxy_secrets_file") or ""),
     }
 
 
