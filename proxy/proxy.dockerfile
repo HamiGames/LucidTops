@@ -26,11 +26,11 @@
 # -----------------------------------------------------------------------------
 # Build-args (declared before FROM for BASE_IMAGE; re-declared after FROM for use)
 # -----------------------------------------------------------------------------
-ARG BASE_IMAGE=python:3.11-slim-bookworm
+ARG BASE_IMAGE=
 FROM ${BASE_IMAGE}
 
 # Runtime / install args (NOT used in COPY source paths)
-ARG APT_PACKAGES="ca-certificates curl iproute2 nginx tor"
+ARG APT_PACKAGES=""
 ARG PIP_PACKAGES=""
 ARG PIP_WHEEL_PACKAGES="pip setuptools wheel"
 ARG LUCID_TOPS_ROOT=/mnt/myssd/LucidTops
