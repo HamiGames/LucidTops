@@ -26,7 +26,7 @@
 # -----------------------------------------------------------------------------
 # Build-args (declared before FROM for BASE_IMAGE; re-declared after FROM for use)
 # -----------------------------------------------------------------------------
-ARG BASE_IMAGE=
+ARG BASE_IMAGE=python:3.11-slim-bookworm
 FROM ${BASE_IMAGE}
 
 # Runtime / install args (NOT used in COPY source paths)
