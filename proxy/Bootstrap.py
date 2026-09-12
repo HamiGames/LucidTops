@@ -203,12 +203,23 @@ def _wait_frontend_onion() -> str:
 
 
 def verify_nginx_configuration() -> dict[str, Any]:
+    """Validate or generate nginx conf. Host nginx binary is optional (proxy container)."""
     conf = build_nginx_reverse_proxy_config()
     nginx = get_proxy_secret("NGINX_BIN") or shutil.which(
         get_proxy_secret("NGINX_BIN_NAME") or "nginx"
     )
     if not nginx:
-        raise RuntimeError("nginx binary not found on hardware after pull_information")
+        # Host Bootstrap only needs the conf file written; nginx runs in the proxy image.
+        return {
+            "ok": True,
+            "conf": conf.as_posix(),
+            "nginx_bin": "",
+            "deferred": True,
+            "detail": (
+                "nginx binary not on host — configuration written for container use"
+            ),
+            "timestamp": utc_now(),
+        }
     test = _run([nginx, "-t", "-c", conf.as_posix()])
     ok = test.returncode == 0
     if not ok:
@@ -342,13 +353,22 @@ def bootstrap_proxy(*, start_daemons: bool = True) -> dict[str, Any]:
     report["call_tor_test"] = tor_test
     if not tor_test.get("ok"):
         raise RuntimeError(
-            f"Call Tor test failed: {tor_test.get('socks', {}).get('detail', 'unknown')}"
+            f"Call Tor test failed: {tor_test.get('socks', {}).get('detail', 'unknown')}. "
+            "Ensure tor@default is running: sudo systemctl start tor@default "
+            "&& ss -lntp | grep 9050"
         )
 
     nginx_check = verify_nginx_configuration()
     report["nginx"] = nginx_check
-    if start_daemons:
+    if start_daemons and nginx_check.get("nginx_bin"):
         report["nginx_reload"] = reload_nginx(Path(nginx_check["conf"]))
+    elif start_daemons:
+        report["nginx_reload"] = {
+            "ok": True,
+            "action": "skipped",
+            "detail": "host nginx binary absent — conf ready for proxy container",
+            "conf": nginx_check.get("conf"),
+        }
 
     uvicorn_check = verify_uvicorn_configuration()
     report["uvicorn"] = uvicorn_check

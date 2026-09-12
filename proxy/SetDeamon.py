@@ -571,15 +571,14 @@ def _probe_tcp(host: str, port: int, timeout: float) -> tuple[bool, str]:
 
 def verify_tor_call() -> dict[str, Any]:
     """
-    Call Tor test: probe SOCKS/control using pulled TOR_SOCKS_HOST/ports.
-    Starts tor@default (not bare tor.service) when SOCKS is down — fixes.txt §17.
+    Call Tor test: probe SOCKS using pulled TOR_SOCKS_HOST/ports (fixes.txt §17).
+    Only attempts systemctl start (non-interactive) when SOCKS is down.
     """
     import time
 
     if not get_proxy_secret("TOR_SOCKS_HOST"):
         _ensure_operational_secrets()
 
-    # Refresh SOCKS from live hardware / torrc so LAN IP is not used when Tor is localhost.
     pull = pull_information()
     prior = load_proxy_secrets(reload=False)
     socks_host, socks_port_s = _buildsecrets._pull_tor_socks_endpoint(pull, prior=prior)
@@ -597,30 +596,46 @@ def verify_tor_call() -> dict[str, Any]:
     tor_unit = _resolve_tor_unit()
     timeout = float(_require("PROXY_TOR_VERIFY_TIMEOUT"))
 
-    socks_ok, socks_detail = _probe_tcp(host, socks_port, timeout)
+    # Probe localhost first — Debian tor@default binds 127.0.0.1:9050 (§17).
+    probe_hosts = []
+    for candidate in (host, "127.0.0.1", "localhost"):
+        if candidate and candidate not in probe_hosts:
+            probe_hosts.append(candidate)
+
+    socks_ok = False
+    socks_detail = ""
+    for probe_host in probe_hosts:
+        socks_ok, socks_detail = _probe_tcp(probe_host, socks_port, timeout)
+        if socks_ok:
+            host = probe_host
+            _merge_proxy_secrets({"TOR_SOCKS_HOST": host})
+            break
+
     control_ok, control_detail = _probe_tcp(host, control_port, timeout)
 
     daemon_status: dict[str, Any] = {"unit": tor_unit}
     if tor_unit:
         daemon_status["status"] = status_daemon(tor_unit)
-        if not socks_ok:
-            start_result = start_daemon(tor_unit)
-            daemon_status["start"] = start_result
-            # Allow tor@default a moment to bind SocksPort after start.
-            time.sleep(min(3.0, max(0.5, timeout)))
-            daemon_status["status"] = status_daemon(tor_unit)
-            socks_ok, socks_detail = _probe_tcp(host, socks_port, timeout)
-            if not socks_ok and host not in {"127.0.0.1", "localhost"}:
-                # Hardware Tor (Debian) listens on 127.0.0.1:9050 — retry localhost.
-                alt_ok, alt_detail = _probe_tcp("127.0.0.1", socks_port, timeout)
-                if alt_ok:
-                    socks_ok = True
-                    socks_detail = f"connected_via_127.0.0.1 ({alt_detail})"
-                    host = "127.0.0.1"
-                    _merge_proxy_secrets({"TOR_SOCKS_HOST": host})
+
+    # Only start when SOCKS is down — never prompt for polkit if Tor already works.
+    if not socks_ok and tor_unit:
+        start_result = start_daemon(tor_unit)
+        daemon_status["start"] = start_result
+        time.sleep(min(3.0, max(0.5, timeout)))
+        daemon_status["status"] = status_daemon(tor_unit)
+        for probe_host in probe_hosts:
+            socks_ok, socks_detail = _probe_tcp(probe_host, socks_port, timeout)
             if socks_ok:
-                socks_detail = socks_detail or "connected_after_start"
-            control_ok, control_detail = _probe_tcp(host, control_port, timeout)
+                host = probe_host
+                socks_detail = "connected_after_start"
+                _merge_proxy_secrets({"TOR_SOCKS_HOST": host})
+                break
+        if not socks_ok:
+            socks_detail = (
+                f"{socks_detail}; start={start_result.get('ok')} "
+                f"{start_result.get('stderr') or start_result.get('hint') or ''}"
+            ).strip()
+        control_ok, control_detail = _probe_tcp(host, control_port, timeout)
 
     return {
         "ok": socks_ok,
@@ -660,12 +675,18 @@ def start_daemon(unit: str) -> dict[str, Any]:
         systemctl and _buildsecrets._unit_is_tor_instance_master(systemctl, normalized)
     ):
         normalized = _resolve_tor_unit()
-    result = _run([systemctl, "start", normalized])
+    # Never block Bootstrap on interactive polkit password prompts.
+    result = _run([systemctl, "--no-ask-password", "start", normalized])
     return {
         "unit": normalized,
         "ok": result.returncode == 0,
         "stdout": result.stdout.strip(),
         "stderr": result.stderr.strip(),
+        "hint": (
+            f"If start failed, run: sudo systemctl start {normalized}"
+            if result.returncode != 0
+            else ""
+        ),
     }
 
 
@@ -781,16 +802,56 @@ def set_tor_and_nginx_daemons(*, start: bool = True) -> dict[str, Any]:
         "uvicorn_compatible": True,
     }
 
-    tor_unit = _optional("TOR_SYSTEMD_UNIT")
+    tor_unit = _optional("TOR_SYSTEMD_UNIT") or _resolve_tor_unit()
     nginx_unit = _optional("NGINX_SYSTEMD_UNIT")
 
     if start:
-        result["tor"] = (
-            start_daemon(tor_unit)
-            if tor_unit
-            else {"ok": False, "detail": "TOR_SYSTEMD_UNIT missing after pull_information"}
-        )
-        result["nginx"] = reload_nginx(nginx_conf)
+        # Probe SOCKS before any systemctl start — avoid polkit prompts when Tor is up.
+        socks_host = secrets.get("TOR_SOCKS_HOST") or "127.0.0.1"
+        try:
+            socks_port = int(secrets.get("TOR_SOCKS_PORT") or "9050")
+        except ValueError:
+            socks_port = 9050
+        socks_live = False
+        live_host = socks_host
+        for probe_host in (socks_host, "127.0.0.1"):
+            ok, _detail = _probe_tcp(probe_host, socks_port, 2.0)
+            if ok:
+                socks_live = True
+                live_host = probe_host
+                if probe_host != socks_host:
+                    _merge_proxy_secrets({"TOR_SOCKS_HOST": probe_host})
+                break
+
+        if socks_live:
+            result["tor"] = {
+                "ok": True,
+                "unit": tor_unit,
+                "action": "already_running",
+                "detail": (
+                    f"SOCKS reachable at {live_host}:{socks_port} — skipped systemctl start"
+                ),
+            }
+        elif tor_unit:
+            result["tor"] = start_daemon(tor_unit)
+        else:
+            result["tor"] = {
+                "ok": False,
+                "detail": "TOR_SYSTEMD_UNIT missing after pull_information",
+            }
+
+        if _nginx_bin():
+            result["nginx"] = reload_nginx(nginx_conf)
+        else:
+            result["nginx"] = {
+                "ok": True,
+                "action": "deferred",
+                "detail": (
+                    "nginx binary not on host — conf written for proxy container; "
+                    "host Bootstrap does not require host nginx"
+                ),
+                "conf": nginx_conf.as_posix(),
+            }
         result["call_tor_test"] = verify_tor_call()
     else:
         result["tor"] = (
@@ -806,7 +867,7 @@ def set_tor_and_nginx_daemons(*, start: bool = True) -> dict[str, Any]:
             if nginx_unit
             else {
                 "active": False,
-                "detail": "NGINX_SYSTEMD_UNIT missing after pull_information",
+                "detail": "NGINX_SYSTEMD_UNIT missing or nginx not on host",
             }
         )
 
