@@ -418,7 +418,6 @@ def build_nginx_reverse_proxy_config() -> Path:
     fastapi_upstream = _require("PROXY_FASTAPI_UPSTREAM_HOST")
     frontend_dns = _require("PROXY_FRONTEND_DNS")
     frontend_port = _require("FRONTEND_PORT")
-    api_prefix = _require("PROXY_API_PREFIX").rstrip("/")
     docker_network = _require("DOCKER_NETWORK_NAME")
     keepalive_proxy = _require("PROXY_NGINX_KEEPALIVE_PROXY")
     keepalive_frontend = _require("PROXY_NGINX_KEEPALIVE_FRONTEND")
@@ -497,10 +496,6 @@ http {{
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header Connection "";
-
-        location {api_prefix}/ {{
-            proxy_pass http://lucid_proxy_fastapi;
-        }}
 
         location {loc_proxy} {{
             proxy_pass http://lucid_proxy_fastapi;

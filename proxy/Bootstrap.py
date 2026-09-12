@@ -225,7 +225,6 @@ def _force_write_nginx_main_config() -> Path:
     fastapi_upstream = require_proxy_secret("PROXY_FASTAPI_UPSTREAM_HOST")
     frontend_dns = require_proxy_secret("PROXY_FRONTEND_DNS")
     frontend_port = require_proxy_secret("FRONTEND_PORT")
-    api_prefix = require_proxy_secret("PROXY_API_PREFIX").rstrip("/")
     docker_network = require_proxy_secret("DOCKER_NETWORK_NAME")
     keepalive_proxy = require_proxy_secret("PROXY_NGINX_KEEPALIVE_PROXY")
     keepalive_frontend = require_proxy_secret("PROXY_NGINX_KEEPALIVE_FRONTEND")
@@ -303,10 +302,6 @@ http {{
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header Connection "";
-
-        location {api_prefix}/ {{
-            proxy_pass http://lucid_proxy_fastapi;
-        }}
 
         location {loc_proxy} {{
             proxy_pass http://lucid_proxy_fastapi;
