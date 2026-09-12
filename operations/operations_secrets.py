@@ -136,11 +136,11 @@ def _bind_paths_from_operation() -> None:
     if not secrets_raw:
         raise RuntimeError("SECRETS_DIR missing — must be set at time of operation")
     if not operations_secrets_raw:
-        name = _env("OPERATIONS_SECRETS_NAME") or prior.get("OPERATIONS_SECRETS_NAME", "").strip()
-        if not name:
-            raise RuntimeError(
-                "OPERATIONS_SECRETS_FILE or OPERATIONS_SECRETS_NAME must be set at time of operation"
-            )
+        name = (
+            _env("OPERATIONS_SECRETS_NAME")
+            or prior.get("OPERATIONS_SECRETS_NAME", "").strip()
+            or "operations.secrets"
+        )
         operations_secrets_raw = str(Path(secrets_raw).expanduser() / name)
 
     LUCID_TOPS_ROOT = Path(root_raw).expanduser()
@@ -545,25 +545,326 @@ def write_secrets_file(path: Path, values: dict[str, str]) -> Path:
     return path
 
 
+def _pick(existing: dict[str, str], *keys: str) -> str:
+    for key in keys:
+        value = _env(key)
+        if value:
+            return value
+        value = existing.get(key, "").strip() or existing.get(key.upper(), "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _seed_prior_from_server_secrets(
+    lucid_root: Path, prior: dict[str, str]
+) -> dict[str, str]:
+    """Reuse MasterServer-written operations.secrets under Server/Secrets when present."""
+    server_path = lucid_root / "Server" / "Secrets" / "operations.secrets"
+    if not server_path.exists():
+        return prior
+    seeded = parse_secrets_file(server_path)
+    merged = dict(seeded)
+    for key, value in prior.items():
+        if value:
+            merged[key] = value
+    return merged
+
+
+def apply_pull_to_operations_configuration(
+    *,
+    pull: dict[str, Any] | None = None,
+    prior: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Resolve operations.secrets keys from live pull + prior/env at time of operation."""
+    from ops_pull_information import pull_operations_hardware
+
+    info = pull if pull is not None else pull_operations_hardware(bind_environ=True)
+    existing = prior if prior is not None else {}
+
+    primary_ip = str(info.get("primary_ip") or "").strip()
+    primary_mac = str(info.get("primary_mac") or "").strip()
+    if not primary_ip or not primary_mac:
+        raise RuntimeError(
+            "apply_pull_to_operations_configuration failed — HARDWARE primary IP/MAC required"
+        )
+
+    lucid_root = Path(
+        str(info.get("lucid_tops_root") or _env("LUCID_TOPS_ROOT") or "")
+    ).expanduser()
+    if not str(lucid_root):
+        raise RuntimeError("LUCID_TOPS_ROOT missing — must be set at time of operation")
+
+    secrets_dir = Path(
+        str(info.get("secrets_dir") or _env("SECRETS_DIR") or "")
+    ).expanduser()
+    if not str(secrets_dir):
+        secrets_dir = lucid_root / "operations" / "secrets"
+    secrets_dir.mkdir(parents=True, exist_ok=True)
+
+    existing = _seed_prior_from_server_secrets(lucid_root, existing)
+
+    bind_host = (
+        _pick(existing, "OPERATIONS_BIND_HOST")
+        or str(info.get("operations_bind_host") or primary_ip)
+    )
+    bind_port = (
+        _pick(existing, "OPERATIONS_BIND_PORT")
+        or str(info.get("operations_bind_port") or "")
+    )
+    if not bind_port:
+        raise RuntimeError(
+            "OPERATIONS_BIND_PORT missing — must be pulled/allocated at time of operation"
+        )
+
+    docker_dns = (
+        _pick(existing, "OPERATIONS_DOCKER_DNS_NAME")
+        or str(info.get("operations_docker_dns_name") or primary_ip)
+    )
+    network_name = (
+        _pick(existing, "OPERATIONS_NETWORK_NAME", "DOCKER_NETWORK_NAME")
+        or str(info.get("docker_network_name") or "")
+    )
+    if not network_name:
+        machine_id = str(info.get("machine_id") or "").strip()
+        hostname = str(info.get("hostname") or "").strip()
+        if machine_id:
+            network_name = f"lucid-{machine_id[:12].lower()}"
+        elif hostname:
+            network_name = f"lucid-{hostname.lower()}"
+        else:
+            raise RuntimeError(
+                "OPERATIONS_NETWORK_NAME missing — must be pulled from Docker or machine_id "
+                "at time of operation"
+            )
+
+    service_name = _pick(existing, "OPERATIONS_SERVICE_NAME") or str(
+        (info.get("operations_container") or {}).get("name")
+        or _env("OPERATIONS_CONTAINER_NAME")
+        or "operations"
+    )
+
+    id_secrets_dir = (
+        _pick(existing, "ID_SECRETS_DIR")
+        or (secrets_dir / "id").as_posix()
+    )
+    accounts_dir = (
+        _pick(existing, "ACCOUNTS_DIR")
+        or (lucid_root / "accounts").as_posix()
+    )
+    payments_secrets = (
+        _pick(existing, "PAYMENTS_SECRETS_FILE")
+        or (lucid_root / "Server" / "Secrets" / "payments.secrets").as_posix()
+    )
+    program_dir = (
+        _pick(existing, "LUCID_PROGRAM_DIR")
+        or (lucid_root / "program").as_posix()
+    )
+    user_program_dir = (
+        _pick(existing, "LUCID_USER_PROGRAM_DIR")
+        or (lucid_root / "user_program").as_posix()
+    )
+
+    # Tor onions: prefer env/prior/Server seed; empty until Master/Proxy patch is valid.
+    master_onion = _pick(existing, "MASTER_SERVER_ONION")
+    frontend_onion = _pick(existing, "FRONTEND_ONION")
+    nodeuser_onion = _pick(existing, "NODEUSER_ONION")
+
+    resolved: dict[str, str] = {
+        "GENERATED_AT": utc_now(),
+        "LUCID_TOPS_ROOT": lucid_root.as_posix(),
+        "SECRETS_DIR": secrets_dir.as_posix(),
+        "OPERATIONS_SECRETS_NAME": _pick(existing, "OPERATIONS_SECRETS_NAME")
+        or "operations.secrets",
+        "OPERATIONS_API_PREFIX": _pick(existing, "OPERATIONS_API_PREFIX") or "/operations",
+        "OPERATIONS_TOR_ONLY": _pick(existing, "OPERATIONS_TOR_ONLY")
+        or ("true" if info.get("tor_available") else "true"),
+        "MASTER_SERVER_ONION": master_onion,
+        "FRONTEND_ONION": frontend_onion,
+        "NODEUSER_ONION": nodeuser_onion,
+        "SESSION_CONTROL_JAVASCRIPT_SOURCE": _pick(
+            existing, "SESSION_CONTROL_JAVASCRIPT_SOURCE"
+        )
+        or "frontend/webpage/settings.js",
+        "USER_REGISTER_JAVASCRIPT_SOURCE": _pick(
+            existing, "USER_REGISTER_JAVASCRIPT_SOURCE"
+        )
+        or "frontend/webpage/register.js",
+        "LUCID_PROGRAM_DIR": program_dir,
+        "LUCID_USER_PROGRAM_DIR": user_program_dir,
+        "HISTORY_DIR_NAME": _pick(existing, "HISTORY_DIR_NAME") or "history",
+        "RECORDING_FORMAT": _pick(existing, "RECORDING_FORMAT") or "webm",
+        "SESSION_RECORDS_COLLECTION": _pick(existing, "SESSION_RECORDS_COLLECTION")
+        or "session_records",
+        "LUCID_LEDGER_COLLECTION": _pick(existing, "LUCID_LEDGER_COLLECTION")
+        or "LucidLedger",
+        "BLOCKCHAIN_COLLECTION": _pick(existing, "BLOCKCHAIN_COLLECTION") or "Blockchain",
+        "CHIP_IN_COLLECTION": _pick(existing, "CHIP_IN_COLLECTION") or "chip_in",
+        "CHIP_IN_CROSSOVER_COLLECTION": _pick(existing, "CHIP_IN_CROSSOVER_COLLECTION")
+        or "chip_in_crossover",
+        "NODE_SEED_FILES_COLLECTION": _pick(existing, "NODE_SEED_FILES_COLLECTION")
+        or "node_seed_files",
+        "OPERATIONS_LEDGER_READ_LIMIT": _pick(existing, "OPERATIONS_LEDGER_READ_LIMIT")
+        or "100",
+        "OPERATIONS_QUERY_LIMIT": _pick(existing, "OPERATIONS_QUERY_LIMIT") or "100",
+        "BLOCKCHAIN_HASH_ALGORITHM": _pick(existing, "BLOCKCHAIN_HASH_ALGORITHM")
+        or "sha256",
+        "SESSION_TRANSFER_DEFAULT_TARGET": _pick(
+            existing, "SESSION_TRANSFER_DEFAULT_TARGET"
+        )
+        or "operations",
+        "USER_SESSION_TRANSFER_DEFAULT_TARGET": _pick(
+            existing, "USER_SESSION_TRANSFER_DEFAULT_TARGET"
+        )
+        or "operations",
+        "CHIP_IN_CROSSOVER_WORLDS": _pick(existing, "CHIP_IN_CROSSOVER_WORLDS")
+        or "lucid,tron,xrp",
+        "CHIP_IN_STATUSES": _pick(existing, "CHIP_IN_STATUSES")
+        or "pending,connected,complete",
+        "CHIP_IN_INITIAL_STATUS": _pick(existing, "CHIP_IN_INITIAL_STATUS") or "pending",
+        "CHIP_IN_CONNECTED_STATUS": _pick(existing, "CHIP_IN_CONNECTED_STATUS")
+        or "connected",
+        "CHIP_IN_WORLD_ALIASES": _pick(existing, "CHIP_IN_WORLD_ALIASES")
+        or "lucid:LUCID,tron:TRON,xrp:XRP",
+        "SESSION_ID_LENGTH": _pick(existing, "SESSION_ID_LENGTH") or "10",
+        "SESSION_KEY_MIN_LENGTH": _pick(existing, "SESSION_KEY_MIN_LENGTH")
+        or str(max(16, int(info.get("cpu_count") or 1) * 8)),
+        "SESSION_RECORD_DEFAULT_ACTION": _pick(existing, "SESSION_RECORD_DEFAULT_ACTION")
+        or "start",
+        "SESSION_REQUIRED_FIELDS": _pick(existing, "SESSION_REQUIRED_FIELDS")
+        or "sessionID,UserID,TokenID",
+        "SESSION_STATUSES": _pick(existing, "SESSION_STATUSES")
+        or "pending,active,complete,ended,compressed",
+        "SESSION_CONTROL_SETTING_KEYS": _pick(existing, "SESSION_CONTROL_SETTING_KEYS")
+        or "audio,video,input,clipboard",
+        "PAYMENTS_SECRETS_FILE": payments_secrets,
+        "PAYMENTS_WALLET_ADDRESS_KEYS": _pick(existing, "PAYMENTS_WALLET_ADDRESS_KEYS")
+        or "WALLET_ADDRESS,TRON_WALLET,XRP_WALLET",
+        "OPERATIONS_SERVICE_NAME": service_name,
+        "OPERATIONS_NETWORK_NAME": network_name,
+        "FRONTEND_GUI_PREFIX": _pick(existing, "FRONTEND_GUI_PREFIX") or "/gui",
+        "LUCIDTOPS_NODE_DB_NAME": _pick(existing, "LUCIDTOPS_NODE_DB_NAME")
+        or "LucidTopsNodeDB",
+        "LUCIDTOPS_NODE_DB_COLLECTION": _pick(existing, "LUCIDTOPS_NODE_DB_COLLECTION")
+        or "nodes",
+        "LUCIDTOPS_USER_DB_NAME": _pick(existing, "LUCIDTOPS_USER_DB_NAME")
+        or "LucidTopsUserDB",
+        "LUCIDTOPS_USER_DB_COLLECTION": _pick(existing, "LUCIDTOPS_USER_DB_COLLECTION")
+        or "users",
+        "LUCIDTOPS_SESSIONS_DB_NAME": _pick(existing, "LUCIDTOPS_SESSIONS_DB_NAME")
+        or "LucidTops_SessionsDB",
+        "LUCIDTOPS_SESSIONS_COLLECTION": _pick(existing, "LUCIDTOPS_SESSIONS_COLLECTION")
+        or "session_records",
+        "LUCIDTOPS_LEDGER_DB_NAME": _pick(existing, "LUCIDTOPS_LEDGER_DB_NAME")
+        or "LucidTops_LedgerDB",
+        "EMAIL_MAC_LIMIT": _pick(existing, "EMAIL_MAC_LIMIT") or "3",
+        "ID_SECRETS_DIR": id_secrets_dir,
+        "ACCOUNTS_DIR": accounts_dir,
+        "REGISTRATION_APPROVED_STATUS": _pick(existing, "REGISTRATION_APPROVED_STATUS")
+        or "approved",
+        "SESSION_COMPLETE_STATUS": _pick(existing, "SESSION_COMPLETE_STATUS")
+        or "complete",
+        "NODE_LEDGER_LAST_BLOCK_FIELD": _pick(existing, "NODE_LEDGER_LAST_BLOCK_FIELD")
+        or "LastBlockID",
+        "OPERATIONS_BIND_HOST": bind_host,
+        "OPERATIONS_BIND_PORT": bind_port,
+        "OPERATIONS_DOCKER_DNS_NAME": docker_dns,
+        "DOCKER_NETWORK_NAME": network_name,
+        "HARDWARE_PRIMARY_IP": primary_ip,
+        "HARDWARE_PRIMARY_MAC": primary_mac,
+        "HOST_PRIMARY_IP": primary_ip,
+        "HOST_PRIMARY_MAC": primary_mac,
+    }
+
+    secrets_file = Path(
+        str(
+            info.get("operations_secrets_file")
+            or _env("OPERATIONS_SECRETS_FILE")
+            or (secrets_dir / resolved["OPERATIONS_SECRETS_NAME"]).as_posix()
+        )
+    ).expanduser()
+    resolved["OPERATIONS_SECRETS_FILE"] = secrets_file.as_posix()
+
+    # Preserve any extra prior keys (onion patches, operator fields) not listed above.
+    for key, value in existing.items():
+        if key not in resolved and value:
+            resolved[key] = value
+
+    return resolved
+
+
 def build_operations_secret_values(
     *, existing: dict[str, str] | None = None
 ) -> dict[str, str]:
-    """Collect operations.secrets values exclusively from env / prior file at operation time."""
-    _bind_paths_from_operation()
-    prior = existing if existing is not None else parse_secrets_file(OPERATIONS_SECRETS_FILE)
-    values: dict[str, str] = {
-        "GENERATED_AT": utc_now(),
-        "LUCID_TOPS_ROOT": LUCID_TOPS_ROOT.as_posix(),
-        "SECRETS_DIR": SECRETS_DIR.as_posix(),
-        "OPERATIONS_SECRETS_FILE": OPERATIONS_SECRETS_FILE.as_posix(),
-    }
-    name = _env("OPERATIONS_SECRETS_NAME") or prior.get("OPERATIONS_SECRETS_NAME", "").strip()
-    if name:
-        values["OPERATIONS_SECRETS_NAME"] = name
+    """Collect operations.secrets values from pull / env / prior file at operation time."""
+    return apply_pull_to_operations_configuration(prior=existing)
 
-    for key in OPERATIONS_SECRETS_KEYS:
-        values[key] = require_secret(key, existing=prior)
-    return values
+
+def write_operations_secrets(
+    *,
+    secrets_dir: Path | None = None,
+    force: bool = False,
+    pull: dict[str, Any] | None = None,
+) -> Path:
+    """Write operations.secrets on the host from operation-time pull (sessions pattern)."""
+    from ops_pull_information import pull_operations_hardware
+
+    info = pull if pull is not None else pull_operations_hardware(bind_environ=True)
+    name = (
+        _env("OPERATIONS_SECRETS_NAME")
+        or str(info.get("operations_secrets_name") or "").strip()
+        or "operations.secrets"
+    )
+    if secrets_dir is not None:
+        path = Path(secrets_dir).expanduser() / name
+    else:
+        override = _env("OPERATIONS_SECRETS_FILE") or str(
+            info.get("operations_secrets_file") or ""
+        ).strip()
+        if override:
+            path = Path(override).expanduser()
+        else:
+            target = Path(
+                str(info.get("secrets_dir") or _env("SECRETS_DIR") or "")
+            ).expanduser()
+            if not str(target):
+                raise RuntimeError(
+                    "SECRETS_DIR missing — must be set at time of operation"
+                )
+            path = target / name
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    prior = parse_secrets_file(path) if path.exists() else {}
+    resolved = apply_pull_to_operations_configuration(pull=info, prior=prior)
+
+    if path.exists() and not force:
+        existing_keys = set(prior.keys())
+        needs_fill = any(
+            (k not in existing_keys) or (not prior.get(k)) for k in resolved if resolved[k]
+        )
+        if not needs_fill:
+            os.environ["OPERATIONS_SECRETS_FILE"] = path.as_posix()
+            os.environ["SECRETS_DIR"] = path.parent.as_posix()
+            for key in (
+                "OPERATIONS_BIND_HOST",
+                "OPERATIONS_BIND_PORT",
+                "OPERATIONS_DOCKER_DNS_NAME",
+                "OPERATIONS_NETWORK_NAME",
+            ):
+                if resolved.get(key) and not _env(key):
+                    os.environ[key] = resolved[key]
+            return path
+
+    write_secrets_file(path, resolved)
+    os.environ["OPERATIONS_SECRETS_FILE"] = path.as_posix()
+    os.environ["SECRETS_DIR"] = path.parent.as_posix()
+    os.environ["OPERATIONS_SECRETS_NAME"] = name
+    for key, value in resolved.items():
+        if value and not _env(key):
+            os.environ[key] = value
+    load_operations_secrets(reload=True)
+    _bind_paths_from_operation()
+    return path
 
 
 def write_operations_secrets_template(
@@ -572,32 +873,12 @@ def write_operations_secrets_template(
     populate_from_env: bool = True,
     force: bool = False,
 ) -> Path:
-    """Write operations.secrets from env / existing values created at time of operation."""
-    _bind_paths_from_operation()
-    if secrets_dir is not None:
-        target_dir = secrets_dir
-        name = _env("OPERATIONS_SECRETS_NAME")
-        if not name:
-            raise RuntimeError(
-                "OPERATIONS_SECRETS_NAME missing — must be set at time of operation"
-            )
-        path = target_dir / name
-    else:
-        path = OPERATIONS_SECRETS_FILE
-        target_dir = path.parent
-
-    target_dir.mkdir(parents=True, exist_ok=True)
-    if path.exists() and not force:
-        return path
-
+    """Write operations.secrets from env / pull values created at time of operation."""
     if not populate_from_env:
         raise RuntimeError(
             "operations.secrets values must be created at time of operation "
             "(populate_from_env cannot be false)"
         )
-
-    existing = parse_secrets_file(path) if path.exists() else {}
-    values = build_operations_secret_values(existing=existing)
-    write_secrets_file(path, values)
-    load_operations_secrets(reload=True)
-    return path
+    if secrets_dir is not None and not _env("OPERATIONS_SECRETS_NAME"):
+        os.environ["OPERATIONS_SECRETS_NAME"] = "operations.secrets"
+    return write_operations_secrets(secrets_dir=secrets_dir, force=force)
