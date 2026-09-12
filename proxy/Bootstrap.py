@@ -13,7 +13,8 @@ includes:
 - creates secrets directories under the pulled LucidTops root (e.g. Server/Secrets on SSD).
 - syncs proxy.secrets into Master.secrets at the Master secrets path created from the pull.
 - runs Call Tor test (SOCKS/control) while bootstrapping the Proxy container.
-- validates nginx, uvicorn, and DockerDNS configuration from pull-created secrets.
+- validates nginx main config (events+http) for host nginx.service (fixes.txt §18)
+  and proxy container use; never leaves a fragment-only file for nginx -t -c.
 - builds required Docker networks named from pull/secrets.
 - makes sure the Proxy container will function correctly when started.
 
@@ -202,35 +203,209 @@ def _wait_frontend_onion() -> str:
     return onion
 
 
+def _force_write_nginx_main_config() -> Path:
+    """
+    Always write a complete nginx MAIN config (events + http).
+
+    Fragment-only files fail `nginx -t -c` with:
+      "upstream" directive is not allowed here
+    Host nginx.service (fixes.txt §18) and container nginx both need a valid main file
+    or a site fragment included from http{}. This writer emits a standalone main config.
+    """
+    conf_path = Path(require_proxy_secret("NGINX_CONF_PATH")).expanduser()
+    conf_path.parent.mkdir(parents=True, exist_ok=True)
+    root = Path(require_proxy_secret("LUCID_TOPS_ROOT")).expanduser()
+    run_dir = root / "run" / "nginx"
+    log_dir = root / "logs" / "nginx"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    listen_port = require_proxy_secret("PROXY_NGINX_LISTEN_PORT")
+    proxy_port = require_proxy_secret("PROXY_PORT")
+    fastapi_upstream = require_proxy_secret("PROXY_FASTAPI_UPSTREAM_HOST")
+    frontend_dns = require_proxy_secret("PROXY_FRONTEND_DNS")
+    frontend_port = require_proxy_secret("FRONTEND_PORT")
+    api_prefix = require_proxy_secret("PROXY_API_PREFIX").rstrip("/")
+    docker_network = require_proxy_secret("DOCKER_NETWORK_NAME")
+    keepalive_proxy = require_proxy_secret("PROXY_NGINX_KEEPALIVE_PROXY")
+    keepalive_frontend = require_proxy_secret("PROXY_NGINX_KEEPALIVE_FRONTEND")
+    client_max_body = require_proxy_secret("PROXY_NGINX_CLIENT_MAX_BODY")
+    loc_proxy = require_proxy_secret("PROXY_NGINX_LOCATION_PROXY")
+    loc_api = require_proxy_secret("PROXY_NGINX_LOCATION_API")
+    loc_rdp = require_proxy_secret("PROXY_NGINX_LOCATION_RDP")
+    loc_node = require_proxy_secret("PROXY_NGINX_LOCATION_NODE")
+    hardware_ip = require_proxy_secret("HARDWARE_PRIMARY_IP")
+    hardware_mac = require_proxy_secret("HARDWARE_PRIMARY_MAC")
+
+    none_raw = get_proxy_secret("PROXY_NONE_LINKING_CONTAINERS") or ""
+    none_linking = sorted(
+        {item.strip().lower() for item in none_raw.split(",") if item.strip()}
+    )
+    deny_section = "".join(
+        f"""
+        location /{name}/ {{
+            return 403;
+        }}
+"""
+        for name in none_linking
+    )
+
+    mime_types = Path("/etc/nginx/mime.types")
+    mime_line = (
+        f"    include {mime_types.as_posix()};"
+        if mime_types.is_file()
+        else "    # mime.types absent on host"
+    )
+    pid_file = (run_dir / "nginx.pid").as_posix()
+    error_log = (log_dir / "error.log").as_posix()
+    access_log = (log_dir / "access.log").as_posix()
+
+    conf = f"""# LUCID_NGINX_MAIN_V2
+# LucidTops nginx reverse proxy - generated {utc_now()}
+# fixes.txt §18: compatible with host nginx.service validation via nginx -t -c
+# Docker Network: {docker_network}
+# Hardware IP/MAC (pulled): {hardware_ip} / {hardware_mac}
+# Sensitive values: see proxy.secrets (not stored in this file)
+
+worker_processes auto;
+error_log {error_log} warn;
+pid {pid_file};
+
+events {{
+    worker_connections 1024;
+}}
+
+http {{
+{mime_line}
+    default_type  application/octet-stream;
+    sendfile      on;
+    keepalive_timeout 65;
+    access_log {access_log};
+
+    upstream lucid_proxy_fastapi {{
+        server {fastapi_upstream}:{proxy_port};
+        keepalive {keepalive_proxy};
+    }}
+
+    upstream lucid_frontend {{
+        server {frontend_dns}:{frontend_port};
+        keepalive {keepalive_frontend};
+    }}
+
+    server {{
+        listen {listen_port};
+        server_name _;
+
+        client_max_body_size {client_max_body};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection "";
+
+        location {api_prefix}/ {{
+            proxy_pass http://lucid_proxy_fastapi;
+        }}
+
+        location {loc_proxy} {{
+            proxy_pass http://lucid_proxy_fastapi;
+        }}
+
+        location {loc_api} {{
+            proxy_pass http://lucid_proxy_fastapi;
+        }}
+
+        location {loc_rdp} {{
+            proxy_pass http://lucid_proxy_fastapi;
+        }}
+
+        location {loc_node} {{
+            proxy_pass http://lucid_proxy_fastapi;
+        }}
+{deny_section}
+        location / {{
+            proxy_pass http://lucid_frontend;
+        }}
+    }}
+}}
+"""
+    conf_path.write_text(conf, encoding="utf-8")
+    return conf_path
+
+
+def _nginx_conf_is_full_main(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return (
+        "LUCID_NGINX_MAIN_V2" in text
+        or ("worker_processes" in text and "http {" in text and "events {" in text)
+    )
+
+
 def verify_nginx_configuration() -> dict[str, Any]:
-    """Validate or generate nginx conf. Host nginx binary is optional (proxy container)."""
-    conf = build_nginx_reverse_proxy_config()
+    """
+    Generate + validate nginx config for host nginx.service (fixes.txt §18).
+
+    Always force-writes a full main config before nginx -t -c so stale fragment
+    files (upstream at top-level) cannot fail Bootstrap.
+    """
+    # Prefer SetDeamon builder when current; always overwrite with V2 main afterward.
+    try:
+        build_nginx_reverse_proxy_config()
+    except Exception:
+        pass
+
+    conf = _force_write_nginx_main_config()
+    if not _nginx_conf_is_full_main(conf):
+        raise RuntimeError(
+            f"nginx main config rewrite failed at {conf.as_posix()} — "
+            "expected events{{}} + http{{}} (LUCID_NGINX_MAIN_V2)"
+        )
+
     nginx = get_proxy_secret("NGINX_BIN") or shutil.which(
         get_proxy_secret("NGINX_BIN_NAME") or "nginx"
     )
     if not nginx:
-        # Host Bootstrap only needs the conf file written; nginx runs in the proxy image.
         return {
             "ok": True,
             "conf": conf.as_posix(),
             "nginx_bin": "",
             "deferred": True,
             "detail": (
-                "nginx binary not on host — configuration written for container use"
+                "nginx binary not on host — full main conf written for container / later install"
             ),
             "timestamp": utc_now(),
         }
+
+    # Validate standalone main file (does not replace running nginx.service config).
     test = _run([nginx, "-t", "-c", conf.as_posix()])
     ok = test.returncode == 0
     if not ok:
+        # Show first lines so stale-fragment errors are obvious after sync issues.
+        head = ""
+        try:
+            head = "\n".join(conf.read_text(encoding="utf-8").splitlines()[:12])
+        except OSError:
+            pass
         raise RuntimeError(
-            f"nginx configuration invalid: {test.stderr.strip() or test.stdout.strip()}"
+            f"nginx configuration invalid: {test.stderr.strip() or test.stdout.strip()}\n"
+            f"conf={conf.as_posix()}\n"
+            f"head=\n{head}"
         )
     return {
         "ok": ok,
         "conf": conf.as_posix(),
         "nginx_bin": nginx,
         "stderr": test.stderr.strip(),
+        "system_nginx_note": (
+            "host nginx.service (fixes.txt §18) left on its own config; "
+            "this file is validated for proxy use via nginx -t -c"
+        ),
         "timestamp": utc_now(),
     }
 

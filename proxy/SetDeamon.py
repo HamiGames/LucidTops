@@ -452,13 +452,14 @@ def build_nginx_reverse_proxy_config() -> Path:
         )
     deny_section = "".join(deny_blocks)
 
-    conf = f"""# LucidTops nginx reverse proxy - generated {utc_now()}
+    conf = f"""# LUCID_NGINX_MAIN_V2
+# LucidTops nginx reverse proxy - generated {utc_now()}
 # Docker Network: {docker_network}
 # Hardware IP/MAC (pulled): {hardware_ip} / {hardware_mac}
 # Selected: {selected}
 # None-linking blocked: {blocked}
 # Sensitive values: see proxy.secrets (not stored in this file)
-# Valid standalone main config for: nginx -t -c <this-file> / nginx -c <this-file>
+# fixes.txt §18: full main config for nginx -t -c / host nginx.service tooling
 
 worker_processes auto;
 error_log {error_log} warn;
