@@ -9,10 +9,14 @@
 #   cd /mnt/myssd/LucidTops
 #   BASE_IMAGE=python:3.11-slim-bookworm
 #   APT_PACKAGES=""
+#   # Name from Proxy Bootstrap output (records into image ENV; join network at run)
+#   DOCKER_NETWORK_NAME=$(grep -E '^DOCKER_NETWORK_NAME=' \
+#     /mnt/myssd/LucidTops/Server/Secrets/Master.secrets | head -1 | cut -d= -f2-)
 #   docker build --no-cache --platform linux/arm64 \
 #     -f /mnt/myssd/LucidTops/backend/Server.dockerfile \
 #     --build-arg BASE_IMAGE="${BASE_IMAGE}" \
 #     --build-arg APT_PACKAGES="${APT_PACKAGES}" \
+#     --build-arg DOCKER_NETWORK_NAME="${DOCKER_NETWORK_NAME}" \
 #     -t lucid-server-default:v1.0.0 \
 #     /mnt/myssd/LucidTops
 #
@@ -22,7 +26,9 @@
 #   Master.secrets from Proxy Bootstrap; server.secrets from builder at start
 #
 # Rebuild rule (§16.7): wipe image/volumes before rebuild.
-# Networks (§16.4): join at run via dockercmd.txt.
+# Networks (§16.4): DOCKER_NETWORK_NAME is set at build (ARG→ENV).
+#   Runtime join is still required:
+#     docker run --network "${DOCKER_NETWORK_NAME}" …
 
 # -----------------------------------------------------------------------------
 # Build-args (declared before FROM for BASE_IMAGE; re-declared after FROM for use)
@@ -40,6 +46,7 @@ ARG MASTER_SECRETS_FILE=/mnt/myssd/LucidTops/Server/Secrets/Master.secrets
 ARG SERVER_SECRETS_FILE=/mnt/myssd/LucidTops/Server/Secrets/server.secrets
 ARG BACKEND_SECRETS_LINK=/mnt/myssd/LucidTops/backend/secrets
 ARG BACKEND_CONFIGS_DIR=/mnt/myssd/LucidTops/backend/configs
+ARG DOCKER_NETWORK_NAME
 ARG RUN_BUILDER_ON_BUILD=false
 
 # -----------------------------------------------------------------------------
@@ -132,7 +139,15 @@ ENV MASTER_SECRETS_FILE=${MASTER_SECRETS_FILE}
 ENV SERVER_SECRETS_FILE=${SERVER_SECRETS_FILE}
 ENV BACKEND_SECRETS_LINK=${BACKEND_SECRETS_LINK}
 ENV BACKEND_CONFIGS_DIR=${BACKEND_CONFIGS_DIR}
+ENV DOCKER_NETWORK_NAME=${DOCKER_NETWORK_NAME}
 ENV RUN_BUILDER_ON_START=true
+
+# Require DOCKER_NETWORK_NAME at build (from Master.secrets / shell — does not join network)
+RUN set -eu; \
+    if [ -z "${DOCKER_NETWORK_NAME}" ]; then \
+      echo "DOCKER_NETWORK_NAME build-arg required — set from Master.secrets before build" >&2; \
+      exit 1; \
+    fi
 
 # Optional builder at build (default false — secrets on host / first start)
 RUN set -eu; \
