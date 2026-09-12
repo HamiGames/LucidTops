@@ -4,7 +4,8 @@ includes:
 - is a one-time operation at container create / first start (proxy.dockerfile or RunProxy).
 - pull_information(): pulls real-world hardware/runtime state (IP, MAC, hostname, Docker,
   listeners, binaries, LucidTops root) at time of operation (when this script runs).
-- starts / verifies Tor on the Creator's local hardware via SetDeamon.
+- starts / verifies Tor on the Creator's local hardware via SetDeamon
+  (systemd unit tor@default per fixes.txt §17 — not bare tor.service master).
 - adds / updates Torrc for Hidden Services from pull-created proxy.secrets.
 - creates proxy.secrets via buildsecrets from the hardware pull (not pre-filled placeholders).
 - writes generated *.onion addresses into proxy.secrets when Tor HS hostname files appear.

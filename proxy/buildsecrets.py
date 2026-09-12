@@ -79,6 +79,223 @@ def _which(name: str) -> str:
     return found or ""
 
 
+def _normalize_systemd_unit(name: str) -> str:
+    value = (name or "").strip()
+    if value.endswith(".service"):
+        value = value[: -len(".service")]
+    return value
+
+
+def _pull_socks_endpoint_from_torrc() -> tuple[str, str] | None:
+    """Read SocksPort from hardware Tor configs at time of operation."""
+    for conf in (
+        Path("/etc/tor/torrc"),
+        Path("/usr/share/tor/tor-service-defaults-torrc"),
+    ):
+        if not conf.is_file():
+            continue
+        try:
+            text = conf.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if not stripped.lower().startswith("socksport"):
+                continue
+            parts = stripped.split()
+            if len(parts) < 2:
+                continue
+            endpoint = parts[1]
+            if ":" in endpoint:
+                host, _, port_s = endpoint.rpartition(":")
+                host = host.strip("[]") or "127.0.0.1"
+            else:
+                host, port_s = "127.0.0.1", endpoint
+            try:
+                port = int(port_s)
+            except ValueError:
+                continue
+            if port > 0:
+                return (host, str(port))
+    return None
+
+
+def _pull_control_port_from_torrc() -> str | None:
+    """Read ControlPort from hardware Tor configs at time of operation."""
+    for conf in (
+        Path("/etc/tor/torrc"),
+        Path("/usr/share/tor/tor-service-defaults-torrc"),
+    ):
+        if not conf.is_file():
+            continue
+        try:
+            text = conf.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if not stripped.lower().startswith("controlport"):
+                continue
+            parts = stripped.split()
+            if len(parts) < 2:
+                continue
+            endpoint = parts[1]
+            port_s = endpoint.rsplit(":", 1)[-1]
+            try:
+                port = int(port_s)
+            except ValueError:
+                continue
+            if port > 0:
+                return str(port)
+    return None
+
+
+def _unit_is_tor_instance_master(systemctl_bin: str, unit: str) -> bool:
+    """True for bare tor.service multi-instance master (ExecStart=/bin/true)."""
+    normalized = _normalize_systemd_unit(unit)
+    if normalized.startswith("tor@"):
+        return False
+    if normalized != "tor":
+        return False
+    if not systemctl_bin:
+        # Bare "tor" without systemctl probe — treat as master (fixes.txt §17).
+        return True
+    show = _run(
+        [
+            systemctl_bin,
+            "show",
+            f"{normalized}.service",
+            "-p",
+            "FragmentPath",
+            "-p",
+            "LoadState",
+        ]
+    )
+    if show.returncode != 0:
+        return True
+    fragment = ""
+    for line in show.stdout.splitlines():
+        if line.startswith("FragmentPath="):
+            fragment = line.split("=", 1)[1].strip()
+    # Debian/Ubuntu ship tor.service as the template master; real work is tor@*.
+    if fragment and "tor@" not in fragment:
+        # Master unit file typically named tor.service alongside tor@.service
+        template = Path(fragment).with_name("tor@.service")
+        if template.is_file():
+            return True
+    return "LoadState=not-found" not in show.stdout and normalized == "tor"
+
+
+def _pull_tor_systemd_unit(
+    systemctl_bin: str | None, *, prior: dict[str, str] | None = None
+) -> str:
+    """
+    Discover the real Tor systemd unit at time of operation.
+
+    fixes.txt §17: use tor@default.service (running tor daemon), NOT bare tor.service
+    (multi-instance master that only runs /bin/true).
+    """
+    prior = prior or {}
+    candidates: list[str] = []
+
+    for raw in (
+        _env("TOR_SYSTEMD_UNIT"),
+        prior.get("TOR_SYSTEMD_UNIT", "").strip(),
+    ):
+        unit = _normalize_systemd_unit(raw)
+        if unit and unit not in candidates:
+            candidates.append(unit)
+
+    # Preferred Debian/Ubuntu instance (documented in fixes.txt §17).
+    if "tor@default" not in candidates:
+        candidates.append("tor@default")
+
+    if systemctl_bin:
+        listed = _run(
+            [
+                systemctl_bin,
+                "list-units",
+                "tor@*",
+                "--all",
+                "--no-legend",
+                "--plain",
+            ]
+        )
+        if listed.returncode == 0:
+            for line in listed.stdout.splitlines():
+                parts = line.split()
+                if not parts:
+                    continue
+                name = _normalize_systemd_unit(parts[0])
+                if name.startswith("tor@") and name not in candidates:
+                    # Prefer active instances earlier
+                    if "running" in line or "active" in line:
+                        candidates.insert(1, name)
+                    else:
+                        candidates.append(name)
+
+        files = _run(
+            [systemctl_bin, "list-unit-files", "tor@*", "--no-legend", "--plain"]
+        )
+        if files.returncode == 0:
+            for line in files.stdout.splitlines():
+                parts = line.split()
+                if not parts:
+                    continue
+                name = _normalize_systemd_unit(parts[0])
+                if name.startswith("tor@") and name not in candidates:
+                    candidates.append(name)
+
+    for unit in candidates:
+        if not unit:
+            continue
+        if systemctl_bin and _unit_is_tor_instance_master(systemctl_bin, unit):
+            continue
+        if systemctl_bin:
+            show = _run(
+                [
+                    systemctl_bin,
+                    "show",
+                    f"{unit}.service",
+                    "-p",
+                    "LoadState",
+                ]
+            )
+            if "LoadState=not-found" in show.stdout:
+                continue
+        if unit.startswith("tor@") or unit not in {"tor"}:
+            return unit
+
+    return "tor@default"
+
+
+def _pull_tor_socks_endpoint(
+    info: dict[str, Any], *, prior: dict[str, str] | None = None
+) -> tuple[str, str]:
+    """SOCKS host/port from live listen, torrc, prior secrets, or hardware Tor defaults."""
+    prior = prior or {}
+    listen = info.get("tor_listen")
+    if isinstance(listen, tuple) and len(listen) == 2:
+        host, port = listen
+        return ((host or "127.0.0.1"), str(port))
+
+    from_torrc = _pull_socks_endpoint_from_torrc()
+    if from_torrc:
+        return from_torrc
+
+    prior_host = prior.get("TOR_SOCKS_HOST", "").strip()
+    prior_port = prior.get("TOR_SOCKS_PORT", "").strip()
+    if prior_port:
+        return (prior_host or "127.0.0.1", prior_port)
+
+    # Debian tor@default default SocksPort observed on hardware (fixes.txt §17).
+    return ("127.0.0.1", "9050")
+
+
 def _allocate_ephemeral_port() -> int:
     """Ask the OS for a free TCP port at time of operation."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -515,6 +732,7 @@ def pull_realworld_information() -> dict[str, Any]:
     tor_listen = _first_listen(listening, "tor")
     nginx_listen = _first_listen(listening, "nginx")
     uvicorn_listen = _first_listen(listening, "uvicorn", "python")
+    tor_systemd_unit = _pull_tor_systemd_unit(systemctl_bin)
 
     pulled: dict[str, Any] = {
         "pulled_at": utc_now(),
@@ -535,6 +753,7 @@ def pull_realworld_information() -> dict[str, Any]:
         "tor_listen": tor_listen,
         "nginx_listen": nginx_listen,
         "uvicorn_listen": uvicorn_listen,
+        "tor_systemd_unit": tor_systemd_unit,
         "docker_networks": docker_state.get("networks", []),
         "docker_containers": docker_state.get("containers", {}),
         "lucid_tops_root": lucid_root.as_posix(),
@@ -867,18 +1086,17 @@ def build_proxy_secret_values(
     proxy_dns = _container_endpoint(containers, primary_ip, "proxy")
     mongodb_host = _container_endpoint(containers, primary_ip, "mongo", "mongodb")
 
-    tor_host, socks_port = _port_from_listen_or_allocate(
-        info.get("tor_listen"), prior_key="TOR_SOCKS_PORT", prior=prior
-    )
-    tor_socks_host = tor_host or primary_ip
-    _, control_port = _port_from_listen_or_allocate(
-        None, prior_key="TOR_CONTROL_PORT", prior=prior
-    )
+    tor_socks_host, socks_port = _pull_tor_socks_endpoint(info, prior=prior)
+    control_from_torrc = _pull_control_port_from_torrc()
     if prior.get("TOR_CONTROL_PORT", "").strip():
         control_port = prior["TOR_CONTROL_PORT"].strip()
-    elif info.get("tor_listen"):
-        # Second ephemeral distinct from socks when tor not yet exposing control in pull
-        control_port = str(_allocate_ephemeral_port())
+    elif control_from_torrc:
+        control_port = control_from_torrc
+    else:
+        # Distinct from SocksPort when ControlPort not declared in torrc yet.
+        control_port = str(int(socks_port) + 1) if socks_port.isdigit() else str(
+            _allocate_ephemeral_port()
+        )
 
     nginx_host, nginx_port = _port_from_listen_or_allocate(
         info.get("nginx_listen"), prior_key="PROXY_NGINX_LISTEN_PORT", prior=prior
@@ -984,8 +1202,21 @@ def build_proxy_secret_values(
     proxy_log_dir = LUCID_TOPS_ROOT / "logs" / "proxy"
     master_secrets = SECRETS_DIR / "Master.secrets"
 
-    tor_unit = Path(bins["tor"]).name if bins.get("tor") else ""
+    tor_unit = _pull_tor_systemd_unit(
+        bins.get("systemctl") or _which("systemctl"),
+        prior={
+            **prior,
+            "TOR_SYSTEMD_UNIT": str(
+                info.get("tor_systemd_unit") or prior.get("TOR_SYSTEMD_UNIT") or ""
+            ),
+        },
+    )
     nginx_unit = Path(bins["nginx"]).name if bins.get("nginx") else ""
+    if nginx_unit.endswith(".service"):
+        nginx_unit = nginx_unit[: -len(".service")]
+    # nginx binary name is the usual unit; keep stem without path noise
+    if nginx_unit and "/" not in nginx_unit:
+        nginx_unit = Path(nginx_unit).stem
 
     values: dict[str, str] = {
         "GENERATED_AT": utc_now(),

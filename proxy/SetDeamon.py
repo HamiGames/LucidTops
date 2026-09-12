@@ -185,10 +185,12 @@ def _forward_port_for_hs_key(hs_key: str, *, pull: dict[str, Any]) -> str:
 def apply_pull_to_daemon_configuration(pull: dict[str, Any] | None = None) -> dict[str, str]:
     """
     Create/refresh daemon-related proxy.secrets keys from real-world pull at operation.
+    Tor unit must be tor@default (fixes.txt §17), never bare tor multi-instance master.
     """
     info = pull if pull is not None else pull_information()
     build_and_write_proxy_secrets(overwrite_keys=False)
     load_proxy_secrets(reload=False)
+    prior = load_proxy_secrets(reload=False)
 
     primary_ip = str(info.get("primary_ip") or "").strip()
     primary_mac = str(info.get("primary_mac") or "").strip()
@@ -197,27 +199,35 @@ def apply_pull_to_daemon_configuration(pull: dict[str, Any] | None = None) -> di
             "pull_information failed — HARDWARE primary IP/MAC required for daemon setup"
         )
 
+    systemctl_bin = _pull_bin_from_hardware(info, "systemctl")
+    tor_bin = _pull_bin_from_hardware(info, "tor")
+    nginx_bin = _pull_bin_from_hardware(info, "nginx")
+    docker_bin = _pull_bin_from_hardware(info, "docker")
+
+    socks_host, socks_port = _buildsecrets._pull_tor_socks_endpoint(info, prior=prior)
+    tor_unit = str(info.get("tor_systemd_unit") or "").strip()
+    tor_unit = _buildsecrets._pull_tor_systemd_unit(
+        systemctl_bin or None,
+        prior={**prior, "TOR_SYSTEMD_UNIT": tor_unit or prior.get("TOR_SYSTEMD_UNIT", "")},
+    )
+
     updates: dict[str, str] = {
         "HARDWARE_PRIMARY_IP": primary_ip,
         "HARDWARE_PRIMARY_MAC": primary_mac,
         "HARDWARE_PRIMARY_IFACE": str(info.get("primary_iface") or ""),
         "HOSTNAME_CONSOLE": str(info.get("hostname") or ""),
         "TOR_HS_TARGET_HOST": primary_ip,
-        "TOR_SOCKS_HOST": primary_ip,
+        "TOR_SOCKS_HOST": socks_host,
+        "TOR_SOCKS_PORT": socks_port,
+        "TOR_SYSTEMD_UNIT": tor_unit,
         "PROXY_FASTAPI_UPSTREAM_HOST": primary_ip,
         "PROXY_FASTAPI_BIND_HOST": get_proxy_secret("PROXY_FASTAPI_BIND_HOST")
         or primary_ip,
     }
 
-    tor_bin = _pull_bin_from_hardware(info, "tor")
-    nginx_bin = _pull_bin_from_hardware(info, "nginx")
-    systemctl_bin = _pull_bin_from_hardware(info, "systemctl")
-    docker_bin = _pull_bin_from_hardware(info, "docker")
-
     if tor_bin:
         updates["TOR_BIN"] = tor_bin
         updates["TOR_BIN_NAME"] = Path(tor_bin).name
-        updates["TOR_SYSTEMD_UNIT"] = Path(tor_bin).stem
     if nginx_bin:
         updates["NGINX_BIN"] = nginx_bin
         updates["NGINX_BIN_NAME"] = Path(nginx_bin).name
@@ -232,8 +242,7 @@ def apply_pull_to_daemon_configuration(pull: dict[str, Any] | None = None) -> di
     tor_listen = info.get("tor_listen")
     if isinstance(tor_listen, tuple) and len(tor_listen) == 2:
         listen_host, listen_port = tor_listen
-        if listen_host:
-            updates["TOR_SOCKS_HOST"] = str(listen_host)
+        updates["TOR_SOCKS_HOST"] = str(listen_host or "127.0.0.1")
         if listen_port:
             updates["TOR_SOCKS_PORT"] = str(listen_port)
 
@@ -540,52 +549,78 @@ def build_torrc_hidden_service_snippet() -> Path:
     return snippet_path
 
 
+def _resolve_tor_unit() -> str:
+    """Return tor@default (or pulled instance), never bare tor master (fixes.txt §17)."""
+    systemctl = _systemctl_bin()
+    prior_unit = _optional("TOR_SYSTEMD_UNIT")
+    unit = _buildsecrets._pull_tor_systemd_unit(
+        systemctl, prior={"TOR_SYSTEMD_UNIT": prior_unit}
+    )
+    if unit != prior_unit:
+        _merge_proxy_secrets({"TOR_SYSTEMD_UNIT": unit})
+    return unit
+
+
+def _probe_tcp(host: str, port: int, timeout: float) -> tuple[bool, str]:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True, "connected"
+    except OSError as exc:
+        return False, str(exc)
+
+
 def verify_tor_call() -> dict[str, Any]:
     """
     Call Tor test: probe SOCKS/control using pulled TOR_SOCKS_HOST/ports.
-    Starts hardware Tor unit via systemctl when SOCKS is down.
+    Starts tor@default (not bare tor.service) when SOCKS is down — fixes.txt §17.
     """
+    import time
+
     if not get_proxy_secret("TOR_SOCKS_HOST"):
         _ensure_operational_secrets()
+
+    # Refresh SOCKS from live hardware / torrc so LAN IP is not used when Tor is localhost.
+    pull = pull_information()
+    prior = load_proxy_secrets(reload=False)
+    socks_host, socks_port_s = _buildsecrets._pull_tor_socks_endpoint(pull, prior=prior)
+    _merge_proxy_secrets(
+        {
+            "TOR_SOCKS_HOST": socks_host,
+            "TOR_SOCKS_PORT": socks_port_s,
+            "TOR_SYSTEMD_UNIT": _resolve_tor_unit(),
+        }
+    )
+
     host = _require("TOR_SOCKS_HOST")
     socks_port = int(_require("TOR_SOCKS_PORT"))
     control_port = int(_require("TOR_CONTROL_PORT"))
-    tor_unit = _optional("TOR_SYSTEMD_UNIT")
+    tor_unit = _resolve_tor_unit()
     timeout = float(_require("PROXY_TOR_VERIFY_TIMEOUT"))
 
-    socks_ok = False
-    socks_detail = ""
-    try:
-        with socket.create_connection((host, socks_port), timeout=timeout):
-            socks_ok = True
-            socks_detail = "connected"
-    except OSError as exc:
-        socks_detail = str(exc)
+    socks_ok, socks_detail = _probe_tcp(host, socks_port, timeout)
+    control_ok, control_detail = _probe_tcp(host, control_port, timeout)
 
-    control_ok = False
-    control_detail = ""
-    try:
-        with socket.create_connection((host, control_port), timeout=timeout):
-            control_ok = True
-            control_detail = "connected"
-    except OSError as exc:
-        control_detail = str(exc)
-
-    daemon_status: dict[str, Any] = {}
+    daemon_status: dict[str, Any] = {"unit": tor_unit}
     if tor_unit:
-        daemon_status = status_daemon(tor_unit)
-        if not socks_ok and not daemon_status.get("active"):
+        daemon_status["status"] = status_daemon(tor_unit)
+        if not socks_ok:
             start_result = start_daemon(tor_unit)
-            daemon_status = {
-                "start": start_result,
-                "status": status_daemon(tor_unit),
-            }
-            try:
-                with socket.create_connection((host, socks_port), timeout=timeout):
+            daemon_status["start"] = start_result
+            # Allow tor@default a moment to bind SocksPort after start.
+            time.sleep(min(3.0, max(0.5, timeout)))
+            daemon_status["status"] = status_daemon(tor_unit)
+            socks_ok, socks_detail = _probe_tcp(host, socks_port, timeout)
+            if not socks_ok and host not in {"127.0.0.1", "localhost"}:
+                # Hardware Tor (Debian) listens on 127.0.0.1:9050 — retry localhost.
+                alt_ok, alt_detail = _probe_tcp("127.0.0.1", socks_port, timeout)
+                if alt_ok:
                     socks_ok = True
-                    socks_detail = "connected_after_start"
-            except OSError as exc:
-                socks_detail = str(exc)
+                    socks_detail = f"connected_via_127.0.0.1 ({alt_detail})"
+                    host = "127.0.0.1"
+                    _merge_proxy_secrets({"TOR_SOCKS_HOST": host})
+            if socks_ok:
+                socks_detail = socks_detail or "connected_after_start"
+            control_ok, control_detail = _probe_tcp(host, control_port, timeout)
 
     return {
         "ok": socks_ok,
@@ -619,9 +654,15 @@ def start_daemon(unit: str) -> dict[str, Any]:
             "ok": False,
             "detail": "systemctl binary not found on hardware after pull_information",
         }
-    result = _run([systemctl, "start", unit])
+    normalized = _buildsecrets._normalize_systemd_unit(unit)
+    # Upgrade bare "tor" master to tor@default (fixes.txt §17).
+    if normalized == "tor" or (
+        systemctl and _buildsecrets._unit_is_tor_instance_master(systemctl, normalized)
+    ):
+        normalized = _resolve_tor_unit()
+    result = _run([systemctl, "start", normalized])
     return {
-        "unit": unit,
+        "unit": normalized,
         "ok": result.returncode == 0,
         "stdout": result.stdout.strip(),
         "stderr": result.stderr.strip(),
