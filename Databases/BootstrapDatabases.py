@@ -2,7 +2,8 @@
 
 includes:
 - pull_realworld_information(): hardware IP, MAC, mounts, Docker state
-- write databases.secrets / mongodb.secrets from the pull
+- seed DockerDNS / network / master / Tor from Server/Secrets/Master.secrets + proxy.secrets
+- write databases.secrets / mongodb.secrets from seed + pull
 - generate compose for six separate containers (Tor vs non-Tor networks)
 - start containers, apply DBSchemas, verify, mark secrets verified
 - configure ledger replica metadata (LucidTops_LedgerDB -> LucidTopsBlockchain_LedgerDB)
@@ -56,6 +57,10 @@ utc_now = _pull.utc_now
 _run = _pull._run
 _which = _pull._which
 _env = _pull._env
+master_secrets_path = _pull.master_secrets_path
+proxy_secrets_path = _pull.proxy_secrets_path
+load_master_and_proxy_seed = _pull.load_master_and_proxy_seed
+resolve_lucid_tops_root = _pull.resolve_lucid_tops_root
 
 write_databases_secrets = _secrets.write_databases_secrets
 mark_databases_verified = _secrets.mark_databases_verified
@@ -67,6 +72,26 @@ secret_key_prefix = _dns.secret_key_prefix
 
 apply_schema_to_database = _schemas.apply_schema_to_database
 write_databases_compose = _compose.write_databases_compose
+
+
+def _require_proxy_bootstrap_seed(pull: dict[str, Any]) -> dict[str, str]:
+    """Fail closed unless Proxy Bootstrap Master/proxy secrets are present."""
+    lucid_root = resolve_lucid_tops_root(pull)
+    master_path = master_secrets_path(lucid_root)
+    proxy_path = proxy_secrets_path(lucid_root)
+    if not master_path.is_file() and not proxy_path.is_file():
+        raise RuntimeError(
+            "Proxy Bootstrap seed missing — expected Master.secrets and/or proxy.secrets under "
+            f"{lucid_root.as_posix()}/Server/Secrets "
+            f"(checked: {master_path.as_posix()}, {proxy_path.as_posix()})"
+        )
+    seed = load_master_and_proxy_seed(lucid_root)
+    if not seed.get("DOCKER_NETWORK_NAME", "").strip():
+        raise RuntimeError(
+            "DOCKER_NETWORK_NAME missing from Server/Secrets/Master.secrets "
+            "(or proxy.secrets) — run Proxy/Bootstrap.py before Databases"
+        )
+    return seed
 
 
 def _ensure_data_dirs(databases_dir: Path) -> list[str]:
@@ -101,11 +126,23 @@ def _compose_command(docker_bin: str, compose_file: Path) -> list[str]:
 
 
 def _ensure_networks(docker_bin: str, values: dict[str, str]) -> list[str]:
+    """Ensure Proxy LucidDNS network + tor/nontor DB networks exist (create if missing)."""
     created: list[str] = []
-    for key in ("DOCKER_NETWORK_TOR_DB", "DOCKER_NETWORK_NONTOR_DB"):
+    names: list[str] = []
+    for key in (
+        "DOCKER_NETWORK_NAME",
+        "DOCKER_NETWORK_TOR_DB",
+        "DOCKER_NETWORK_NONTOR_DB",
+    ):
         name = values.get(key, "").strip()
-        if not name:
-            raise RuntimeError(f"{key} missing in secrets — must be set at time of operation")
+        if name and name not in names:
+            names.append(name)
+    if not names:
+        raise RuntimeError(
+            "no Docker network names in secrets — DOCKER_NETWORK_NAME must come from "
+            "Master.secrets/proxy.secrets"
+        )
+    for name in names:
         inspect = _run([docker_bin, "network", "inspect", name])
         if inspect.returncode != 0:
             result = _run([docker_bin, "network", "create", "--driver", "bridge", name])
@@ -233,22 +270,32 @@ def _apply_all_schemas(values: dict[str, str]) -> list[dict[str, Any]]:
 def bootstrap_databases(*, force: bool = False) -> dict[str, Any]:
     """
     One-shot bootstrap at time of operation:
-    pull → dirs → secrets → networks → compose → up → schemas → verify.
+    require Master/proxy seed → pull → dirs → secrets → networks → compose → up → schemas → verify.
     """
     pull = pull_realworld_information()
     bind_operation_environ(pull)
+    seed = _require_proxy_bootstrap_seed(pull)
 
-    # Require image/port/data-path from env at operation time before writing secrets.
-    if not _env("MONGODB_IMAGE") and not str(pull.get("mongodb_image") or "").strip():
+    # Require image/port/data-path from env/seed at operation time before writing secrets.
+    if (
+        not _env("MONGODB_IMAGE")
+        and not str(pull.get("mongodb_image") or "").strip()
+        and not seed.get("MONGODB_IMAGE", "").strip()
+    ):
         raise RuntimeError("MONGODB_IMAGE must be set at time of operation")
-    if not _env("MONGODB_CONTAINER_PORT") and not str(
-        pull.get("mongodb_container_port") or ""
-    ).strip():
+    if (
+        not _env("MONGODB_CONTAINER_PORT")
+        and not str(pull.get("mongodb_container_port") or "").strip()
+        and not seed.get("MONGODB_CONTAINER_PORT", "").strip()
+        and not seed.get("MONGODB_PORT", "").strip()
+    ):
         raise RuntimeError(
             "MONGODB_CONTAINER_PORT must be set at time of operation "
             "(or mongod must be listening so pull can capture it)"
         )
-    if not _env("MONGODB_DATA_PATH_IN_CONTAINER"):
+    if not _env("MONGODB_DATA_PATH_IN_CONTAINER") and not seed.get(
+        "MONGODB_DATA_PATH_IN_CONTAINER", ""
+    ).strip():
         raise RuntimeError(
             "MONGODB_DATA_PATH_IN_CONTAINER must be set at time of operation"
         )
@@ -283,6 +330,9 @@ def bootstrap_databases(*, force: bool = False) -> dict[str, Any]:
         "health": health,
         "schemas": schema_results,
         "verified": True,
+        "master_secrets_file": values.get("MASTER_SECRETS_FILE", ""),
+        "proxy_secrets_file": values.get("PROXY_SECRETS_FILE", ""),
+        "docker_network_name": values.get("DOCKER_NETWORK_NAME", ""),
         "status": databases_secrets_status(),
     }
 
@@ -294,6 +344,9 @@ def main() -> int:
     print(f"databases_secrets={result['databases_secrets']}")
     print(f"mongodb_secrets={result['mongodb_secrets']}")
     print(f"compose_file={result['compose_file']}")
+    print(f"master_secrets_file={result.get('master_secrets_file', '')}")
+    print(f"proxy_secrets_file={result.get('proxy_secrets_file', '')}")
+    print(f"docker_network_name={result.get('docker_network_name', '')}")
     print(f"verified={result['verified']}")
     for name, status in (result.get("health") or {}).items():
         print(f"container {name}={status}")

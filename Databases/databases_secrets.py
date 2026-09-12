@@ -1,5 +1,13 @@
 """Load and write LucidTops databases.secrets / mongodb.secrets at time of operation.
 
+Seed sources (Proxy Bootstrap → Server/Secrets, read-only):
+- /mnt/myssd/LucidTops/Server/Secrets/Master.secrets
+- /mnt/myssd/LucidTops/Server/Secrets/proxy.secrets (also Proxy.secrets)
+
+Write target:
+- /mnt/myssd/LucidTops/Databases/secrets/databases.secrets
+- /mnt/myssd/LucidTops/Databases/secrets/mongodb.secrets
+
 RULES of CODE CREATION:
 - No hardcoded values, all values are created at time of operation.
 - No placeholder values, all values are created at time of operation.
@@ -24,6 +32,13 @@ from Dns_databases import (
     secret_key_prefix,
     tor_db_containers,
     nontor_db_containers,
+)
+from pull_information import (
+    load_master_and_proxy_seed,
+    map_seed_to_databases_keys,
+    master_secrets_path,
+    proxy_secrets_path,
+    resolve_lucid_tops_root,
 )
 
 DATABASES_SECRETS_FILE_ENV = "DATABASES_SECRETS_FILE"
@@ -63,6 +78,7 @@ SHARED_OPERATION_KEYS: tuple[str, ...] = (
     "MONGODB_IMAGE",
     "MONGODB_CONTAINER_PORT",
     "MONGODB_DATA_PATH_IN_CONTAINER",
+    "DOCKER_NETWORK_NAME",
     "DOCKER_NETWORK_TOR_DB",
     "DOCKER_NETWORK_NONTOR_DB",
     "MONGODB_ADMIN_USER",
@@ -93,7 +109,16 @@ def utc_now() -> str:
 def secrets_dir() -> Path:
     configured = _env(SECRETS_DIR_ENV)
     if configured:
-        return Path(configured).expanduser()
+        path = Path(configured).expanduser()
+        parts_lower = {part.lower() for part in path.parts}
+        if "server" in parts_lower and path.name.lower() == "secrets":
+            root = _env(LUCID_TOPS_ROOT_ENV)
+            if not root:
+                raise RuntimeError(
+                    f"{LUCID_TOPS_ROOT_ENV} missing — required when SECRETS_DIR points at Server/Secrets"
+                )
+            return Path(root).expanduser() / "Databases" / "secrets"
+        return path
     root = _env(LUCID_TOPS_ROOT_ENV)
     if not root:
         raise RuntimeError(
@@ -124,12 +149,40 @@ def parse_secrets_file(path: Path) -> dict[str, str]:
     return values
 
 
+def _seed_prior_from_master_and_proxy(
+    lucid_root: Path, prior: dict[str, str]
+) -> dict[str, str]:
+    """
+    Seed databases.secrets from Server/Secrets/Master.secrets + proxy.secrets.
+
+    Precedence for non-empty values: existing databases.secrets (prior) > Master > proxy.
+    """
+    seed = map_seed_to_databases_keys(load_master_and_proxy_seed(lucid_root))
+    if not seed:
+        raise RuntimeError(
+            "Master.secrets / proxy.secrets empty or missing under "
+            f"{lucid_root.as_posix()}/Server/Secrets — run Proxy/Bootstrap.py first"
+        )
+    if not seed.get("DOCKER_NETWORK_NAME", "").strip():
+        raise RuntimeError(
+            "DOCKER_NETWORK_NAME missing from Server/Secrets/Master.secrets "
+            "(or proxy.secrets) — run Proxy/Bootstrap.py before Databases"
+        )
+    merged = dict(seed)
+    for key, value in prior.items():
+        if value:
+            merged[key] = value
+    merged.setdefault("MASTER_SECRETS_FILE", master_secrets_path(lucid_root).as_posix())
+    merged.setdefault("PROXY_SECRETS_FILE", proxy_secrets_path(lucid_root).as_posix())
+    return merged
+
+
 def write_secrets_file(path: Path, values: dict[str, str], *, header: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
         header,
         f"# Generated: {utc_now()}",
-        "# key=value — values pulled/created at time of operation",
+        "# key=value — values seeded from Master/proxy + pulled/created at time of operation",
         "",
     ]
     for key in sorted(values):
@@ -209,23 +262,31 @@ def _generate_password() -> str:
     return secrets.token_urlsafe(32)
 
 
-def _resolve_mongodb_image(pull: dict[str, Any]) -> str:
-    image = _env("MONGODB_IMAGE") or str(pull.get("mongodb_image") or "").strip()
+def _resolve_mongodb_image(pull: dict[str, Any], existing: dict[str, str]) -> str:
+    image = (
+        _env("MONGODB_IMAGE")
+        or existing.get("MONGODB_IMAGE", "")
+        or str(pull.get("mongodb_image") or "").strip()
+    )
     if not image:
         raise RuntimeError(
-            "MONGODB_IMAGE missing — must be set at time of operation (env or pull)"
+            "MONGODB_IMAGE missing — must be set at time of operation "
+            "(env, Master/proxy seed, or pull)"
         )
     return image
 
 
-def _resolve_container_port(pull: dict[str, Any]) -> str:
-    port = _env("MONGODB_CONTAINER_PORT") or str(
-        pull.get("mongodb_container_port") or ""
-    ).strip()
+def _resolve_container_port(pull: dict[str, Any], existing: dict[str, str]) -> str:
+    port = (
+        _env("MONGODB_CONTAINER_PORT")
+        or existing.get("MONGODB_CONTAINER_PORT", "")
+        or existing.get("MONGODB_PORT", "")
+        or str(pull.get("mongodb_container_port") or "").strip()
+    )
     if not port:
         raise RuntimeError(
             "MONGODB_CONTAINER_PORT missing — must be set at time of operation "
-            "(env, mongo listener pull, or secrets)"
+            "(env, Master/proxy seed, mongo listener pull, or secrets)"
         )
     try:
         int(port)
@@ -234,8 +295,10 @@ def _resolve_container_port(pull: dict[str, Any]) -> str:
     return port
 
 
-def _resolve_data_path_in_container() -> str:
-    path = _env("MONGODB_DATA_PATH_IN_CONTAINER")
+def _resolve_data_path_in_container(existing: dict[str, str]) -> str:
+    path = _env("MONGODB_DATA_PATH_IN_CONTAINER") or existing.get(
+        "MONGODB_DATA_PATH_IN_CONTAINER", ""
+    )
     if not path:
         raise RuntimeError(
             "MONGODB_DATA_PATH_IN_CONTAINER missing — must be set at time of operation"
@@ -261,8 +324,15 @@ def _merge_existing(path: Path, built: dict[str, str], *, force: bool) -> dict[s
             "HOST_HOSTNAME",
             "MONGODB_DATA_MOUNT",
             "LUCID_DATABASES_DIR",
+            "DOCKER_NETWORK_NAME",
             "DOCKER_NETWORK_TOR_DB",
             "DOCKER_NETWORK_NONTOR_DB",
+            "MASTER_SERVER_INTERNAL_HOST",
+            "MASTER_SERVER_INTERNAL_PORT",
+            "MASTER_SECRETS_FILE",
+            "PROXY_SECRETS_FILE",
+            "TOR_SOCKS_HOST",
+            "TOR_SOCKS_PORT",
         }:
             merged[key] = value
     return merged
@@ -273,12 +343,14 @@ def build_databases_secrets_values(
     *,
     force: bool = False,
 ) -> dict[str, str]:
-    """Build databases.secrets values from hardware pull + generated credentials."""
+    """Build databases.secrets from Master/proxy seed + hardware pull + credentials."""
+    lucid_root = resolve_lucid_tops_root(pull)
     databases_dir = Path(str(pull["databases_dir"]))
     secrets_path = databases_secrets_path()
     mongo_path = mongodb_secrets_path()
 
-    existing = parse_secrets_file(secrets_path) if secrets_path.exists() and not force else {}
+    prior = parse_secrets_file(secrets_path) if secrets_path.exists() and not force else {}
+    existing = _seed_prior_from_master_and_proxy(lucid_root, prior)
 
     admin_user = _env("MONGODB_ADMIN_USER") or existing.get("MONGODB_ADMIN_USER", "")
     if not admin_user:
@@ -294,18 +366,39 @@ def build_databases_secrets_values(
         or _generate_password()
     )
 
-    container_port = _resolve_container_port(pull)
-    data_in_container = _resolve_data_path_in_container()
-    image = _resolve_mongodb_image(pull)
+    container_port = _resolve_container_port(pull, existing)
+    data_in_container = _resolve_data_path_in_container(existing)
+    image = _resolve_mongodb_image(pull, existing)
 
-    tor_net = str(pull["docker_network_tor_db"])
-    nontor_net = str(pull["docker_network_nontor_db"])
+    network_name = (
+        _env("DOCKER_NETWORK_NAME")
+        or existing.get("DOCKER_NETWORK_NAME", "")
+        or str(pull.get("docker_network_name") or "")
+    )
+    if not network_name:
+        raise RuntimeError(
+            "DOCKER_NETWORK_NAME missing — must be seeded from Master.secrets/proxy.secrets"
+        )
+
+    tor_net = (
+        _env("DOCKER_NETWORK_TOR_DB")
+        or existing.get("DOCKER_NETWORK_TOR_DB", "")
+        or str(pull.get("docker_network_tor_db") or "")
+        or network_name
+    )
+    nontor_net = (
+        _env("DOCKER_NETWORK_NONTOR_DB")
+        or existing.get("DOCKER_NETWORK_NONTOR_DB", "")
+        or str(pull.get("docker_network_nontor_db") or "")
+        or network_name
+    )
     compose_file = Path(str(pull["compose_dir"])) / "databases.compose.yml"
 
     values: dict[str, str] = {
         "MONGODB_IMAGE": image,
         "MONGODB_CONTAINER_PORT": container_port,
         "MONGODB_DATA_PATH_IN_CONTAINER": data_in_container,
+        "DOCKER_NETWORK_NAME": network_name,
         "DOCKER_NETWORK_TOR_DB": tor_net,
         "DOCKER_NETWORK_NONTOR_DB": nontor_net,
         "MONGODB_ADMIN_USER": admin_user,
@@ -321,6 +414,12 @@ def build_databases_secrets_values(
         "MONGODB_DATA_MOUNT": databases_dir.as_posix(),
         "LUCID_DATABASES_DIR": databases_dir.as_posix(),
         "MONGODB_SECRETS_FILE": mongo_path.as_posix(),
+        "MASTER_SECRETS_FILE": existing.get("MASTER_SECRETS_FILE", "")
+        or master_secrets_path(lucid_root).as_posix(),
+        "PROXY_SECRETS_FILE": existing.get("PROXY_SECRETS_FILE", "")
+        or proxy_secrets_path(lucid_root).as_posix(),
+        "SECRETS_DIR": secrets_dir().as_posix(),
+        "LUCID_TOPS_ROOT": lucid_root.as_posix(),
     }
 
     for db_name in ALL_NAMED_DB_CONTAINERS:
@@ -353,18 +452,48 @@ def build_databases_secrets_values(
 
     master_host = (
         _env("MASTER_SERVER_INTERNAL_HOST")
-        or str(pull.get("proxy_backend_dns") or "")
         or existing.get("MASTER_SERVER_INTERNAL_HOST", "")
+        or existing.get("PROXY_BACKEND_DNS", "")
+        or str(pull.get("proxy_backend_dns") or "")
     )
     master_port = (
         _env("MASTER_SERVER_INTERNAL_PORT")
-        or str(pull.get("master_server_port") or "")
         or existing.get("MASTER_SERVER_INTERNAL_PORT", "")
+        or existing.get("MASTER_SERVER_PORT", "")
+        or str(pull.get("master_server_port") or "")
     )
-    if master_host:
-        values["MASTER_SERVER_INTERNAL_HOST"] = master_host
-    if master_port:
-        values["MASTER_SERVER_INTERNAL_PORT"] = master_port
+    if not master_host:
+        raise RuntimeError(
+            "MASTER_SERVER_INTERNAL_HOST / PROXY_BACKEND_DNS missing — "
+            "must be seeded from Master.secrets/proxy.secrets"
+        )
+    if not master_port:
+        raise RuntimeError(
+            "MASTER_SERVER_INTERNAL_PORT / MASTER_SERVER_PORT missing — "
+            "must be seeded from Master.secrets/proxy.secrets"
+        )
+    values["MASTER_SERVER_INTERNAL_HOST"] = master_host
+    values["MASTER_SERVER_INTERNAL_PORT"] = master_port
+    values["PROXY_BACKEND_DNS"] = (
+        _env("PROXY_BACKEND_DNS")
+        or existing.get("PROXY_BACKEND_DNS", "")
+        or master_host
+    )
+
+    for carry_key in (
+        "TOR_SOCKS_HOST",
+        "TOR_SOCKS_PORT",
+        "TOR_SOCKS_USERNAME",
+        "TOR_SOCKS_PASSWORD",
+        "DOCKER_NETWORK_NAMES",
+        "MASTER_SERVER_PORT",
+        "MASTER_SERVER_ONION",
+        "MONGODB_URL",
+        "MONGODB_MAIN_DATABASE_NAME",
+    ):
+        value = _env(carry_key) or existing.get(carry_key, "")
+        if value:
+            values[carry_key] = value
 
     return _merge_existing(secrets_path, values, force=force)
 
@@ -387,19 +516,32 @@ def build_mongodb_secrets_values(
         "MONGODB_ADMIN_PASSWORD": databases_values.get("MONGODB_ADMIN_PASSWORD", ""),
         "MONGODB_DATA_MOUNT": databases_values.get("MONGODB_DATA_MOUNT", ""),
         "MONGODB_IMAGE": databases_values.get("MONGODB_IMAGE", ""),
+        "DOCKER_NETWORK_NAME": databases_values.get("DOCKER_NETWORK_NAME", ""),
         "DOCKER_NETWORK_TOR_DB": databases_values.get("DOCKER_NETWORK_TOR_DB", ""),
         "DOCKER_NETWORK_NONTOR_DB": databases_values.get("DOCKER_NETWORK_NONTOR_DB", ""),
         "LEDGER_REPLICA_SOURCE": databases_values.get("LEDGER_REPLICA_SOURCE", ""),
         "LEDGER_REPLICA_TARGET": databases_values.get("LEDGER_REPLICA_TARGET", ""),
+        "MASTER_SECRETS_FILE": databases_values.get("MASTER_SECRETS_FILE", ""),
+        "PROXY_SECRETS_FILE": databases_values.get("PROXY_SECRETS_FILE", ""),
     }
-    socks_host = _env("TOR_SOCKS_HOST")
-    socks_port = _env("TOR_SOCKS_PORT")
+    socks_host = (
+        _env("TOR_SOCKS_HOST") or databases_values.get("TOR_SOCKS_HOST", "")
+    )
+    socks_port = (
+        _env("TOR_SOCKS_PORT") or databases_values.get("TOR_SOCKS_PORT", "")
+    )
     if socks_host and socks_port:
         values["TOR_SOCKS_HOST"] = socks_host
         values["TOR_SOCKS_PORT"] = socks_port
         values["MONGODB_VIA_SOCKS5"] = _env("MONGODB_VIA_SOCKS5") or "true"
-    socks_user = _env("TOR_SOCKS_USERNAME") or _env("TOR_SOCKS_USER")
-    socks_pass = _env("TOR_SOCKS_PASSWORD")
+    socks_user = (
+        _env("TOR_SOCKS_USERNAME")
+        or _env("TOR_SOCKS_USER")
+        or databases_values.get("TOR_SOCKS_USERNAME", "")
+    )
+    socks_pass = _env("TOR_SOCKS_PASSWORD") or databases_values.get(
+        "TOR_SOCKS_PASSWORD", ""
+    )
     if socks_user:
         values["TOR_SOCKS_USERNAME"] = socks_user
     if socks_pass:
@@ -434,7 +576,7 @@ def write_databases_secrets(
     db_path = write_secrets_file(
         databases_secrets_path(),
         values,
-        header="# LucidTops databases.secrets - written at time of operation",
+        header="# LucidTops databases.secrets - seeded from Master/proxy + operation pull",
     )
     mongo_values = build_mongodb_secrets_values(values, verified=verified)
     mongo_path = write_secrets_file(
@@ -456,7 +598,7 @@ def mark_databases_verified(values: dict[str, str]) -> tuple[Path, Path]:
     db_path = write_secrets_file(
         databases_secrets_path(),
         values,
-        header="# LucidTops databases.secrets - written at time of operation",
+        header="# LucidTops databases.secrets - seeded from Master/proxy + operation pull",
     )
     mongo_values = build_mongodb_secrets_values(values, verified=True)
     mongo_path = write_secrets_file(
@@ -481,4 +623,7 @@ def databases_secrets_status() -> dict[str, Any]:
         "nontor_db_containers": list(nontor_db_containers()),
         "compose_file": loaded.get("DATABASES_COMPOSE_FILE", ""),
         "data_mount": loaded.get("MONGODB_DATA_MOUNT", ""),
+        "master_secrets_file": loaded.get("MASTER_SECRETS_FILE", ""),
+        "proxy_secrets_file": loaded.get("PROXY_SECRETS_FILE", ""),
+        "docker_network_name": loaded.get("DOCKER_NETWORK_NAME", ""),
     }

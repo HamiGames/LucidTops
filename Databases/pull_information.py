@@ -4,6 +4,14 @@ At time of operation = when this script/module is run.
 Values (IP, MAC, hostname, mounts, DockerDNS, listeners) MUST come from live hardware —
 never placeholders, never git, never baked image defaults.
 
+Seed sources (Proxy Bootstrap → Server/Secrets, read-only for Databases):
+- /mnt/myssd/LucidTops/Server/Secrets/Master.secrets
+- /mnt/myssd/LucidTops/Server/Secrets/proxy.secrets (also Proxy.secrets)
+
+Write target (Databases container secrets):
+- /mnt/myssd/LucidTops/Databases/secrets/databases.secrets
+- /mnt/myssd/LucidTops/Databases/secrets/mongodb.secrets
+
 RULES of CODE CREATION:
 - No hardcoded values, all values are created at time of operation.
 - No placeholder values, all values are created at time of operation.
@@ -47,6 +55,195 @@ def require_env(key: str) -> str:
             f"{key} missing — must be set at time of operation from hardware pull or secrets"
         )
     return value
+
+
+def _parse_secrets_file(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not path.exists():
+        return values
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return values
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, _, value = stripped.partition("=")
+        key = key.strip().upper()
+        if key:
+            values[key] = value.strip()
+    return values
+
+
+def resolve_lucid_tops_root(info: dict[str, Any] | None = None) -> Path:
+    raw = ""
+    if info is not None:
+        raw = str(info.get("lucid_tops_root") or "").strip()
+    raw = raw or _env("LUCID_TOPS_ROOT")
+    if not raw:
+        raise RuntimeError(
+            "LUCID_TOPS_ROOT missing — must be set at time of operation "
+            "(expected /mnt/myssd/LucidTops)"
+        )
+    return Path(raw).expanduser().resolve()
+
+
+def server_secrets_dir(lucid_root: Path | None = None) -> Path:
+    """Canonical Server/Secrets path (Master.secrets + proxy.secrets)."""
+    override = _env("MASTER_SECRETS_DIR") or _env("SERVER_SECRETS_DIR")
+    if override:
+        return Path(override).expanduser().resolve()
+    root = lucid_root if lucid_root is not None else resolve_lucid_tops_root()
+    return (root / "Server" / "Secrets").resolve()
+
+
+def master_secrets_path(lucid_root: Path | None = None) -> Path:
+    override = _env("MASTER_SECRETS_FILE")
+    if override:
+        return Path(override).expanduser().resolve()
+    directory = server_secrets_dir(lucid_root)
+    for name in ("Master.secrets", "master.secrets"):
+        candidate = directory / name
+        if candidate.is_file():
+            return candidate.resolve()
+    return (directory / "Master.secrets").resolve()
+
+
+def proxy_secrets_path(lucid_root: Path | None = None) -> Path:
+    override = _env("PROXY_SECRETS_FILE")
+    if override:
+        return Path(override).expanduser().resolve()
+    directory = server_secrets_dir(lucid_root)
+    for name in ("proxy.secrets", "Proxy.secrets"):
+        candidate = directory / name
+        if candidate.is_file():
+            return candidate.resolve()
+    return (directory / "proxy.secrets").resolve()
+
+
+def databases_write_secrets_dir(lucid_root: Path | None = None) -> Path:
+    """Databases write target — never Server/Secrets."""
+    root = lucid_root if lucid_root is not None else resolve_lucid_tops_root()
+    override = _env("SECRETS_DIR")
+    if override:
+        path = Path(override).expanduser().resolve()
+        parts_lower = {part.lower() for part in path.parts}
+        if "server" in parts_lower and path.name.lower() == "secrets":
+            return (root / "Databases" / "secrets").resolve()
+        return path
+    return (root / "Databases" / "secrets").resolve()
+
+
+def load_master_and_proxy_seed(lucid_root: Path | None = None) -> dict[str, str]:
+    """
+    Load DockerDNS / network / master / Tor facts from Server/Secrets.
+
+    Master.secrets is the Proxy-synced canonical set; proxy.secrets fills gaps.
+    """
+    root = lucid_root if lucid_root is not None else resolve_lucid_tops_root()
+    proxy_loaded = _parse_secrets_file(proxy_secrets_path(root))
+    master_loaded = _parse_secrets_file(master_secrets_path(root))
+    merged: dict[str, str] = dict(proxy_loaded)
+    for key, value in master_loaded.items():
+        if value:
+            merged[key] = value
+    for key, value in proxy_loaded.items():
+        if value and not merged.get(key):
+            merged[key] = value
+    return merged
+
+
+def map_seed_to_databases_keys(seed: dict[str, str]) -> dict[str, str]:
+    """Map Master/proxy keys onto Databases secrets key names."""
+    mapped = dict(seed)
+    aliases: tuple[tuple[str, str], ...] = (
+        ("PROXY_BACKEND_DNS", "MASTER_SERVER_INTERNAL_HOST"),
+        ("MASTER_SERVER_PORT", "MASTER_SERVER_INTERNAL_PORT"),
+        ("HARDWARE_PRIMARY_IP", "HOST_PRIMARY_IP"),
+        ("HARDWARE_PRIMARY_MAC", "HOST_PRIMARY_MAC"),
+        ("HARDWARE_MACHINE_ID", "HOST_MACHINE_ID"),
+        ("HOSTNAME_CONSOLE", "HOST_HOSTNAME"),
+        ("DOCKER_NETWORK_NAME", "DOCKER_NETWORK_NAME"),
+        ("DOCKER_NETWORK_TOR_DB", "DOCKER_NETWORK_TOR_DB"),
+        ("DOCKER_NETWORK_NONTOR_DB", "DOCKER_NETWORK_NONTOR_DB"),
+        ("TOR_SOCKS_HOST", "TOR_SOCKS_HOST"),
+        ("TOR_SOCKS_PORT", "TOR_SOCKS_PORT"),
+        ("TOR_SOCKS_USERNAME", "TOR_SOCKS_USERNAME"),
+        ("TOR_SOCKS_PASSWORD", "TOR_SOCKS_PASSWORD"),
+        ("MONGODB_IMAGE", "MONGODB_IMAGE"),
+        ("MONGODB_PORT", "MONGODB_CONTAINER_PORT"),
+        ("MONGODB_DATA_MOUNT", "MONGODB_DATA_MOUNT"),
+        ("LUCID_DATABASES_DIR", "LUCID_DATABASES_DIR"),
+    )
+    for src, dst in aliases:
+        value = seed.get(src, "").strip()
+        if value and not mapped.get(dst):
+            mapped[dst] = value
+    return mapped
+
+
+def resolve_db_networks_from_seed(
+    seed: dict[str, str],
+    *,
+    machine_id: str,
+    hostname: str,
+    existing: list[dict[str, str]],
+) -> tuple[str, str, str]:
+    """
+    Resolve primary LucidDNS + tor/nontor DB networks from Master/proxy seed.
+
+    Prefer explicit TOR/NONTOR keys, then DOCKER_NETWORK_NAMES hints, then
+    DOCKER_NETWORK_NAME for both zones so DB containers join Proxy's network.
+    """
+    primary = (
+        _env("DOCKER_NETWORK_NAME")
+        or seed.get("DOCKER_NETWORK_NAME", "").strip()
+    )
+    tor = (
+        _env("DOCKER_NETWORK_TOR_DB")
+        or seed.get("DOCKER_NETWORK_TOR_DB", "").strip()
+    )
+    nontor = (
+        _env("DOCKER_NETWORK_NONTOR_DB")
+        or seed.get("DOCKER_NETWORK_NONTOR_DB", "").strip()
+    )
+    extras = [
+        item.strip()
+        for item in (seed.get("DOCKER_NETWORK_NAMES", "") or "").split(",")
+        if item.strip()
+    ]
+    for name in extras:
+        compact = name.lower().replace("-", "").replace("_", "")
+        if not tor and ("tordb" in compact or "torzone" in compact):
+            tor = name
+        if not nontor and ("nontor" in compact or "cleardb" in compact):
+            nontor = name
+    if not primary:
+        raise RuntimeError(
+            "DOCKER_NETWORK_NAME missing from Server/Secrets/Master.secrets "
+            "(or proxy.secrets) — run Proxy/Bootstrap.py before Databases"
+        )
+    if not tor:
+        tor = primary
+    if not nontor:
+        nontor = primary
+    # If env forced invent-style names earlier, still prefer seed primary for empty.
+    if not tor:
+        tor = _network_name_from_hardware(
+            prefix_env="DOCKER_NETWORK_TOR_DB",
+            machine_id=machine_id,
+            hostname=hostname,
+            existing=existing,
+        )
+    if not nontor:
+        nontor = _network_name_from_hardware(
+            prefix_env="DOCKER_NETWORK_NONTOR_DB",
+            machine_id=machine_id,
+            hostname=hostname,
+            existing=existing,
+        )
+    return primary, tor, nontor
 
 
 def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
@@ -437,7 +634,7 @@ def _network_name_from_hardware(
 def pull_realworld_information() -> dict[str, Any]:
     """
     Pull real-world hardware and runtime content at time of operation.
-    Source of truth for IP, MAC, hostname, DockerDNS endpoints, listeners, binaries, paths.
+    Seeds DockerDNS / network / master / Tor endpoints from Master.secrets + proxy.secrets.
     """
     hostname = socket.gethostname()
     interfaces = _pull_interfaces()
@@ -462,7 +659,9 @@ def pull_realworld_information() -> dict[str, Any]:
     listening = _pull_listening_by_process()
     docker_state = _pull_docker_state(docker_bin)
     lucid_root = _pull_lucid_tops_root()
-    secrets_dir = _pull_secrets_dir(lucid_root)
+    seed = map_seed_to_databases_keys(load_master_and_proxy_seed(lucid_root))
+    write_secrets_dir = databases_write_secrets_dir(lucid_root)
+    write_secrets_dir.mkdir(parents=True, exist_ok=True)
     databases_dir = _pull_databases_dir(lucid_root)
     machine_id = _pull_machine_id()
     cpu_count = os.cpu_count() or 1
@@ -476,42 +675,50 @@ def pull_realworld_information() -> dict[str, Any]:
     networks = docker_state.get("networks", [])
     master_ctr = _match_container(containers, "master", "backend", "lucid-server")
 
-    docker_network_name = _env("DOCKER_NETWORK_NAME")
-    if not docker_network_name:
-        for net in networks:
-            name = str(net.get("name") or "")
-            if "lucid" in name.lower():
-                docker_network_name = name
-                break
-        if not docker_network_name and networks:
-            docker_network_name = str(networks[0].get("name") or "")
-
-    tor_db_network = _network_name_from_hardware(
-        prefix_env="DOCKER_NETWORK_TOR_DB",
-        machine_id=machine_id,
-        hostname=hostname,
-        existing=networks,
-    )
-    nontor_db_network = _network_name_from_hardware(
-        prefix_env="DOCKER_NETWORK_NONTOR_DB",
+    docker_network_name, tor_db_network, nontor_db_network = resolve_db_networks_from_seed(
+        seed,
         machine_id=machine_id,
         hostname=hostname,
         existing=networks,
     )
 
-    master_bind_host = _env("MASTER_SERVER_BIND_HOST") or primary_ip
-    master_port = _env("MASTER_SERVER_PORT")
+    master_bind_host = (
+        _env("MASTER_SERVER_BIND_HOST")
+        or seed.get("MASTER_SERVER_INTERNAL_HOST", "").strip()
+        or seed.get("PROXY_BACKEND_DNS", "").strip()
+        or primary_ip
+    )
+    master_port = (
+        _env("MASTER_SERVER_PORT")
+        or _env("MASTER_SERVER_INTERNAL_PORT")
+        or seed.get("MASTER_SERVER_INTERNAL_PORT", "").strip()
+        or seed.get("MASTER_SERVER_PORT", "").strip()
+    )
     if not master_port and uvicorn_listen:
         master_port = str(uvicorn_listen[1])
     if not master_port:
-        master_port = str(allocate_ephemeral_port())
+        raise RuntimeError(
+            "MASTER_SERVER_PORT / MASTER_SERVER_INTERNAL_PORT missing from "
+            "Server/Secrets/Master.secrets (or proxy.secrets) — run Proxy/Bootstrap.py first"
+        )
 
-    proxy_backend_dns = _env("PROXY_BACKEND_DNS")
+    proxy_backend_dns = (
+        _env("PROXY_BACKEND_DNS")
+        or seed.get("PROXY_BACKEND_DNS", "").strip()
+        or seed.get("MASTER_SERVER_INTERNAL_HOST", "").strip()
+    )
     if not proxy_backend_dns and master_ctr:
         proxy_backend_dns = master_ctr.get("name") or ""
 
-    mongodb_image = _env("MONGODB_IMAGE")
-    mongodb_container_port = _env("MONGODB_CONTAINER_PORT")
+    mongodb_image = (
+        _env("MONGODB_IMAGE")
+        or seed.get("MONGODB_IMAGE", "").strip()
+    )
+    mongodb_container_port = (
+        _env("MONGODB_CONTAINER_PORT")
+        or seed.get("MONGODB_CONTAINER_PORT", "").strip()
+        or seed.get("MONGODB_PORT", "").strip()
+    )
     if not mongodb_container_port and mongo_listen:
         mongodb_container_port = str(mongo_listen[1])
 
@@ -545,7 +752,11 @@ def pull_realworld_information() -> dict[str, Any]:
         "docker_network_tor_db": tor_db_network,
         "docker_network_nontor_db": nontor_db_network,
         "lucid_tops_root": lucid_root.as_posix(),
-        "secrets_dir": secrets_dir.as_posix(),
+        "secrets_dir": write_secrets_dir.as_posix(),
+        "server_secrets_dir": server_secrets_dir(lucid_root).as_posix(),
+        "master_secrets_file": master_secrets_path(lucid_root).as_posix(),
+        "proxy_secrets_file": proxy_secrets_path(lucid_root).as_posix(),
+        "master_proxy_seed": seed,
         "databases_dir": databases_dir.as_posix(),
         "compose_dir": compose_dir.as_posix(),
         "mongodb_image": mongodb_image,
@@ -569,15 +780,23 @@ def bind_operation_environ(
     pull: dict[str, Any] | None = None, *, overwrite: bool = False
 ) -> dict[str, str]:
     """
-    Configure os.environ from pulled hardware facts at time of operation.
+    Configure os.environ from Master/proxy seed + pulled hardware facts.
     Only fills missing keys unless overwrite=True. Never invents placeholders.
     """
     info = pull if pull is not None else pull_realworld_information()
     bound: dict[str, str] = {}
+    seed = map_seed_to_databases_keys(
+        info.get("master_proxy_seed")
+        if isinstance(info.get("master_proxy_seed"), dict)
+        else load_master_and_proxy_seed(resolve_lucid_tops_root(info))
+    )
 
     mapping: dict[str, str] = {
         "LUCID_TOPS_ROOT": str(info["lucid_tops_root"]),
         "SECRETS_DIR": str(info["secrets_dir"]),
+        "SERVER_SECRETS_DIR": str(
+            info.get("server_secrets_dir") or server_secrets_dir(resolve_lucid_tops_root(info))
+        ),
         "SERVER_ENV_FILE": str(Path(str(info["lucid_tops_root"])) / "server.env"),
         "SECRETS_ENV_FILE": str(Path(str(info["lucid_tops_root"])) / "secrets.env"),
         "MONGODB_DATA_MOUNT": str(info["databases_dir"]),
@@ -589,11 +808,18 @@ def bind_operation_environ(
         "DOCKER_NETWORK_TOR_DB": str(info["docker_network_tor_db"]),
         "DOCKER_NETWORK_NONTOR_DB": str(info["docker_network_nontor_db"]),
         "DATABASES_COMPOSE_DIR": str(info["compose_dir"]),
+        "MASTER_SECRETS_FILE": str(
+            info.get("master_secrets_file") or master_secrets_path(resolve_lucid_tops_root(info))
+        ),
+        "PROXY_SECRETS_FILE": str(
+            info.get("proxy_secrets_file") or proxy_secrets_path(resolve_lucid_tops_root(info))
+        ),
     }
 
     if info.get("master_server_bind_host"):
         mapping["MASTER_SERVER_BIND_HOST"] = str(info["master_server_bind_host"])
         mapping["MASTER_SERVER_HOST"] = str(info["master_server_bind_host"])
+        mapping["MASTER_SERVER_INTERNAL_HOST"] = str(info["master_server_bind_host"])
     if info.get("master_server_port"):
         mapping["MASTER_SERVER_PORT"] = str(info["master_server_port"])
         mapping["MASTER_SERVER_INTERNAL_PORT"] = str(info["master_server_port"])
@@ -608,6 +834,20 @@ def bind_operation_environ(
     if info.get("mongodb_container_port"):
         mapping["MONGODB_CONTAINER_PORT"] = str(info["mongodb_container_port"])
 
+    for key in (
+        "TOR_SOCKS_HOST",
+        "TOR_SOCKS_PORT",
+        "TOR_SOCKS_USERNAME",
+        "TOR_SOCKS_PASSWORD",
+        "DOCKER_NETWORK_NAMES",
+        "MONGODB_URL",
+        "MONGODB_MAIN_DATABASE_NAME",
+        "MASTER_SERVER_ONION",
+    ):
+        value = seed.get(key, "").strip()
+        if value:
+            mapping[key] = value
+
     secrets_dir = Path(str(info["secrets_dir"]))
     file_map = {
         "SERVER_SECRETS_FILE": secrets_dir / "server.secrets",
@@ -618,7 +858,6 @@ def bind_operation_environ(
         "BLOCKCHAIN_SECRETS_FILE": secrets_dir / "blockchain.secrets",
         "PAYMENTS_SECRETS_FILE": secrets_dir / "payments.secrets",
         "BACKEND_SECRETS_FILE": secrets_dir / "backend.secrets",
-        "MASTER_SECRETS_FILE": secrets_dir / "Master.secrets",
     }
     for key, path in file_map.items():
         mapping[key] = path.as_posix()
@@ -641,7 +880,7 @@ def export_shell_env(pull: dict[str, Any] | None = None) -> str:
 
 def main() -> int:
     info = pull_realworld_information()
-    bind_operation_environ(info)
+    bind_operation_environ(info, overwrite=True)
     print(export_shell_env(info), end="")
     return 0
 
