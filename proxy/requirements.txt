@@ -1,11 +1,21 @@
-# LucidTops Proxy container — pip deps for proxy/*.py modules only.
-# Used by: ProxyRoutes (fastapi/httpx), RunProxy+Bootstrap (uvicorn),
-# Clearnet-package (PySocks/socks). Stdlib-only modules need nothing here.
+# LucidTops Proxy — pip deps required to operate proxy/*.py
+# Installed by: proxy.dockerfile (pip install -r requirements.txt)
 #
-# OS-native (supplied at time of operation via APT_PACKAGES build-arg — do not assume present):
-#   resolve from hardware pull / Bootstrap (e.g. tor, nginx, and related packages as required)
+# Module map (third-party):
+#   ProxyRoutes.py      → fastapi, httpx
+#   RunProxy.py         → uvicorn (foreground server + validate)
+#   Bootstrap.py        → uvicorn (verify_uvicorn_configuration)
+#   Clearnet-package.py → PySocks (import socks) for Tor SOCKS5 egress
+#   ProxyGate.py        → stdlib only
+#   buildsecrets.py     → stdlib only
+#   SetDeamon.py        → stdlib only
 #
+# OS-native (NOT pip — supply via APT_PACKAGES build-arg at time of operation):
+#   python3, pip, nginx, tor (and related libs discovered by hardware pull / Bootstrap)
+#
+# Direct runtime packages:
 fastapi>=0.110.0,<1.0.0
 uvicorn[standard]>=0.27.0,<1.0.0
+pydantic>=2.5.0,<3.0.0
 httpx>=0.27.0,<1.0.0
 PySocks>=1.7.1,<2.0.0
