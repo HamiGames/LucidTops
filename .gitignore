@@ -45,3 +45,7 @@ payments.secrets
 
 # Docker / local data
 *.log
+
+# Local docs (not tracked — see documentation/.gitignore for file-level rules)
+documentation/
+Documentation/
