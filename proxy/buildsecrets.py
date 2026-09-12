@@ -184,8 +184,56 @@ def _pull_machine_id() -> str:
     return uuid.uuid4().hex
 
 
+# Virtual / kernel mounts must never be used as LucidTops parents (fixes PermissionError
+# on paths like /sys/fs/pstore/LucidTops when scanning /proc/mounts).
+_UNSAFE_MOUNT_PREFIXES = (
+    "/sys",
+    "/proc",
+    "/dev",
+    "/run",
+    "/snap",
+    "/var/lib/docker",
+    "/var/lib/containers",
+)
+
+
+def _is_unsafe_mount_root(path: Path) -> bool:
+    """True for virtual/kernel mounts that must not host LucidTops."""
+    try:
+        posix = path.resolve().as_posix()
+    except OSError:
+        posix = path.as_posix()
+    if posix in {"/", "/boot", "/boot/efi"}:
+        return True
+    for prefix in _UNSAFE_MOUNT_PREFIXES:
+        if posix == prefix or posix.startswith(prefix + "/"):
+            return True
+    return False
+
+
+def _safe_mkdir(path: Path) -> Path:
+    """Create path only when parent tree is a safe, writable location."""
+    if _is_unsafe_mount_root(path) or _is_unsafe_mount_root(path.parent):
+        raise RuntimeError(
+            f"Refusing to create LucidTops under unsafe mount {path.as_posix()} — "
+            "set LUCID_TOPS_ROOT=/mnt/myssd/LucidTops or run from /mnt/myssd/LucidTops"
+        )
+    path.mkdir(parents=True, exist_ok=True)
+    return path.resolve()
+
+
 def _pull_mount_roots() -> list[Path]:
+    """Real filesystem mount roots only (excludes /sys, /proc, /dev, …)."""
     roots: list[Path] = []
+    # Prefer known SSD / operation roots first (fixes.txt §16 / dockercmd).
+    for preferred in (
+        Path("/mnt/myssd"),
+        Path("/mnt/myssd/LucidTops"),
+        Path("/mnt"),
+    ):
+        if preferred.is_dir() and not _is_unsafe_mount_root(preferred):
+            roots.append(preferred)
+
     if Path("/proc/mounts").exists():
         try:
             for line in Path("/proc/mounts").read_text(encoding="utf-8").splitlines():
@@ -193,8 +241,9 @@ def _pull_mount_roots() -> list[Path]:
                 if len(parts) < 2:
                     continue
                 mount = Path(parts[1])
-                if mount.is_dir():
-                    roots.append(mount)
+                if not mount.is_dir() or _is_unsafe_mount_root(mount):
+                    continue
+                roots.append(mount)
         except OSError:
             pass
     if platform.system().lower() == "windows":
@@ -202,8 +251,11 @@ def _pull_mount_roots() -> list[Path]:
             drive = Path(f"{letter}:/")
             if drive.exists():
                 roots.append(drive)
-    roots.append(Path.home())
-    roots.append(PROXY_DIR.parent)
+    home = Path.home()
+    if not _is_unsafe_mount_root(home):
+        roots.append(home)
+    if not _is_unsafe_mount_root(PROXY_DIR.parent):
+        roots.append(PROXY_DIR.parent)
     # Unique preserve order
     seen: set[str] = set()
     ordered: list[Path] = []
@@ -216,10 +268,27 @@ def _pull_mount_roots() -> list[Path]:
 
 
 def _pull_lucid_tops_root() -> Path:
-    """Discover LucidTops root on mounted hardware / existing tree at operation time."""
+    """Discover LucidTops root on mounted hardware / existing tree at time of operation.
+
+    Never creates directories under virtual mounts (/sys, /proc, /dev, …).
+    Canonical Pi path: /mnt/myssd/LucidTops (fixes.txt §16 / dockercmd).
+    """
     env_root = _env("LUCID_TOPS_ROOT")
     if env_root:
-        return Path(env_root).expanduser()
+        return Path(env_root).expanduser().resolve()
+
+    # Canonical NVMe SSD path used by LucidTops operations.
+    canonical = Path("/mnt/myssd/LucidTops")
+    if canonical.is_dir():
+        return canonical.resolve()
+
+    # Bootstrap.py lives at <LucidTops>/proxy/Bootstrap.py — use that tree first.
+    if PROXY_DIR.name.lower() == "proxy":
+        project = PROXY_DIR.parent
+        if project.name.lower() == "lucidtops" and project.is_dir():
+            return project.resolve()
+        if project.is_dir() and (project / "backend").is_dir():
+            return project.resolve()
 
     for mount in _pull_mount_roots():
         for candidate in (
@@ -230,7 +299,7 @@ def _pull_lucid_tops_root() -> Path:
         ):
             if candidate.is_dir():
                 return candidate.resolve()
-        # Depth-1 scan for LucidTops directory name
+        # Depth-1 scan for LucidTops directory name (read-only — never mkdir here)
         try:
             for child in mount.iterdir():
                 if child.is_dir() and child.name.lower() == "lucidtops":
@@ -238,8 +307,12 @@ def _pull_lucid_tops_root() -> Path:
         except OSError:
             continue
 
-    # Walk up from proxy module for a LucidTops / project root with Secrets marker
+    # Walk up from proxy module for an existing LucidTops / project root.
     for parent in [PROXY_DIR, *PROXY_DIR.parents]:
+        if _is_unsafe_mount_root(parent):
+            continue
+        if parent.name.lower() == "lucidtops" and parent.is_dir():
+            return parent.resolve()
         secrets_probe = parent / "Secrets"
         lucid_probe = parent / "LucidTops"
         if secrets_probe.is_dir():
@@ -247,14 +320,17 @@ def _pull_lucid_tops_root() -> Path:
         if lucid_probe.is_dir():
             return lucid_probe.resolve()
         if (parent / "proxy").is_dir() and (parent / "backend").is_dir():
-            # Repo checkout on build host — use sibling data root under home hardware path later
-            data = parent / "LucidTops"
-            data.mkdir(parents=True, exist_ok=True)
-            return data.resolve()
+            # Parent is already the project root (do not nest LucidTops/LucidTops).
+            return parent.resolve()
 
-    created = Path.home() / "LucidTops"
-    created.mkdir(parents=True, exist_ok=True)
-    return created.resolve()
+    # Last resort: create only under a safe home directory — never under /sys.
+    home = Path.home()
+    if _is_unsafe_mount_root(home):
+        raise RuntimeError(
+            "Cannot resolve LucidTops root from hardware mounts — "
+            "export LUCID_TOPS_ROOT=/mnt/myssd/LucidTops and re-run Bootstrap"
+        )
+    return _safe_mkdir(home / "LucidTops")
 
 
 def _pull_listening_by_process() -> dict[str, list[tuple[str, int]]]:
