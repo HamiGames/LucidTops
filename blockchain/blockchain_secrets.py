@@ -5,6 +5,13 @@ RULES of CODE CREATION:
 - No sensitive data, all data is stored in the secrets file.
 - NO pull from GIT repository, all values are created at time of operation.
 Values (IP, MAC, machine_id, paths, DockerDNS) MUST be pulled from hardware via pull_information.
+
+Seed sources for *.onion + DOCKER_NETWORK_NAME (fixes.txt §19, read-only):
+- /mnt/myssd/LucidTops/Server/Secrets/Master.secrets
+- /mnt/myssd/LucidTops/Server/Secrets/proxy.secrets (also Proxy.secrets)
+
+Write target:
+- /mnt/myssd/LucidTops/blockchain/secrets/blockchain.secrets
 """
 
 from __future__ import annotations
@@ -23,8 +30,11 @@ BLOCKCHAIN_SECRETS_NAME_ENV = "BLOCKCHAIN_SECRETS_NAME"
 BLOCKCHAIN_SECRETS_KEYS: tuple[str, ...] = (
     "LUCID_TOPS_ROOT",
     "SECRETS_DIR",
+    "MASTER_SECRETS_FILE",
+    "PROXY_SECRETS_FILE",
     "MASTER_SERVER_ID",
     "GENESIS_CREATOR_ID",
+    "DOCKER_NETWORK_NAME",
     "BLOCKCHAIN_ONION",
     "MASTER_SERVER_ONION",
     "NODEUSER_ONION",
@@ -79,6 +89,19 @@ BLOCKCHAIN_SECRETS_KEYS: tuple[str, ...] = (
     "HOST_HOSTNAME",
     "CHUNK_SIZE_BYTES",
     "SESSION_KEY_VALIDITY_SECONDS",
+)
+
+# Onion + Docker network keys seeded from Server/Secrets (Master.secrets + proxy.secrets).
+_SEED_ONION_NETWORK_KEYS: frozenset[str] = frozenset(
+    {
+        "DOCKER_NETWORK_NAME",
+        "BLOCKCHAIN_NETWORK_NAME",
+        "BLOCKCHAIN_ONION",
+        "MASTER_SERVER_ONION",
+        "NODEUSER_ONION",
+        "ADMIN_ONION",
+        "FRONTEND_ONION",
+    }
 )
 
 # One-time identity keys — never regenerated once present on disk.
@@ -228,6 +251,17 @@ def _load_master_server_id_from_disk(secrets_dir: Path) -> str:
         secrets_dir / "server.secrets",
         secrets_dir / "MasterID.secrets",
     ]
+    # Also probe canonical Server/Secrets seed (read-only) for MASTER_SERVER_ID.
+    lucid_root = _env("LUCID_TOPS_ROOT")
+    if lucid_root:
+        server_secrets = Path(lucid_root).expanduser() / "Server" / "Secrets"
+        candidates.extend(
+            [
+                server_secrets / "Master.secrets",
+                server_secrets / "master.secrets",
+                server_secrets / "MasterServerID.txt",
+            ]
+        )
     for path in candidates:
         if not path.exists():
             continue
@@ -250,6 +284,49 @@ def _load_master_server_id_from_disk(secrets_dir: Path) -> str:
                 if found:
                     return found
     return ""
+
+
+def _seed_onion_and_network_from_master_and_proxy(
+    lucid_root: Path, prior: dict[str, str]
+) -> dict[str, str]:
+    """
+    Fill *.onion + DOCKER_NETWORK_NAME gaps from Server/Secrets/Master.secrets + proxy.secrets.
+
+    Precedence for non-empty values: existing blockchain.secrets (prior) > Master > proxy.
+    Other blockchain keys are untouched.
+    """
+    from pull_information import (
+        load_master_and_proxy_seed,
+        map_seed_to_blockchain_keys,
+        master_secrets_path,
+        proxy_secrets_path,
+    )
+
+    seed = map_seed_to_blockchain_keys(load_master_and_proxy_seed(lucid_root))
+    if not seed:
+        return prior
+
+    merged = dict(prior)
+    for key in _SEED_ONION_NETWORK_KEYS:
+        seed_value = seed.get(key, "").strip()
+        if seed_value and not merged.get(key, "").strip():
+            merged[key] = seed_value
+    # Proxy publishes FRONTEND_ONION; map into ADMIN_ONION when admin is empty.
+    if not merged.get("ADMIN_ONION", "").strip():
+        frontend = seed.get("FRONTEND_ONION", "").strip() or seed.get("ADMIN_ONION", "").strip()
+        if frontend:
+            merged["ADMIN_ONION"] = frontend
+    if not merged.get("DOCKER_NETWORK_NAME", "").strip():
+        network = (
+            seed.get("DOCKER_NETWORK_NAME", "").strip()
+            or seed.get("BLOCKCHAIN_NETWORK_NAME", "").strip()
+        )
+        if network:
+            merged["DOCKER_NETWORK_NAME"] = network
+
+    merged.setdefault("MASTER_SECRETS_FILE", master_secrets_path(lucid_root).as_posix())
+    merged.setdefault("PROXY_SECRETS_FILE", proxy_secrets_path(lucid_root).as_posix())
+    return merged
 
 
 def _resolve_master_server_id_for_pull(
@@ -293,6 +370,7 @@ def build_blockchain_secrets_values(
 ) -> dict[str, str]:
     """
     Build blockchain.secrets values from hardware pull at time of operation.
+    Seeds *.onion + DOCKER_NETWORK_NAME from Server/Secrets/Master.secrets + proxy.secrets.
     Never invents placeholders. Never regenerates one-time keys already on disk.
     GENESIS_CREATOR_ID is always MASTER_SERVER_ID.
     """
@@ -324,6 +402,8 @@ def build_blockchain_secrets_values(
             prior = dict(load_blockchain_secrets(reload=True))
         except RuntimeError:
             prior = {}
+
+    prior = _seed_onion_and_network_from_master_and_proxy(Path(lucid_root), prior)
 
     def keep_or_create(key: str, factory) -> str:
         current = (prior.get(key) or _env(key) or "").strip()
@@ -415,26 +495,57 @@ def build_blockchain_secrets_values(
     if not bind_port:
         bind_port = str(_allocate_ephemeral_port())
 
+    docker_network_name = (
+        prior.get("DOCKER_NETWORK_NAME", "").strip()
+        or prior.get("BLOCKCHAIN_NETWORK_NAME", "").strip()
+        or str(info.get("docker_network_name") or "").strip()
+        or _env("DOCKER_NETWORK_NAME")
+    )
+    if not docker_network_name:
+        raise RuntimeError(
+            "DOCKER_NETWORK_NAME missing — must be seeded from "
+            "Server/Secrets/Master.secrets or proxy.secrets (fixes.txt §19)"
+        )
+
     onion_export = Path(lucid_root) / "onions"
     blockchain_onion = (
         prior.get("BLOCKCHAIN_ONION", "").strip()
+        or str(info.get("blockchain_onion") or "").strip()
         or _env("BLOCKCHAIN_ONION")
         or _read_onion_if_present(onion_export / "blockchain" / "hostname")
     )
     master_onion = (
         prior.get("MASTER_SERVER_ONION", "").strip()
+        or str(info.get("master_server_onion") or "").strip()
         or _env("MASTER_SERVER_ONION")
         or _read_onion_if_present(onion_export / "master" / "hostname")
     )
     node_onion = (
         prior.get("NODEUSER_ONION", "").strip()
+        or str(info.get("nodeuser_onion") or "").strip()
         or _env("NODEUSER_ONION")
         or _read_onion_if_present(onion_export / "nodeuser" / "hostname")
     )
     admin_onion = (
         prior.get("ADMIN_ONION", "").strip()
+        or str(info.get("admin_onion") or "").strip()
         or _env("ADMIN_ONION")
+        or prior.get("FRONTEND_ONION", "").strip()
+        or _env("FRONTEND_ONION")
         or _read_onion_if_present(onion_export / "admin" / "hostname")
+    )
+
+    master_secrets_file = (
+        prior.get("MASTER_SECRETS_FILE", "").strip()
+        or str(info.get("master_secrets_file") or "").strip()
+        or _env("MASTER_SECRETS_FILE")
+        or str(Path(lucid_root) / "Server" / "Secrets" / "Master.secrets")
+    )
+    proxy_secrets_file = (
+        prior.get("PROXY_SECRETS_FILE", "").strip()
+        or str(info.get("proxy_secrets_file") or "").strip()
+        or _env("PROXY_SECRETS_FILE")
+        or str(Path(lucid_root) / "Server" / "Secrets" / "proxy.secrets")
     )
 
     # Blockchain.txt reward design applied at operation time (not baked as code constants consumers read).
@@ -540,8 +651,11 @@ def build_blockchain_secrets_values(
     values: dict[str, str] = {
         "LUCID_TOPS_ROOT": lucid_root,
         "SECRETS_DIR": secrets_dir,
+        "MASTER_SECRETS_FILE": master_secrets_file,
+        "PROXY_SECRETS_FILE": proxy_secrets_file,
         "MASTER_SERVER_ID": master_server_id,
         "GENESIS_CREATOR_ID": master_server_id,
+        "DOCKER_NETWORK_NAME": docker_network_name,
         "BLOCKCHAIN_ONION": blockchain_onion,
         "MASTER_SERVER_ONION": master_onion,
         "NODEUSER_ONION": node_onion,
@@ -645,6 +759,7 @@ def write_blockchain_secrets_from_pull(
 
     lines = [
         "# LucidTops blockchain.secrets - created at time of operation from hardware pull",
+        "# Onion + DOCKER_NETWORK_NAME seeded from Server/Secrets/Master.secrets + proxy.secrets",
         f"# Generated: {utc_now()}",
         "# Tor *.onion values are inserted after container / hidden-service creation when present.",
         "",
@@ -719,6 +834,10 @@ def resolve_nodeuser_onion() -> str:
 
 def resolve_admin_onion() -> str:
     return get_secret("ADMIN_ONION")
+
+
+def resolve_docker_network_name() -> str:
+    return require_secret("DOCKER_NETWORK_NAME")
 
 
 def resolve_blockchain_secret() -> str:
@@ -941,6 +1060,10 @@ def blockchain_secrets_status() -> dict[str, Any]:
     status["blockchain_onion_configured"] = bool(resolve_blockchain_onion())
     status["master_server_onion_configured"] = bool(resolve_master_server_onion())
     status["blockchain_secret_configured"] = bool(resolve_blockchain_secret())
+    try:
+        status["docker_network_name"] = resolve_docker_network_name()
+    except RuntimeError:
+        status["docker_network_name"] = None
     try:
         status["mongodb_host"] = resolve_mongodb_host()
     except RuntimeError:

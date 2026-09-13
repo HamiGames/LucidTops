@@ -8,6 +8,13 @@ RULES of CODE CREATION:
 - No placeholder values, all values are created at time of operation.
 - No sensitive data, all data is stored in the secrets file.
 - NO pull from GIT repository, all values are created at time of operation.
+
+Seed sources (Proxy Bootstrap → Server/Secrets, read-only for blockchain onion/network):
+- /mnt/myssd/LucidTops/Server/Secrets/Master.secrets
+- /mnt/myssd/LucidTops/Server/Secrets/proxy.secrets (also Proxy.secrets)
+
+Write target (blockchain container secrets — never Server/Secrets):
+- /mnt/myssd/LucidTops/blockchain/secrets/blockchain.secrets
 """
 
 from __future__ import annotations
@@ -227,21 +234,124 @@ def _pull_lucid_tops_root() -> Path:
     return created.resolve()
 
 
-def _pull_secrets_dir(lucid_root: Path) -> Path:
-    env_secrets = _env("SECRETS_DIR")
-    if env_secrets:
-        return Path(env_secrets).expanduser().resolve()
-    candidates = [
-        lucid_root / "Server" / "Secrets",
-        lucid_root / "secrets",
-        lucid_root / "Secrets",
-    ]
-    for candidate in candidates:
-        if candidate.is_dir():
+def _parse_secrets_file(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not path.exists():
+        return values
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return values
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        key = key.strip().upper()
+        if key:
+            values[key] = value.strip()
+    return values
+
+
+def resolve_lucid_tops_root(info: dict[str, Any] | None = None) -> Path:
+    raw = ""
+    if info is not None:
+        raw = str(info.get("lucid_tops_root") or "").strip()
+    raw = raw or _env("LUCID_TOPS_ROOT")
+    if raw:
+        return Path(raw).expanduser().resolve()
+    return _pull_lucid_tops_root()
+
+
+def server_secrets_dir(lucid_root: Path | None = None) -> Path:
+    """Canonical Server/Secrets path (Master.secrets + proxy.secrets)."""
+    override = _env("MASTER_SECRETS_DIR") or _env("SERVER_SECRETS_DIR")
+    if override:
+        return Path(override).expanduser().resolve()
+    root = lucid_root if lucid_root is not None else resolve_lucid_tops_root()
+    return (root / "Server" / "Secrets").resolve()
+
+
+def master_secrets_path(lucid_root: Path | None = None) -> Path:
+    override = _env("MASTER_SECRETS_FILE")
+    if override:
+        return Path(override).expanduser().resolve()
+    directory = server_secrets_dir(lucid_root)
+    for name in ("Master.secrets", "master.secrets"):
+        candidate = directory / name
+        if candidate.is_file():
             return candidate.resolve()
-    chosen = candidates[0]
-    chosen.mkdir(parents=True, exist_ok=True)
-    return chosen.resolve()
+    return (directory / "Master.secrets").resolve()
+
+
+def proxy_secrets_path(lucid_root: Path | None = None) -> Path:
+    override = _env("PROXY_SECRETS_FILE")
+    if override:
+        return Path(override).expanduser().resolve()
+    directory = server_secrets_dir(lucid_root)
+    for name in ("proxy.secrets", "Proxy.secrets"):
+        candidate = directory / name
+        if candidate.is_file():
+            return candidate.resolve()
+    return (directory / "proxy.secrets").resolve()
+
+
+def blockchain_secrets_dir(lucid_root: Path | None = None) -> Path:
+    """Blockchain write target — never Server/Secrets."""
+    root = lucid_root if lucid_root is not None else resolve_lucid_tops_root()
+    override = _env("SECRETS_DIR")
+    if override:
+        path = Path(override).expanduser().resolve()
+        parts_lower = {part.lower() for part in path.parts}
+        if "server" in parts_lower and path.name.lower() == "secrets":
+            return (root / "blockchain" / "secrets").resolve()
+        return path
+    return (root / "blockchain" / "secrets").resolve()
+
+
+def load_master_and_proxy_seed(lucid_root: Path | None = None) -> dict[str, str]:
+    """
+    Load Docker network / *.onion facts from Server/Secrets.
+
+    Master.secrets is the Proxy-synced canonical set; proxy.secrets fills gaps.
+    """
+    root = lucid_root if lucid_root is not None else resolve_lucid_tops_root()
+    proxy_loaded = _parse_secrets_file(proxy_secrets_path(root))
+    master_loaded = _parse_secrets_file(master_secrets_path(root))
+    merged: dict[str, str] = dict(proxy_loaded)
+    for key, value in master_loaded.items():
+        if value:
+            merged[key] = value
+    for key, value in proxy_loaded.items():
+        if value and not merged.get(key):
+            merged[key] = value
+    return merged
+
+
+def map_seed_to_blockchain_keys(seed: dict[str, str]) -> dict[str, str]:
+    """Map Master/proxy keys onto blockchain.secrets onion / network names."""
+    mapped = dict(seed)
+    aliases: tuple[tuple[str, str], ...] = (
+        ("DOCKER_NETWORK_NAME", "DOCKER_NETWORK_NAME"),
+        ("DOCKER_NETWORK_NAME", "BLOCKCHAIN_NETWORK_NAME"),
+        ("BLOCKCHAIN_ONION", "BLOCKCHAIN_ONION"),
+        ("MASTER_SERVER_ONION", "MASTER_SERVER_ONION"),
+        ("NODEUSER_ONION", "NODEUSER_ONION"),
+        ("ADMIN_ONION", "ADMIN_ONION"),
+        ("FRONTEND_ONION", "ADMIN_ONION"),
+        ("PROXY_BLOCKCHAIN_DNS", "BLOCKCHAIN_DOCKER_DNS_NAME"),
+    )
+    for src, dst in aliases:
+        value = seed.get(src, "").strip()
+        if value and not mapped.get(dst):
+            mapped[dst] = value
+    return mapped
+
+
+def _pull_secrets_dir(lucid_root: Path) -> Path:
+    path = blockchain_secrets_dir(lucid_root)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def _pull_databases_dir(lucid_root: Path) -> Path:
@@ -447,7 +557,16 @@ def pull_realworld_information() -> dict[str, Any]:
     blockchain_ctr = _match_container(containers, "blockchain", "lucid-blockchain")
 
     networks = docker_state.get("networks", [])
-    docker_network_name = _env("DOCKER_NETWORK_NAME")
+    seed = map_seed_to_blockchain_keys(load_master_and_proxy_seed(lucid_root))
+    server_dir = server_secrets_dir(lucid_root)
+    master_path = master_secrets_path(lucid_root)
+    proxy_path = proxy_secrets_path(lucid_root)
+
+    # Prefer Server/Secrets DOCKER_NETWORK_NAME (fixes.txt §19); live Docker is fallback.
+    docker_network_name = (
+        seed.get("DOCKER_NETWORK_NAME", "").strip()
+        or _env("DOCKER_NETWORK_NAME")
+    )
     if not docker_network_name:
         for net in networks:
             name = str(net.get("name") or "")
@@ -457,21 +576,33 @@ def pull_realworld_information() -> dict[str, Any]:
         if not docker_network_name and networks:
             docker_network_name = str(networks[0].get("name") or "")
 
-    mongodb_host = _env("MONGODB_HOST")
+    mongodb_host = seed.get("MONGODB_HOST", "").strip() or _env("MONGODB_HOST")
     if not mongodb_host and mongo_ctr:
         mongodb_host = mongo_ctr.get("name") or mongo_ctr.get("ip") or ""
-    mongodb_port = _env("MONGODB_PORT")
+    mongodb_port = seed.get("MONGODB_PORT", "").strip() or _env("MONGODB_PORT")
     if not mongodb_port and mongo_listen:
         mongodb_port = str(mongo_listen[1])
 
-    master_bind_host = _env("MASTER_SERVER_BIND_HOST") or primary_ip
-    master_port = _env("MASTER_SERVER_PORT")
+    master_bind_host = (
+        seed.get("MASTER_SERVER_INTERNAL_HOST", "").strip()
+        or seed.get("PROXY_BACKEND_DNS", "").strip()
+        or _env("MASTER_SERVER_BIND_HOST")
+        or primary_ip
+    )
+    master_port = (
+        seed.get("MASTER_SERVER_INTERNAL_PORT", "").strip()
+        or seed.get("MASTER_SERVER_PORT", "").strip()
+        or _env("MASTER_SERVER_PORT")
+    )
     if not master_port and uvicorn_listen:
         master_port = str(uvicorn_listen[1])
     if not master_port:
         master_port = str(_allocate_ephemeral_port())
 
-    proxy_backend_dns = _env("PROXY_BACKEND_DNS")
+    proxy_backend_dns = (
+        seed.get("PROXY_BACKEND_DNS", "").strip()
+        or _env("PROXY_BACKEND_DNS")
+    )
     if not proxy_backend_dns and master_ctr:
         proxy_backend_dns = master_ctr.get("name") or ""
 
@@ -501,6 +632,17 @@ def pull_realworld_information() -> dict[str, Any]:
         "lucid_tops_root": lucid_root.as_posix(),
         "secrets_dir": secrets_dir.as_posix(),
         "databases_dir": databases_dir.as_posix(),
+        "server_secrets_dir": server_dir.as_posix(),
+        "master_secrets_file": master_path.as_posix(),
+        "proxy_secrets_file": proxy_path.as_posix(),
+        "master_proxy_seed": seed,
+        "blockchain_onion": seed.get("BLOCKCHAIN_ONION", "").strip(),
+        "master_server_onion": seed.get("MASTER_SERVER_ONION", "").strip(),
+        "nodeuser_onion": seed.get("NODEUSER_ONION", "").strip(),
+        "admin_onion": (
+            seed.get("ADMIN_ONION", "").strip()
+            or seed.get("FRONTEND_ONION", "").strip()
+        ),
         "mongodb_host": mongodb_host,
         "mongodb_port": mongodb_port,
         "master_server_bind_host": master_bind_host,
@@ -553,7 +695,7 @@ def pull_blockchain_hardware(
 
 def bind_operation_environ(pull: dict[str, Any] | None = None, *, overwrite: bool = False) -> dict[str, str]:
     """
-    Configure os.environ from pulled hardware facts at time of operation.
+    Configure os.environ from Master/proxy seed (onion/network) + pulled hardware facts.
     Only fills missing keys unless overwrite=True. Never invents placeholders.
     """
     info = pull if pull is not None else pull_realworld_information()
@@ -563,6 +705,13 @@ def bind_operation_environ(pull: dict[str, Any] | None = None, *, overwrite: boo
         raise RuntimeError(
             "bind_operation_environ failed — primary_ip and primary_mac required from hardware pull"
         )
+
+    lucid_root = resolve_lucid_tops_root(info)
+    seed = map_seed_to_blockchain_keys(
+        info.get("master_proxy_seed")
+        if isinstance(info.get("master_proxy_seed"), dict)
+        else load_master_and_proxy_seed(lucid_root)
+    )
 
     bound: dict[str, str] = {}
 
@@ -579,6 +728,18 @@ def bind_operation_environ(pull: dict[str, Any] | None = None, *, overwrite: boo
         "HOST_HOSTNAME": str(info["hostname"]),
         "BLOCKCHAIN_SECRETS_NAME": "blockchain.secrets",
         "LEDGER_REPLICA_DIR": str(info.get("ledger_replica_dir") or ""),
+        "SERVER_SECRETS_DIR": str(
+            info.get("server_secrets_dir") or server_secrets_dir(lucid_root).as_posix()
+        ),
+        "MASTER_SECRETS_DIR": str(
+            info.get("server_secrets_dir") or server_secrets_dir(lucid_root).as_posix()
+        ),
+        "MASTER_SECRETS_FILE": str(
+            info.get("master_secrets_file") or master_secrets_path(lucid_root).as_posix()
+        ),
+        "PROXY_SECRETS_FILE": str(
+            info.get("proxy_secrets_file") or proxy_secrets_path(lucid_root).as_posix()
+        ),
     }
 
     if info.get("master_server_bind_host"):
@@ -593,6 +754,7 @@ def bind_operation_environ(pull: dict[str, Any] | None = None, *, overwrite: boo
         mapping["MONGODB_PORT"] = str(info["mongodb_port"])
     if info.get("docker_network_name"):
         mapping["DOCKER_NETWORK_NAME"] = str(info["docker_network_name"])
+        mapping["BLOCKCHAIN_NETWORK_NAME"] = str(info["docker_network_name"])
     if info.get("proxy_backend_dns"):
         mapping["PROXY_BACKEND_DNS"] = str(info["proxy_backend_dns"])
         mapping["MASTER_SERVER_INTERNAL_HOST"] = str(info["proxy_backend_dns"])
@@ -600,6 +762,32 @@ def bind_operation_environ(pull: dict[str, Any] | None = None, *, overwrite: boo
     blockchain_ctr = info.get("blockchain_container")
     if isinstance(blockchain_ctr, dict) and blockchain_ctr.get("name"):
         mapping["BLOCKCHAIN_CONTAINER_NAME"] = str(blockchain_ctr["name"])
+
+    # Onion + network alignment from Server/Secrets seed (gaps only).
+    for key in (
+        "DOCKER_NETWORK_NAME",
+        "BLOCKCHAIN_NETWORK_NAME",
+        "BLOCKCHAIN_ONION",
+        "MASTER_SERVER_ONION",
+        "NODEUSER_ONION",
+        "ADMIN_ONION",
+        "FRONTEND_ONION",
+        "PROXY_BLOCKCHAIN_DNS",
+        "BLOCKCHAIN_DOCKER_DNS_NAME",
+    ):
+        value = seed.get(key, "").strip()
+        if value:
+            mapping[key] = value
+    if not mapping.get("ADMIN_ONION") and seed.get("FRONTEND_ONION", "").strip():
+        mapping["ADMIN_ONION"] = seed["FRONTEND_ONION"].strip()
+    if info.get("blockchain_onion"):
+        mapping.setdefault("BLOCKCHAIN_ONION", str(info["blockchain_onion"]))
+    if info.get("master_server_onion"):
+        mapping.setdefault("MASTER_SERVER_ONION", str(info["master_server_onion"]))
+    if info.get("nodeuser_onion"):
+        mapping.setdefault("NODEUSER_ONION", str(info["nodeuser_onion"]))
+    if info.get("admin_onion"):
+        mapping.setdefault("ADMIN_ONION", str(info["admin_onion"]))
 
     secrets_dir = Path(str(info["secrets_dir"]))
     file_map = {
@@ -611,7 +799,6 @@ def bind_operation_environ(pull: dict[str, Any] | None = None, *, overwrite: boo
         "BLOCKCHAIN_SECRETS_FILE": secrets_dir / "blockchain.secrets",
         "PAYMENTS_SECRETS_FILE": secrets_dir / "payments.secrets",
         "BACKEND_SECRETS_FILE": secrets_dir / "backend.secrets",
-        "MASTER_SECRETS_FILE": secrets_dir / "Master.secrets",
     }
     for key, path in file_map.items():
         mapping[key] = path.as_posix()
