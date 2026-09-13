@@ -7,7 +7,7 @@
 # Build (on Pi, from mounted SSD):
 #   cd /mnt/myssd/LucidTops
 #   BASE_IMAGE=python:3.11-slim-bookworm
-#   APT_PACKAGES=""
+#   APT_PACKAGES="iproute2 ca-certificates curl gnupg"
 #   docker build --no-cache --platform linux/arm64 \
 #     -f /mnt/myssd/LucidTops/Databases/Databases.dockerfile \
 #     --build-arg BASE_IMAGE="${BASE_IMAGE}" \
@@ -15,11 +15,14 @@
 #     -t lucid-databases-orchestrator:v1.0.0 \
 #     /mnt/myssd/LucidTops
 #
+# Runtime (orchestrates sibling Mongo containers via host Docker daemon):
+#   -v /mnt/myssd/LucidTops:/mnt/myssd/LucidTops
+#   -v /var/run/docker.sock:/var/run/docker.sock
+#
 # Secrets (§16.1) — created at time of operation (not baked into the image):
 #   SECRETS_DIR=/mnt/myssd/LucidTops/Databases/secrets
-#   Entrypoint: pull_information → BootstrapDatabases (optional) → LaunchDatabases
-#   If empty: write databases.secrets / mongodb.secrets from live hardware pull.
-#   Host mount required: -v /mnt/myssd/LucidTops:/mnt/myssd/LucidTops
+#   Seed: Server/Secrets/Master.secrets + proxy.secrets (Proxy Bootstrap)
+#   Entrypoint: pull_information → BootstrapDatabases → LaunchDatabases
 #
 # RULES:
 # - no hardcoded values; all values created at time of operation via pull_information.
@@ -28,7 +31,7 @@
 # - NO pull from GIT repository.
 #
 # Rebuild rule (§16.7): wipe image/volumes before rebuild.
-# Networks (§16.4): created/joined at operation via dockercmd.txt using names from secrets.
+# Networks (§16.4): join LucidDNS from Master.secrets; create tor/nontor DB nets as needed.
 # Mongo data: host SSD bind mounts (Server/Databases / MONGODB_DATA_MOUNT) — not baked into image.
 
 # -----------------------------------------------------------------------------
@@ -38,7 +41,8 @@ ARG BASE_IMAGE=python:3.11-slim-bookworm
 FROM ${BASE_IMAGE}
 
 # Runtime / install args (NOT used in COPY source paths)
-ARG APT_PACKAGES=""
+# iproute2: hardware pull (`ip`); curl/gnupg/ca-certificates: Docker CLI apt install
+ARG APT_PACKAGES="iproute2 ca-certificates curl gnupg"
 ARG PIP_PACKAGES=""
 ARG PIP_WHEEL_PACKAGES="pip setuptools wheel"
 ARG LUCID_TOPS_ROOT=/mnt/myssd/LucidTops
@@ -48,6 +52,7 @@ ARG MONGODB_SECRETS_FILE=/mnt/myssd/LucidTops/Databases/secrets/mongodb.secrets
 ARG DATABASES_CONFIGS_DIR=/mnt/myssd/LucidTops/Databases/configs
 ARG MONGODB_DATA_MOUNT=/mnt/myssd/LucidTops/Server/Databases
 ARG RUN_DATABASES_BOOTSTRAP_ON_BUILD=false
+ARG INSTALL_DOCKER_CLI=true
 
 # -----------------------------------------------------------------------------
 # Container skeleton (fixes.txt §16.5)
@@ -76,14 +81,33 @@ RUN set -eu; \
     test -d "${LUCID_TOPS_ROOT}"
 
 # -----------------------------------------------------------------------------
-# OS packages
+# OS packages (pull tools) + Docker CLI/compose plugin (sibling-container orchestrator)
+# Docker CLI from download.docker.com — daemon remains on host via docker.sock
 # -----------------------------------------------------------------------------
 RUN set -eu; \
+    apt-get update; \
     if [ -n "${APT_PACKAGES}" ]; then \
-      apt-get update \
-      && apt-get install -y --no-install-recommends ${APT_PACKAGES} \
-      && rm -rf /var/lib/apt/lists/*; \
-    fi
+      apt-get install -y --no-install-recommends ${APT_PACKAGES}; \
+    fi; \
+    if [ "${INSTALL_DOCKER_CLI}" = "true" ]; then \
+      apt-get install -y --no-install-recommends ca-certificates curl gnupg; \
+      install -m 0755 -d /etc/apt/keyrings; \
+      curl -fsSL https://download.docker.com/linux/debian/gpg \
+        | gpg --dearmor -o /etc/apt/keyrings/docker.gpg; \
+      chmod a+r /etc/apt/keyrings/docker.gpg; \
+      ARCH="$(dpkg --print-architecture)"; \
+      . /etc/os-release; \
+      echo "deb [arch=${ARCH} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian ${VERSION_CODENAME} stable" \
+        > /etc/apt/sources.list.d/docker.list; \
+      apt-get update; \
+      apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin; \
+    fi; \
+    command -v ip >/dev/null; \
+    if [ "${INSTALL_DOCKER_CLI}" = "true" ]; then \
+      command -v docker >/dev/null; \
+      docker compose version >/dev/null; \
+    fi; \
+    rm -rf /var/lib/apt/lists/*
 
 # -----------------------------------------------------------------------------
 # Pip wheel installer + requirements (literal COPY — no ARG in source path)
@@ -141,6 +165,7 @@ ENV MONGODB_SECRETS_FILE=${MONGODB_SECRETS_FILE}
 ENV DATABASES_CONFIGS_DIR=${DATABASES_CONFIGS_DIR}
 ENV MONGODB_DATA_MOUNT=${MONGODB_DATA_MOUNT}
 ENV RUN_DATABASES_BOOTSTRAP_ON_START=true
+ENV DOCKER_HOST=unix:///var/run/docker.sock
 
 # Optional bootstrap at build (default false — SSD/hardware at first start)
 RUN set -eu; \

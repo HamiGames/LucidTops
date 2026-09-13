@@ -865,23 +865,26 @@ def bind_operation_environ(
     for key, value in mapping.items():
         if not value or not str(value).strip():
             continue
+        resolved = str(value).strip()
         if overwrite or not _env(key):
-            os.environ[key] = str(value).strip()
-            bound[key] = str(value).strip()
+            os.environ[key] = resolved
+        # Always include resolved value for shell export (even if env already set).
+        bound[key] = _env(key) or resolved
     return bound
 
 
-def export_shell_env(pull: dict[str, Any] | None = None) -> str:
+def export_shell_env(
+    pull: dict[str, Any] | None = None, *, overwrite: bool = True
+) -> str:
     """Emit POSIX export lines for entrypoint sourcing at operation time."""
-    bound = bind_operation_environ(pull)
+    bound = bind_operation_environ(pull, overwrite=overwrite)
     lines = [f'export {key}="{value}"' for key, value in sorted(bound.items())]
     return "\n".join(lines) + ("\n" if lines else "")
 
 
 def main() -> int:
     info = pull_realworld_information()
-    bind_operation_environ(info, overwrite=True)
-    print(export_shell_env(info), end="")
+    print(export_shell_env(info, overwrite=True), end="")
     return 0
 
 

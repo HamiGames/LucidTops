@@ -1,10 +1,11 @@
 #!/bin/sh
 # LucidTops Databases orchestrator entrypoint.
 # Order:
-#   1) bind Server/Secrets seed paths (Master.secrets + proxy.secrets)
-#   2) pull hardware + seed DockerDNS/network into env
-#   3) BootstrapDatabases → write Databases/secrets/*.secrets
-#   4) status / optional command
+#   1) verify Docker CLI + host docker.sock (sibling-container orchestration)
+#   2) bind Server/Secrets seed paths (Master.secrets + proxy.secrets)
+#   3) pull hardware + seed DockerDNS/network into env
+#   4) BootstrapDatabases → write Databases/secrets/*.secrets + compose up
+#   5) status / optional command
 # DO NOT EDIT THE COMMENTS, THEY ARE FOR DOCUMENTATION ONLY.
 
 set -eu
@@ -13,6 +14,26 @@ cd /app/Databases
 
 LUCID_TOPS_ROOT="${LUCID_TOPS_ROOT:-/mnt/myssd/LucidTops}"
 export LUCID_TOPS_ROOT
+export DOCKER_HOST="${DOCKER_HOST:-unix:///var/run/docker.sock}"
+
+# Orchestrator requires Docker CLI in-image + host daemon socket.
+if ! command -v docker >/dev/null 2>&1; then
+  echo "databases error: docker CLI missing in image — rebuild Databases.dockerfile with INSTALL_DOCKER_CLI=true" >&2
+  exit 1
+fi
+if ! command -v ip >/dev/null 2>&1; then
+  echo "databases error: ip missing in image — rebuild with APT_PACKAGES including iproute2" >&2
+  exit 1
+fi
+if [ ! -S /var/run/docker.sock ]; then
+  echo "databases error: /var/run/docker.sock missing — mount host socket:" >&2
+  echo "  -v /var/run/docker.sock:/var/run/docker.sock" >&2
+  exit 1
+fi
+if ! docker compose version >/dev/null 2>&1; then
+  echo "databases error: docker compose plugin missing — rebuild Databases.dockerfile (docker-compose-plugin)" >&2
+  exit 1
+fi
 
 # Seed sources (Proxy Bootstrap → Server/Secrets). Accept Proxy.secrets or proxy.secrets.
 SERVER_SECRETS_DIR="${MASTER_SECRETS_DIR:-${SERVER_SECRETS_DIR:-${LUCID_TOPS_ROOT}/Server/Secrets}}"
