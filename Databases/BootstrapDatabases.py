@@ -201,25 +201,45 @@ def _wait_healthy(
     raise RuntimeError(f"database containers not healthy before timeout: {statuses}")
 
 
+def _running_in_container() -> bool:
+    """True when bootstrap runs inside lucid-databases-orchestrator (not bare host)."""
+    if Path("/.dockerenv").exists():
+        return True
+    try:
+        cgroup = Path("/proc/1/cgroup").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return "docker" in cgroup or "containerd" in cgroup
+
+
 def _mongo_client_for(db_name: str, values: dict[str, str]) -> Any:
     try:
         from pymongo import MongoClient
     except ImportError as exc:
         raise RuntimeError("pymongo required — install Databases/requirements.txt") from exc
+    from urllib.parse import quote_plus
 
     prefix = secret_key_prefix(db_name)
-    # From orchestration host, use published host port + primary IP when not on DockerDNS net.
     host_port = values.get(f"{prefix}_HOST_PORT", "").strip()
     primary_ip = values.get("HOST_PRIMARY_IP", "").strip() or _env("HOST_PRIMARY_IP")
-    container_port = values.get(f"{prefix}_PORT", "").strip()
+    container_port = values.get(f"{prefix}_PORT", "").strip() or values.get(
+        "MONGODB_CONTAINER_PORT", ""
+    ).strip()
+    dns_host = values.get(f"{prefix}_HOST", "").strip() or db_name
     admin_user = values.get("MONGODB_ADMIN_USER", "").strip()
     admin_password = values.get("MONGODB_ADMIN_PASSWORD", "").strip()
 
-    if primary_ip and host_port:
+    # Inside the orchestrator container: use DockerDNS name + container port (27017).
+    # HOST_PRIMARY_IP here is the orchestrator's eth0 (e.g. 172.18.0.2) — published
+    # host ports are not reachable at that address. On bare metal host, use IP:HOST_PORT.
+    if _running_in_container():
+        host = dns_host
+        port = container_port
+    elif primary_ip and host_port:
         host = primary_ip
         port = host_port
     else:
-        host = values.get(f"{prefix}_HOST", db_name)
+        host = dns_host
         port = container_port
 
     if not host or not port:
@@ -228,11 +248,14 @@ def _mongo_client_for(db_name: str, values: dict[str, str]) -> Any:
         )
 
     if admin_user and admin_password:
-        uri = f"mongodb://{admin_user}:{admin_password}@{host}:{port}/?authSource=admin"
+        uri = (
+            f"mongodb://{quote_plus(admin_user)}:{quote_plus(admin_password)}"
+            f"@{host}:{port}/?authSource=admin"
+        )
     else:
         uri = f"mongodb://{host}:{port}"
 
-    client = MongoClient(uri, serverSelectionTimeoutMS=8000)
+    client = MongoClient(uri, serverSelectionTimeoutMS=20000)
     client.admin.command("ping")
     return client
 
