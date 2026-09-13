@@ -28,6 +28,29 @@ def _require_from_values(values: dict[str, str], key: str) -> str:
     return value
 
 
+def _yaml_key(name: str) -> str:
+    """Quote network/service keys when they contain YAML-sensitive characters."""
+    if any(ch in name for ch in ("-", ":", "#", " ", "'", '"')):
+        escaped = name.replace('"', '\\"')
+        return f'"{escaped}"'
+    return name
+
+
+def _network_block(name: str, *, external: bool) -> list[str]:
+    key = _yaml_key(name)
+    if external:
+        return [
+            f"  {key}:",
+            f"    name: {name}",
+            "    external: true",
+        ]
+    return [
+        f"  {key}:",
+        f"    name: {name}",
+        "    driver: bridge",
+    ]
+
+
 def build_databases_compose_yaml(values: dict[str, str]) -> str:
     """Emit compose YAML from secrets/pull values only — raises if any required key missing."""
     image = _require_from_values(values, "MONGODB_IMAGE")
@@ -37,21 +60,34 @@ def build_databases_compose_yaml(values: dict[str, str]) -> str:
     nontor_net = _require_from_values(values, "DOCKER_NETWORK_NONTOR_DB")
     admin_user = _require_from_values(values, "MONGODB_ADMIN_USER")
     admin_password = _require_from_values(values, "MONGODB_ADMIN_PASSWORD")
+    lucid_net = str(values.get("DOCKER_NETWORK_NAME", "")).strip()
+
+    # Dedupe: when Master/proxy seed maps both zones to the same LucidDNS name,
+    # emit a single networks: entry (YAML forbids duplicate mapping keys).
+    network_names: list[str] = []
+    for name in (tor_net, nontor_net):
+        if name and name not in network_names:
+            network_names.append(name)
 
     lines: list[str] = [
         "# LucidTops Databases compose — generated at time of operation",
         f"# Generated: {utc_now()}",
         "# Separate MongoDB container per named DB; Tor vs non-Tor networks.",
+        "# Networks matching DOCKER_NETWORK_NAME (Proxy LucidDNS) are external.",
         "networks:",
-        f"  {tor_net}:",
-        f"    name: {tor_net}",
-        "    driver: bridge",
-        f"  {nontor_net}:",
-        f"    name: {nontor_net}",
-        "    driver: bridge",
-        "",
-        "services:",
     ]
+    for name in network_names:
+        external = bool(lucid_net) and name == lucid_net
+        # Shared single-network alignment also treated as external LucidDNS join.
+        if not external and len(network_names) == 1 and lucid_net and name == lucid_net:
+            external = True
+        if not external and len(network_names) == 1 and not lucid_net:
+            # Only one network declared and no separate LucidDNS key — still may
+            # already exist from Proxy; prefer external when tor==nontor.
+            external = tor_net == nontor_net
+        lines.extend(_network_block(name, external=external))
+
+    lines.extend(["", "services:"])
 
     for db_name in ALL_NAMED_DB_CONTAINERS:
         prefix = secret_key_prefix(db_name)
@@ -68,9 +104,9 @@ def build_databases_compose_yaml(values: dict[str, str]) -> str:
                 f"    container_name: {db_name}",
                 "    restart: unless-stopped",
                 "    networks:",
-                f"      - {network}",
+                f"      - {_yaml_key(network)}",
                 "    ports:",
-                f"      - \"{host_port}:{container_port}\"",
+                f'      - "{host_port}:{container_port}"',
                 "    volumes:",
                 f"      - {data_mount}:{data_in_container}",
                 "    environment:",
@@ -119,4 +155,5 @@ def compose_status(values: dict[str, str] | None = None) -> dict[str, Any]:
         "services": list(ALL_NAMED_DB_CONTAINERS),
         "tor_network": values.get("DOCKER_NETWORK_TOR_DB", ""),
         "nontor_network": values.get("DOCKER_NETWORK_NONTOR_DB", ""),
+        "lucid_network": values.get("DOCKER_NETWORK_NAME", ""),
     }
