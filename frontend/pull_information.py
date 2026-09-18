@@ -310,12 +310,13 @@ def _read_onion_file(path: Path) -> str:
 
 
 def _pull_onion_addresses(lucid_root: Path) -> dict[str, str]:
-    onions = {"frontend": "", "master_server": "", "node_user": ""}
+    onions = {"frontend": "", "master_server": "", "node_user": "", "blockchain": ""}
     candidates = [
         lucid_root / "data" / "tor" / "onion",
         lucid_root / "onion",
         lucid_root / "run" / "lucid" / "onion",
         Path("/var/lib/tor"),
+        Path("/var/lib/tor/lucid"),
     ]
     for onion_dir in candidates:
         if not onion_dir.is_dir():
@@ -324,6 +325,7 @@ def _pull_onion_addresses(lucid_root: Path) -> dict[str, str]:
             "frontend": ("frontend", "frontend_onion", "hs_frontend"),
             "master_server": ("master", "master_server", "backend", "hs_master"),
             "node_user": ("node", "nodeuser", "hs_node"),
+            "blockchain": ("blockchain", "hs_blockchain"),
         }
         for key, names in mapping.items():
             if onions[key]:
@@ -338,10 +340,26 @@ def _pull_onion_addresses(lucid_root: Path) -> dict[str, str]:
                     if value:
                         onions[key] = value
                         break
+    # Prefer Master.secrets / proxy.secrets BLOCKCHAIN_ONION when present.
+    for secrets_name in ("Master.secrets", "proxy.secrets", "Proxy.secrets"):
+        secrets_path = lucid_root / "Server" / "Secrets" / secrets_name
+        if not secrets_path.is_file():
+            continue
+        try:
+            for line in secrets_path.read_text(encoding="utf-8").splitlines():
+                stripped = line.strip()
+                if not stripped.startswith("BLOCKCHAIN_ONION="):
+                    continue
+                value = stripped.split("=", 1)[1].strip().lower().split("/")[0]
+                if value.endswith(".onion"):
+                    onions["blockchain"] = value
+        except OSError:
+            pass
     for env_key, map_key in (
         ("FRONTEND_ONION", "frontend"),
         ("MASTER_SERVER_ONION", "master_server"),
         ("NODEUSER_ONION", "node_user"),
+        ("BLOCKCHAIN_ONION", "blockchain"),
     ):
         env_val = _env(env_key)
         if env_val.endswith(".onion"):
@@ -488,6 +506,8 @@ def bind_operation_environ(
         mapping["MASTER_SERVER_ONION"] = str(onions["master_server"])
     if onions.get("node_user"):
         mapping["NODEUSER_ONION"] = str(onions["node_user"])
+    if onions.get("blockchain"):
+        mapping["BLOCKCHAIN_ONION"] = str(onions["blockchain"])
 
     for key, value in mapping.items():
         if not value or not str(value).strip():
@@ -619,6 +639,9 @@ def build_frontend_secrets(pull: dict[str, Any] | None = None) -> dict[str, str]
         "NODEUSER_ONION": from_any(
             "NODEUSER_ONION", factory=lambda: str(onions.get("node_user") or "")
         ),
+        "BLOCKCHAIN_ONION": from_any(
+            "BLOCKCHAIN_ONION", factory=lambda: str(onions.get("blockchain") or "")
+        ),
         "FRONTEND_BRAND_NAME": from_any("FRONTEND_BRAND_NAME", factory=lambda: "LucidTops"),
         "PULLED_AT": str(info["pulled_at"]),
     }
@@ -670,6 +693,7 @@ def public_runtime_config(secrets: dict[str, str] | None = None) -> dict[str, An
         "proxyNodePath": data.get("FRONTEND_PROXY_NODE_PATH") or "",
         "frontendOnion": data.get("FRONTEND_ONION") or "",
         "masterOnion": data.get("MASTER_SERVER_ONION") or "",
+        "blockchainOnion": data.get("BLOCKCHAIN_ONION") or "",
         "proxySource": data.get("FRONTEND_PROXY_SOURCE") or "frontend",
         "pulledAt": data.get("PULLED_AT") or "",
         "hostname": data.get("HOSTNAME_CONSOLE") or "",
