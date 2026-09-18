@@ -9,20 +9,20 @@ NodeRoutes:
 - /node-report: report a node
 - /node-transfer: transfer a node
 - /node-control: control a node
-- /node-LucidLedger-read: read the LucidLedger system
-- /node-LucidLedger-write: write to the LucidLedger system
-- /node-LucidLedger-update: update the LucidLedger system
-- /node-LucidLedger-delete: delete from the LucidLedger system
-- /node-LucidLedger-create: create a new block in the LucidLedger system
-- /node-LucidLedger-find: find a block in the LucidLedger system
+- /node-LucidLedger-read: read LucidTops_LedgerDB (ops append-only surface)
+- /node-LucidLedger-write: refused — post-genesis BlockID append is ops create-path only
+- /node-LucidLedger-update: refused — no Master ledger overwrite
+- /node-LucidLedger-delete: refused — no Master ledger delete
+- /node-LucidLedger-create: create via ops → blockchain local chain → ops Master/Node append
+- /node-LucidLedger-find: find a block in LucidTops_LedgerDB
 - /node-LucidLedger-connect: connect to a block in the LucidLedger system
 - /node-LucidLedger-disconnect: disconnect from a block in the LucidLedger system
 - /node-LucidLedger-end: end a block in the LucidLedger system
-- /node-LucidLedger-record: record a block in the LucidLedger system
+- /node-LucidLedger-record: record via same create → append path
 - /node-LucidLedger-report: report a block in the LucidLedger system
-- /node-Blockchain-read: read the Blockchain system
-- /node-Blockchain-create: create a new block in the Blockchain system
-- /node-Blockchain-find: find a block in the Blockchain system
+- /node-Blockchain-read: read LucidTops_LedgerDB
+- /node-Blockchain-create: create via ops mediation (local chain + ops append)
+- /node-Blockchain-find: find a block in LucidTops_LedgerDB
 - /node-Blockchain-connect: connect to a block in the Blockchain system
 - /node-Blockchain-disconnect: disconnect from a block in the Blockchain system
 
@@ -46,9 +46,7 @@ from typing import Any
 
 from _common import (
     APIRouter,
-    BLOCKCHAIN_COLLECTION,
     Field,
-    LUCID_LEDGER_COLLECTION,
     OperatorAuthPayload,
     BaseModel,
     get_master_db,
@@ -62,6 +60,8 @@ from _common import (
 from NodeDbSchema import NODE_HOSTED_DB_COLLECTION, NODE_SEED_COLLECTION
 from operations_secrets import (
     node_ledger_db_name_for_id,
+    resolve_lucid_ledger_collection,
+    resolve_lucidtops_ledger_db_name,
     resolve_node_ledger_last_block_field,
     resolve_operations_api_prefix,
     resolve_operations_ledger_read_limit,
@@ -120,6 +120,10 @@ if BaseModel is not object:
         model_config = {"populate_by_name": True}
 
 
+def _lucidtops_ledger_collection(client: Any) -> Any:
+    return client[resolve_lucidtops_ledger_db_name()][resolve_lucid_ledger_collection()]
+
+
 def _ledger_action(
     *,
     route: str,
@@ -133,17 +137,12 @@ def _ledger_action(
             client=client,
             **operator_kwargs_from_payload(payload),
         )
-        db = get_master_db(client)
-        collection = (
-            LUCID_LEDGER_COLLECTION
-            if "LucidLedger" in route
-            else BLOCKCHAIN_COLLECTION
-        )
+        ledger = _lucidtops_ledger_collection(client)
         now = utc_now()
         block_id = getattr(payload, "block_id", None)
         session_id = getattr(payload, "session_id", None)
 
-        if route.endswith("-create"):
+        if route.endswith("-create") or route.endswith("-record"):
             if not session_id:
                 raise ValueError(
                     "sessionID is required — New_BlockID is created only from "
@@ -155,9 +154,15 @@ def _ledger_action(
                 **operator_kwargs_from_payload(payload),
             )
 
+        if route.endswith("-write") or route.endswith("-update") or route.endswith("-delete"):
+            raise PermissionError(
+                "post-genesis BlockID mutations refused — Master/Node ledger is "
+                "ops append-via-create only (no direct write/update/delete)"
+            )
+
         if route.endswith("-read"):
             records = list(
-                db[collection].find({}, {"_id": 0}).limit(resolve_operations_ledger_read_limit())
+                ledger.find({}, {"_id": 0}).limit(resolve_operations_ledger_read_limit())
             )
             node_ledger = client[node_ledger_db_name_for_id(operator["operator_id"])]
             last_field = resolve_node_ledger_last_block_field()
@@ -165,40 +170,20 @@ def _ledger_action(
             return {
                 "records": records,
                 "count": len(records),
+                "LucidTops_LedgerDB": resolve_lucidtops_ledger_db_name(),
+                "ledger_collection": resolve_lucid_ledger_collection(),
                 "operator_id": operator["operator_id"],
                 "id_type": operator["id_type"],
                 last_field: meta.get(last_field) or meta.get("LastBlockID"),
             }
 
         if route.endswith("-find") and block_id:
-            record = db[collection].find_one({"BlockID": block_id}, {"_id": 0})
+            record = ledger.find_one({"BlockID": block_id}, {"_id": 0})
             if not record:
-                record = db[collection].find_one({"blockID": block_id}, {"_id": 0})
+                record = ledger.find_one({"blockID": block_id}, {"_id": 0})
             if not record:
                 raise LookupError("Block not found")
             return record
-
-        if route.endswith("-write") or route.endswith("-update"):
-            if not block_id:
-                raise ValueError("blockID is required")
-            db[collection].update_one(
-                {"$or": [{"BlockID": block_id}, {"blockID": block_id}]},
-                {
-                    "$set": {
-                        "payload": getattr(payload, "payload", None) or {},
-                        "updated_at": now,
-                        "creator_id": {operator["id_type"]: operator["operator_id"]},
-                    }
-                },
-                upsert=True,
-            )
-            return {"BlockID": block_id, "status": "updated"}
-
-        if route.endswith("-delete") and block_id:
-            db[collection].delete_one(
-                {"$or": [{"BlockID": block_id}, {"blockID": block_id}]}
-            )
-            return {"BlockID": block_id, "status": "deleted"}
 
         return {
             "operator_id": operator["operator_id"],

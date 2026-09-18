@@ -42,6 +42,7 @@ from _common import (
     get_master_db,
     get_mongo_client,
     handle_operations_error,
+    model_validator,
     operator_kwargs_from_payload,
     require_operations_operator,
     tor_envelope,
@@ -52,6 +53,9 @@ from _common import (
 from UserHandler import verify_user_credentials
 from WebPageLink import frontend_link_for_api_route
 from operations_secrets import (
+    resolve_blockchain_onion,
+    resolve_lucid_ledger_collection,
+    resolve_lucidtops_ledger_db_name,
     resolve_operations_api_prefix,
     resolve_operations_ledger_read_limit,
     resolve_session_id_length,
@@ -100,6 +104,25 @@ if BaseModel is not object:
         user_token_id: str = Field(..., alias="UserTokenID")
 
         model_config = {"populate_by_name": True}
+
+    class LucidLedgerReadPayload(BaseModel):
+        """Public ledger read — UserID + TokenID only (no operator gate)."""
+
+        user_id: str = Field(..., alias="UserID")
+        user_token_id: str | None = Field(default=None, alias="TokenID")
+        token_id_alias: str | None = Field(default=None, alias="UserTokenID")
+
+        model_config = {"populate_by_name": True}
+
+        if model_validator is not None:
+
+            @model_validator(mode="after")
+            def _resolve_token(self) -> Any:
+                resolved = (self.user_token_id or self.token_id_alias or "").strip()
+                if not resolved:
+                    raise ValueError("TokenID or UserTokenID required for LucidLedger read")
+                object.__setattr__(self, "user_token_id", resolved)
+                return self
 
     class UserCreatePayload(OperatorAuthPayload):
         email: str = Field(..., min_length=3)  # type: ignore[reportIncompatibleVariableOverride]
@@ -155,6 +178,39 @@ def _user_handler(route: str, payload: Any) -> dict[str, Any]:
     if client is None:
         raise RuntimeError("Master server database is unavailable")
     try:
+        # Public ledger read: UserID/TokenID only — no operations operator gate.
+        if route == "/user-LucidLedger-read":
+            token_id = getattr(payload, "user_token_id", None) or getattr(
+                payload, "token_id_alias", None
+            )
+            if not verify_user_id_token(
+                user_id=payload.user_id,
+                token_id=token_id,
+                client=client,
+            ):
+                raise PermissionError("UserID / TokenID verification failed")
+            ledger_db = client[resolve_lucidtops_ledger_db_name()]
+            ledger_collection = resolve_lucid_ledger_collection()
+            records = list(
+                ledger_db[ledger_collection]
+                .find({}, {"_id": 0})
+                .sort("creation_timestamp", -1)
+                .limit(resolve_operations_ledger_read_limit())
+            )
+            result = {
+                "UserID": payload.user_id,
+                "blocks": records,
+                "records": records,
+                "count": len(records),
+                "surface": "public_ledger",
+                "read_only": True,
+                "LucidTops_LedgerDB": resolve_lucidtops_ledger_db_name(),
+                "ledger_collection": ledger_collection,
+                "blockchain_onion": resolve_blockchain_onion() or None,
+            }
+            _attach_frontend_link(result, route)
+            return tor_envelope(route=route, subsystem="user-system", payload=result)
+
         operator = require_operations_operator(
             client=client,
             **operator_kwargs_from_payload(payload),
@@ -216,24 +272,6 @@ def _user_handler(route: str, payload: Any) -> dict[str, Any]:
                 "UserID": payload.user_id,
                 "action": route.lstrip("/"),
                 "status": "disconnected",
-                "operator_id": operator["operator_id"],
-            }
-        elif route == "/user-LucidLedger-read":
-            if not verify_user_id_token(
-                user_id=payload.user_id,
-                token_id=payload.user_token_id,
-                client=client,
-            ):
-                raise PermissionError("UserID / TokenID verification failed")
-            records = list(
-                db[LUCID_LEDGER_COLLECTION].find({}, {"_id": 0}).limit(
-                    resolve_operations_ledger_read_limit()
-                )
-            )
-            result = {
-                "UserID": payload.user_id,
-                "records": records,
-                "count": len(records),
                 "operator_id": operator["operator_id"],
             }
         elif route == "/user-session-create":
@@ -377,7 +415,7 @@ def create_user_router(*, prefix: str = "") -> Any:
             raise
 
     @router.post("/user-LucidLedger-read")
-    def user_lucid_ledger_read(payload: UserAuthPayload) -> dict[str, Any]:
+    def user_lucid_ledger_read(payload: LucidLedgerReadPayload) -> dict[str, Any]:
         try:
             return _user_handler("/user-LucidLedger-read", payload)
         except Exception as exc:

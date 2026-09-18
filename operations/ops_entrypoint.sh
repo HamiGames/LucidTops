@@ -14,6 +14,8 @@ python "${OPS_DIR}/ops_pull_information.py" > "${ENV_FILE}"
 rm -f "${ENV_FILE}"
 
 python -c "from operations_secrets import write_operations_secrets; write_operations_secrets(force=False)"
+# Confirm DockerDNS targets + refuse serve if Master ledger write still allowed after genesis.
+python -c "from operations_secrets import confirm_operations_blockchain_targets; import json; print(json.dumps(confirm_operations_blockchain_targets(), indent=2, default=str))"
 
 if [ -z "${OPERATIONS_BIND_HOST:-}" ] || [ -z "${OPERATIONS_BIND_PORT:-}" ]; then
   echo "OPERATIONS_BIND_HOST and OPERATIONS_BIND_PORT must be set at time of operation" >&2

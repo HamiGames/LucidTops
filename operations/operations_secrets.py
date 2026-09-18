@@ -27,6 +27,12 @@ OPERATIONS_SECRETS_KEYS: tuple[str, ...] = (
     "MASTER_SERVER_ONION",
     "FRONTEND_ONION",
     "NODEUSER_ONION",
+    "BLOCKCHAIN_ONION",
+    "BLOCKCHAIN_DOCKER_DNS_NAME",
+    "BLOCKCHAIN_BIND_PORT",
+    "BLOCKCHAIN_API_PREFIX",
+    "BLOCKCHAIN_SECRET",
+    "BLOCKCHAIN_SECRET_KEY",
     "SESSION_CONTROL_JAVASCRIPT_SOURCE",
     "USER_REGISTER_JAVASCRIPT_SOURCE",
     "LUCID_PROGRAM_DIR",
@@ -484,6 +490,121 @@ def resolve_operations_docker_dns_name() -> str:
     return require_secret("OPERATIONS_DOCKER_DNS_NAME")
 
 
+def resolve_blockchain_onion() -> str:
+    return resolve_secret("BLOCKCHAIN_ONION")
+
+
+def resolve_blockchain_docker_dns_name() -> str:
+    return require_secret("BLOCKCHAIN_DOCKER_DNS_NAME")
+
+
+def resolve_blockchain_bind_port() -> int:
+    return require_secret_int("BLOCKCHAIN_BIND_PORT")
+
+
+def resolve_blockchain_api_prefix() -> str:
+    value = require_secret("BLOCKCHAIN_API_PREFIX")
+    if not value.startswith("/"):
+        return f"/{value}"
+    return value.rstrip("/") or "/blockchain"
+
+
+def resolve_blockchain_secret() -> str:
+    return require_secret("BLOCKCHAIN_SECRET")
+
+
+def resolve_blockchain_secret_key() -> str:
+    return require_secret("BLOCKCHAIN_SECRET_KEY")
+
+
+def confirm_operations_blockchain_targets() -> dict[str, Any]:
+    """
+    Confirm operations.secrets blockchain DockerDNS targets match Master/blockchain seed.
+    Refuse serve when blockchain.secrets is present but required keys are still missing.
+    When blockchain.secrets is present after genesis, refuse if MASTER_LEDGER_WRITE_ALLOWED
+    is still true (ops verifies revoke only — does not perform genesis or revoke).
+    """
+    lucid_root_raw = resolve_secret("LUCID_TOPS_ROOT")
+    lucid_root = Path(lucid_root_raw).expanduser() if lucid_root_raw else None
+    blockchain_secrets = (
+        (lucid_root / "blockchain" / "secrets" / "blockchain.secrets")
+        if lucid_root
+        else None
+    )
+    required = (
+        "BLOCKCHAIN_DOCKER_DNS_NAME",
+        "BLOCKCHAIN_BIND_PORT",
+        "BLOCKCHAIN_API_PREFIX",
+        "BLOCKCHAIN_SECRET",
+        "BLOCKCHAIN_SECRET_KEY",
+        "LUCIDTOPS_LEDGER_DB_NAME",
+        "LUCID_LEDGER_COLLECTION",
+    )
+    missing = [key for key in required if not resolve_secret(key)]
+    if missing and blockchain_secrets and blockchain_secrets.exists():
+        raise RuntimeError(
+            "operations blockchain DockerDNS targets incomplete after seed — missing: "
+            + ", ".join(missing)
+        )
+    if missing:
+        return {
+            "confirmed": False,
+            "warning": "blockchain.secrets not yet available; governance create will fail until seeded",
+            "missing": missing,
+            "BLOCKCHAIN_ONION": resolve_blockchain_onion() or None,
+        }
+
+    master_ledger_write_revoked: bool | None = None
+    master_ledger_write_allowed_raw: str | None = None
+    genesis_initialized = False
+    if blockchain_secrets and blockchain_secrets.exists():
+        chain_secrets = parse_secrets_file(blockchain_secrets)
+        write_raw = (
+            chain_secrets.get("MASTER_LEDGER_WRITE_ALLOWED")
+            or _env("MASTER_LEDGER_WRITE_ALLOWED")
+            or ""
+        ).strip()
+        if not write_raw:
+            raise RuntimeError(
+                "blockchain.secrets present but MASTER_LEDGER_WRITE_ALLOWED missing — "
+                "ops cannot confirm Master ledger write revoke"
+            )
+        write_norm = write_raw.lower()
+        if write_norm not in {"0", "1", "true", "false", "yes", "no"}:
+            raise RuntimeError(
+                f"MASTER_LEDGER_WRITE_ALLOWED must be boolean (got {write_raw!r})"
+            )
+        master_ledger_write_allowed_raw = write_raw
+        write_allowed = write_norm in {"1", "true", "yes"}
+        genesis_lock = (
+            lucid_root / "Lucidtoken" / ".genesis_initialized" if lucid_root else None
+        )
+        genesis_initialized = bool(genesis_lock and genesis_lock.exists())
+        if genesis_initialized and write_allowed:
+            raise RuntimeError(
+                "MASTER_LEDGER_WRITE_ALLOWED still true after genesis — "
+                "refuse ops serve until blockchain Master ledger write is revoked"
+            )
+        master_ledger_write_revoked = not write_allowed
+
+    result: dict[str, Any] = {
+        "confirmed": True,
+        "BLOCKCHAIN_DOCKER_DNS_NAME": resolve_blockchain_docker_dns_name(),
+        "BLOCKCHAIN_BIND_PORT": resolve_blockchain_bind_port(),
+        "BLOCKCHAIN_API_PREFIX": resolve_blockchain_api_prefix(),
+        "BLOCKCHAIN_ONION": resolve_blockchain_onion() or None,
+        "LUCIDTOPS_LEDGER_DB_NAME": resolve_lucidtops_ledger_db_name(),
+        "LUCID_LEDGER_COLLECTION": resolve_lucid_ledger_collection(),
+        "genesis_initialized": genesis_initialized,
+    }
+    if master_ledger_write_allowed_raw is not None:
+        result["MASTER_LEDGER_WRITE_ALLOWED"] = master_ledger_write_allowed_raw
+    if master_ledger_write_revoked is not None:
+        result["master_ledger_write_revoked"] = master_ledger_write_revoked
+    return result
+
+
+
 def resolve_operations_service_name() -> str:
     return require_secret("OPERATIONS_SERVICE_NAME")
 
@@ -571,6 +692,52 @@ def _seed_prior_from_server_secrets(
     return merged
 
 
+def _seed_blockchain_targets_from_master(
+    lucid_root: Path, prior: dict[str, str]
+) -> dict[str, str]:
+    """Seed BLOCKCHAIN_ONION / DockerDNS / API auth from Master.secrets + blockchain.secrets."""
+    merged = dict(prior)
+    master_path = lucid_root / "Server" / "Secrets" / "Master.secrets"
+    blockchain_path = lucid_root / "blockchain" / "secrets" / "blockchain.secrets"
+    seed: dict[str, str] = {}
+    if master_path.exists():
+        seed.update(parse_secrets_file(master_path))
+    if blockchain_path.exists():
+        seed.update(parse_secrets_file(blockchain_path))
+
+    for key in (
+        "BLOCKCHAIN_ONION",
+        "BLOCKCHAIN_DOCKER_DNS_NAME",
+        "BLOCKCHAIN_CONTAINER_NAME",
+        "BLOCKCHAIN_BIND_PORT",
+        "BLOCKCHAIN_API_PREFIX",
+        "BLOCKCHAIN_SECRET",
+        "BLOCKCHAIN_SECRET_KEY",
+        "DOCKER_NETWORK_NAME",
+    ):
+        if not merged.get(key, "").strip():
+            value = seed.get(key, "").strip()
+            if value:
+                merged[key] = value
+
+    if not merged.get("BLOCKCHAIN_DOCKER_DNS_NAME", "").strip():
+        container = (
+            seed.get("BLOCKCHAIN_CONTAINER_NAME", "").strip()
+            or seed.get("BLOCKCHAIN_DOCKER_DNS_NAME", "").strip()
+            or "lucid-blockchain"
+        )
+        merged["BLOCKCHAIN_DOCKER_DNS_NAME"] = container
+    if not merged.get("BLOCKCHAIN_BIND_PORT", "").strip():
+        merged["BLOCKCHAIN_BIND_PORT"] = (
+            seed.get("BLOCKCHAIN_BIND_PORT", "").strip() or "38421"
+        )
+    if not merged.get("BLOCKCHAIN_API_PREFIX", "").strip():
+        merged["BLOCKCHAIN_API_PREFIX"] = (
+            seed.get("BLOCKCHAIN_API_PREFIX", "").strip() or "/blockchain"
+        )
+    return merged
+
+
 def apply_pull_to_operations_configuration(
     *,
     pull: dict[str, Any] | None = None,
@@ -603,6 +770,7 @@ def apply_pull_to_operations_configuration(
     secrets_dir.mkdir(parents=True, exist_ok=True)
 
     existing = _seed_prior_from_server_secrets(lucid_root, existing)
+    existing = _seed_blockchain_targets_from_master(lucid_root, existing)
 
     bind_host = (
         _pick(existing, "OPERATIONS_BIND_HOST")
@@ -669,6 +837,7 @@ def apply_pull_to_operations_configuration(
     master_onion = _pick(existing, "MASTER_SERVER_ONION")
     frontend_onion = _pick(existing, "FRONTEND_ONION")
     nodeuser_onion = _pick(existing, "NODEUSER_ONION")
+    blockchain_onion = _pick(existing, "BLOCKCHAIN_ONION")
 
     resolved: dict[str, str] = {
         "GENERATED_AT": utc_now(),
@@ -682,6 +851,13 @@ def apply_pull_to_operations_configuration(
         "MASTER_SERVER_ONION": master_onion,
         "FRONTEND_ONION": frontend_onion,
         "NODEUSER_ONION": nodeuser_onion,
+        "BLOCKCHAIN_ONION": blockchain_onion,
+        "BLOCKCHAIN_DOCKER_DNS_NAME": _pick(existing, "BLOCKCHAIN_DOCKER_DNS_NAME")
+        or "lucid-blockchain",
+        "BLOCKCHAIN_BIND_PORT": _pick(existing, "BLOCKCHAIN_BIND_PORT") or "38421",
+        "BLOCKCHAIN_API_PREFIX": _pick(existing, "BLOCKCHAIN_API_PREFIX") or "/blockchain",
+        "BLOCKCHAIN_SECRET": _pick(existing, "BLOCKCHAIN_SECRET"),
+        "BLOCKCHAIN_SECRET_KEY": _pick(existing, "BLOCKCHAIN_SECRET_KEY"),
         "SESSION_CONTROL_JAVASCRIPT_SOURCE": _pick(
             existing, "SESSION_CONTROL_JAVASCRIPT_SOURCE"
         )
@@ -697,7 +873,7 @@ def apply_pull_to_operations_configuration(
         "SESSION_RECORDS_COLLECTION": _pick(existing, "SESSION_RECORDS_COLLECTION")
         or "session_records",
         "LUCID_LEDGER_COLLECTION": _pick(existing, "LUCID_LEDGER_COLLECTION")
-        or "LucidLedger",
+        or "BlockID",
         "BLOCKCHAIN_COLLECTION": _pick(existing, "BLOCKCHAIN_COLLECTION") or "Blockchain",
         "CHIP_IN_COLLECTION": _pick(existing, "CHIP_IN_COLLECTION") or "chip_in",
         "CHIP_IN_CROSSOVER_COLLECTION": _pick(existing, "CHIP_IN_CROSSOVER_COLLECTION")
@@ -708,7 +884,7 @@ def apply_pull_to_operations_configuration(
         or "100",
         "OPERATIONS_QUERY_LIMIT": _pick(existing, "OPERATIONS_QUERY_LIMIT") or "100",
         "BLOCKCHAIN_HASH_ALGORITHM": _pick(existing, "BLOCKCHAIN_HASH_ALGORITHM")
-        or "sha256",
+        or "sha512",
         "SESSION_TRANSFER_DEFAULT_TARGET": _pick(
             existing, "SESSION_TRANSFER_DEFAULT_TARGET"
         )
