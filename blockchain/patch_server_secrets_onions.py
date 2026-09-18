@@ -243,7 +243,7 @@ def patch_server_secrets(
 
     for key in PATCH_ONION_KEYS:
         if key not in discovered:
-            report["missing_sources"].append(key)
+            report["missing_sources"].append(key)  # pyright: ignore[reportAttributeAccessIssue]
 
     skipped: dict[str, list[str]] = {"master": [], "proxy": []}
     for label, path in (("master", master_path), ("proxy", proxy_path)):
