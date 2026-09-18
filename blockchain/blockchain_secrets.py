@@ -44,6 +44,9 @@ BLOCKCHAIN_SECRETS_KEYS: tuple[str, ...] = (
     "MONGODB_HOST",
     "MONGODB_PORT",
     "MONGODB_MAIN_DATABASE_NAME",
+    "BLOCKCHAIN_CHAIN_DATABASE_NAME",
+    "MASTER_LEDGER_DATABASE_NAME",
+    "MASTER_LEDGER_WRITE_ALLOWED",
     "MONGODB_URL",
     "MONGODB_SERVER_SELECTION_TIMEOUT_MS",
     "MASTER_SERVER_INTERNAL_HOST",
@@ -606,10 +609,34 @@ def build_blockchain_secrets_values(
     )
 
     db_name = (
-        prior.get("MONGODB_MAIN_DATABASE_NAME")
+        prior.get("BLOCKCHAIN_CHAIN_DATABASE_NAME")
+        or prior.get("MONGODB_MAIN_DATABASE_NAME")
+        or _env("BLOCKCHAIN_CHAIN_DATABASE_NAME")
         or _env("MONGODB_MAIN_DATABASE_NAME")
+        or "LucidTopsBlockchain_ChainDB"
+    )
+    # Legacy: LucidTops_LedgerDB was used as chain DB — migrate to dedicated chain DB.
+    if db_name == "LucidTops_LedgerDB":
+        db_name = "LucidTopsBlockchain_ChainDB"
+    master_ledger_db = (
+        prior.get("MASTER_LEDGER_DATABASE_NAME")
+        or _env("MASTER_LEDGER_DATABASE_NAME")
         or "LucidTops_LedgerDB"
     )
+    # Once revoked, never re-enable Master ledger write from secrets rebuild.
+    prior_write = (
+        prior.get("MASTER_LEDGER_WRITE_ALLOWED")
+        or _env("MASTER_LEDGER_WRITE_ALLOWED")
+        or ""
+    ).strip().lower()
+    if prior_write in {"0", "false", "no"}:
+        master_ledger_write = "false"
+    else:
+        master_ledger_write = (
+            prior.get("MASTER_LEDGER_WRITE_ALLOWED")
+            or _env("MASTER_LEDGER_WRITE_ALLOWED")
+            or "true"
+        )
     mongodb_url = (
         prior.get("MONGODB_URL")
         or _env("MONGODB_URL")
@@ -665,6 +692,9 @@ def build_blockchain_secrets_values(
         "MONGODB_HOST": mongodb_host,
         "MONGODB_PORT": str(mongodb_port),
         "MONGODB_MAIN_DATABASE_NAME": db_name,
+        "BLOCKCHAIN_CHAIN_DATABASE_NAME": db_name,
+        "MASTER_LEDGER_DATABASE_NAME": master_ledger_db,
+        "MASTER_LEDGER_WRITE_ALLOWED": str(master_ledger_write).lower(),
         "MONGODB_URL": mongodb_url,
         "MONGODB_SERVER_SELECTION_TIMEOUT_MS": str(mongo_timeout),
         "MASTER_SERVER_INTERNAL_HOST": master_host,
@@ -857,7 +887,67 @@ def resolve_mongodb_port() -> int:
 
 
 def resolve_mongodb_main_database_name() -> str:
-    return require_secret("MONGODB_MAIN_DATABASE_NAME")
+    """Chain DB name (alias of BLOCKCHAIN_CHAIN_DATABASE_NAME)."""
+    return resolve_blockchain_chain_database_name()
+
+
+def resolve_blockchain_chain_database_name() -> str:
+    value = get_secret("BLOCKCHAIN_CHAIN_DATABASE_NAME") or get_secret(
+        "MONGODB_MAIN_DATABASE_NAME"
+    )
+    if not value:
+        raise RuntimeError(
+            "BLOCKCHAIN_CHAIN_DATABASE_NAME missing — must be set at time of operation"
+        )
+    if value == "LucidTops_LedgerDB":
+        raise RuntimeError(
+            "BLOCKCHAIN_CHAIN_DATABASE_NAME must not be LucidTops_LedgerDB — "
+            "Master public ledger is separate; use LucidTopsBlockchain_ChainDB"
+        )
+    return value
+
+
+def resolve_master_ledger_database_name() -> str:
+    return require_secret("MASTER_LEDGER_DATABASE_NAME")
+
+
+def resolve_master_ledger_write_allowed() -> bool:
+    raw = get_secret("MASTER_LEDGER_WRITE_ALLOWED").lower()
+    if not raw:
+        return True
+    if raw in {"1", "true", "yes"}:
+        return True
+    if raw in {"0", "false", "no"}:
+        return False
+    raise RuntimeError(
+        f"MASTER_LEDGER_WRITE_ALLOWED must be boolean at time of operation (got {raw!r})"
+    )
+
+
+def update_blockchain_secret_value(key: str, value: str) -> Path:
+    """Update one key in blockchain.secrets and reload cache (used to revoke Master write)."""
+    path = blockchain_secrets_path()
+    existing = dict(load_blockchain_secrets(reload=True))
+    existing[key.upper()] = str(value).strip()
+    lines = [
+        "# LucidTops blockchain.secrets - created at time of operation from hardware pull",
+        "# Onion + DOCKER_NETWORK_NAME seeded from Server/Secrets/Master.secrets + proxy.secrets",
+        f"# Updated: {utc_now()}",
+        "",
+    ]
+    for secret_key in BLOCKCHAIN_SECRETS_KEYS:
+        lines.append(f"{secret_key}={existing.get(secret_key, '')}")
+    # Preserve any extra keys not in the canonical list.
+    for extra_key, extra_value in sorted(existing.items()):
+        if extra_key not in BLOCKCHAIN_SECRETS_KEYS and extra_value:
+            lines.append(f"{extra_key}={extra_value}")
+    lines.append("")
+    path.write_text("\n".join(lines), encoding="utf-8")
+    if os.name != "nt":
+        os.chmod(path, 0o600)
+    load_blockchain_secrets(reload=True)
+    os.environ[key.upper()] = str(value).strip()
+    return path
 
 
 def resolve_mongodb_url() -> str:
@@ -866,7 +956,7 @@ def resolve_mongodb_url() -> str:
         return configured
     host = resolve_mongodb_host()
     port = resolve_mongodb_port()
-    database = resolve_mongodb_main_database_name()
+    database = resolve_blockchain_chain_database_name()
     return f"mongodb://{host}:{port}/{database}"
 
 
@@ -1091,7 +1181,154 @@ def blockchain_secrets_status() -> dict[str, Any]:
 
 def ensure_blockchain_secrets(*, force: bool = False) -> Path:
     """Pull hardware and ensure blockchain.secrets exists before other blockchain ops."""
-    return write_blockchain_secrets_from_pull(force=force)
+    path = write_blockchain_secrets_from_pull(force=force)
+    write_local_deploy_config()
+    return path
+
+
+# Keys that must match Master.secrets (when present) at blockchain serve time.
+_DEPLOY_CONFIRM_KEYS: tuple[str, ...] = (
+    "BLOCKCHAIN_ONION",
+    "DOCKER_NETWORK_NAME",
+    "MASTER_SERVER_ONION",
+)
+
+
+def resolve_blockchain_configs_dir() -> Path:
+    """Local deploy configs directory (written at operation time)."""
+    lucid_root = resolve_lucid_tops_root()
+    configured = get_secret("BLOCKCHAIN_CONFIGS_DIR")
+    if configured:
+        return Path(configured).expanduser()
+    return lucid_root / "blockchain" / "configs"
+
+
+def write_local_deploy_config() -> Path:
+    """
+    Write confirmed deploy config locally under blockchain/configs at operation time.
+    Seed values come from blockchain.secrets (already seeded from Master/proxy).
+    """
+    secrets = load_blockchain_secrets(reload=True)
+    configs_dir = resolve_blockchain_configs_dir()
+    configs_dir.mkdir(parents=True, exist_ok=True)
+    target = configs_dir / "deploy.config"
+    lines = [
+        "# LucidTops blockchain local deploy config — written at time of operation",
+        f"# Generated: {utc_now()}",
+        "# Chain DB is local governance; Master ledger write revoked after genesis",
+        "# Sourced from blockchain.secrets (seeded from Master.secrets / proxy.secrets)",
+    ]
+    for key in (
+        "BLOCKCHAIN_ONION",
+        "DOCKER_NETWORK_NAME",
+        "MASTER_SERVER_ONION",
+        "NODEUSER_ONION",
+        "BLOCKCHAIN_CHAIN_DATABASE_NAME",
+        "MONGODB_MAIN_DATABASE_NAME",
+        "MASTER_LEDGER_DATABASE_NAME",
+        "MASTER_LEDGER_WRITE_ALLOWED",
+        "MONGODB_HOST",
+        "MONGODB_PORT",
+        "BLOCKCHAIN_BIND_HOST",
+        "BLOCKCHAIN_BIND_PORT",
+        "BLOCKCHAIN_API_PREFIX",
+        "BLOCKCHAIN_CONTAINER_NAME",
+        "OPERATIONS_DOCKER_DNS_NAME",
+    ):
+        value = secrets.get(key) or get_secret(key)
+        if value:
+            lines.append(f"{key}={value}")
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return target
+
+
+def confirm_local_deploy_config() -> dict[str, Any]:
+    """
+    Confirm local blockchain.secrets / deploy.config match Master.secrets seed keys.
+    Refuse serve when chain DB equals Master ledger DB, or Master write still
+    allowed after genesis is initialized.
+    """
+    lucid_root = resolve_lucid_tops_root()
+    master_path = Path(
+        get_secret("MASTER_SECRETS_FILE")
+        or (lucid_root / "Server" / "Secrets" / "Master.secrets").as_posix()
+    ).expanduser()
+    local = load_blockchain_secrets(reload=True)
+    if not local:
+        raise RuntimeError(
+            "blockchain.secrets missing — must be written at time of operation before serve"
+        )
+
+    config_path = write_local_deploy_config()
+    mismatches: list[str] = []
+    compared: dict[str, dict[str, str]] = {}
+
+    master_values: dict[str, str] = {}
+    if master_path.exists():
+        for line in master_path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            key, value = stripped.split("=", 1)
+            master_values[key.strip().upper()] = value.strip()
+
+    for key in _DEPLOY_CONFIRM_KEYS:
+        local_value = (local.get(key) or "").strip()
+        master_value = (master_values.get(key) or "").strip()
+        compared[key] = {"local": local_value, "master": master_value}
+        if master_value and local_value and master_value != local_value:
+            mismatches.append(key)
+
+    if mismatches:
+        raise RuntimeError(
+            "local blockchain deploy config does not match Master.secrets for: "
+            + ", ".join(mismatches)
+            + " — refuse serve until secrets are re-seeded at launch"
+        )
+
+    chain_db = (
+        local.get("BLOCKCHAIN_CHAIN_DATABASE_NAME")
+        or local.get("MONGODB_MAIN_DATABASE_NAME")
+        or ""
+    ).strip()
+    master_ledger_db = (local.get("MASTER_LEDGER_DATABASE_NAME") or "").strip()
+    if not chain_db:
+        raise RuntimeError(
+            "BLOCKCHAIN_CHAIN_DATABASE_NAME missing — local chain DB required at deploy"
+        )
+    if not master_ledger_db:
+        raise RuntimeError(
+            "MASTER_LEDGER_DATABASE_NAME missing — must be LucidTops_LedgerDB at deploy"
+        )
+    if master_ledger_db != "LucidTops_LedgerDB":
+        raise RuntimeError(
+            f"MASTER_LEDGER_DATABASE_NAME must be LucidTops_LedgerDB (got {master_ledger_db!r})"
+        )
+    if chain_db == master_ledger_db:
+        raise RuntimeError(
+            "blockchain chain DB must not equal Master ledger DB — "
+            "refuse serve (use LucidTopsBlockchain_ChainDB for chain)"
+        )
+
+    write_allowed = (local.get("MASTER_LEDGER_WRITE_ALLOWED") or "true").strip().lower()
+    genesis_lock = lucid_root / "Lucidtoken" / ".genesis_initialized"
+    if genesis_lock.exists() and write_allowed in {"1", "true", "yes"}:
+        raise RuntimeError(
+            "MASTER_LEDGER_WRITE_ALLOWED still true after genesis — "
+            "refuse serve until Master ledger write is revoked"
+        )
+
+    return {
+        "confirmed": True,
+        "secrets_file": blockchain_secrets_path().as_posix(),
+        "deploy_config": config_path.as_posix(),
+        "master_secrets_file": master_path.as_posix() if master_path.exists() else None,
+        "chain_database": chain_db,
+        "master_ledger_database": master_ledger_db,
+        "master_ledger_write_allowed": write_allowed,
+        "compared": compared,
+        "mismatches": mismatches,
+    }
 
 
 def __getattr__(name: str) -> Any:

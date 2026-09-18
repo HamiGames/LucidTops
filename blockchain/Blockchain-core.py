@@ -1,9 +1,10 @@
 """ the core functions of the blockchain system, including the requirements and limitations for the blockchain system
 blockchain core functions:
 - sha512 hash function
-- block creation
+- block creation (local chain DB only post-genesis)
 - LucidToken generation
-- blockchain ledger system recording
+- chain ledger_records recording
+- ledger_doc payload for operations Master/Node transport (no Master write after genesis)
 - blockchain governance protocol
 - blockchain session history recording
 
@@ -856,6 +857,30 @@ def create_block(
         creator_id=winner_id,
     )
 
+    from legder import build_block_id_ledger_doc
+
+    last_block_id = (
+        str(previous.get("blockID") or previous.get("block_hash"))
+        if previous
+        else str(GENESIS_PREVIOUS_HASH)
+    )
+    session_id_value = (
+        winner.get("sessionID") if isinstance(winner.get("sessionID"), str) else None
+    )
+    chunk_count = int(awaiting_record.get("chunk_count") or 0)
+    # Payload only — ops appends Master LucidTops_LedgerDB + NodeID_LedgerDB.
+    ledger_doc = build_block_id_ledger_doc(
+        block_id=block_id,
+        creator_id=winner_id,
+        creation_timestamp=confirmed_at,
+        rewards=reward_count,
+        last_block_id=last_block_id,
+        session_data_count=chunk_count,
+        new_block_id=new_block_id,
+        session_id=session_id_value,
+        status="committed",
+    )
+
     for session in pending_sessions[: len(session_payload)]:
         db[SESSION_RECORDS_COLLECTION].update_one(
             {"sessionID": session.get("sessionID")},
@@ -889,4 +914,5 @@ def create_block(
         "BlockID": block_id,
         "minted_tokens": minted_tokens,
         "supply": get_token_supply_state(client=client),
+        "ledger_doc": ledger_doc,
     }

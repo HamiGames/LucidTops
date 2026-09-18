@@ -1,7 +1,9 @@
 """Blockchain configuration: one-time genesis block creation and blockchain initialization.
-Creates genesis BlockID (SHA-512), inserts into LucidTops_LedgerDB ledger, mints LucidTokens,
-writes Tokens.log on the creator console. Creator ID and previous hash come from hardware pull
-at time of operation (never placeholders).
+
+Creates genesis BlockID (SHA-512) in the local chain DB, appends Master
+LucidTops_LedgerDB.BlockID once at genesis, then revokes Master-ledger write.
+Post-genesis: chain writes only; ops is sole Master/Node ledger appender via ledger_doc.
+Creator ID and previous hash come from hardware pull at time of operation.
 
 RULES of CODE CREATION:
 - No hardcoded values, all values are created at time of operation.
@@ -35,15 +37,23 @@ PROJECT_ROOT = BLOCKCHAIN_DIR.parent
 if str(BLOCKCHAIN_DIR) not in sys.path:
     sys.path.insert(0, str(BLOCKCHAIN_DIR))
 
-from blockchain_schema import BLOCKCHAIN_BLOCKS_COLLECTION, GENESIS_STATE_ID  # noqa: E402
+from blockchain_schema import (  # noqa: E402
+    BLOCKCHAIN_BLOCKS_COLLECTION,
+    BLOCKCHAIN_STATE_COLLECTION,
+    GENESIS_STATE_ID,
+    MASTER_LEDGER_WRITE_STATE_ID,
+)
 from blockchain_secrets import (  # noqa: E402
     ensure_blockchain_secrets,
-    require_secret,
+    resolve_blockchain_chain_database_name,
     resolve_genesis_creator_id,
     resolve_lucid_tops_root,
+    resolve_master_ledger_database_name,
+    resolve_master_ledger_write_allowed,
     resolve_mongodb_server_selection_timeout_ms,
     resolve_mongodb_url,
     resolve_node_min_memory_gb,
+    update_blockchain_secret_value,
 )
 from pull_information import pull_blockchain_hardware  # noqa: E402
 
@@ -65,7 +75,8 @@ def ensure_operation_secrets(*, force: bool = False) -> Path:
 
 
 def _resolve_blockchain_db_name() -> str:
-    return require_secret("MONGODB_MAIN_DATABASE_NAME")
+    """Local chain database name (not Master LucidTops_LedgerDB)."""
+    return resolve_blockchain_chain_database_name()
 
 
 def get_mongo_client() -> Any | None:
@@ -83,8 +94,81 @@ def get_mongo_client() -> Any | None:
 
 
 def get_blockchain_db(client: Any) -> Any:
-    """Return LucidTops_LedgerDB (or configured main blockchain/ledger database)."""
+    """Return local chain DB (governance state only)."""
     return client[_resolve_blockchain_db_name()]
+
+
+def get_master_ledger_db(client: Any) -> Any:
+    """Return Master public ledger DB (LucidTops_LedgerDB) — write only at genesis."""
+    return client[resolve_master_ledger_database_name()]
+
+
+def is_master_ledger_write_revoked(*, client: Any | None = None) -> bool:
+    """True when Master ledger write has been revoked (secrets or chain state)."""
+    if not resolve_master_ledger_write_allowed():
+        return True
+    owns = client is None
+    mongo = client if client is not None else get_mongo_client()
+    if mongo is None:
+        return not resolve_master_ledger_write_allowed()
+    try:
+        record = get_blockchain_db(mongo)[BLOCKCHAIN_STATE_COLLECTION].find_one(
+            {"state_id": MASTER_LEDGER_WRITE_STATE_ID},
+            {"_id": 0},
+        )
+        return bool(record and record.get("revoked"))
+    finally:
+        if owns and mongo is not None:
+            mongo.close()
+
+
+def assert_master_ledger_write_allowed(*, client: Any | None = None) -> None:
+    """Raise unless genesis-era Master ledger write is still permitted."""
+    if is_master_ledger_write_revoked(client=client):
+        raise PermissionError(
+            "Master LucidTops_LedgerDB write revoked after genesis — "
+            "operations is the sole post-genesis Master/Node ledger appender"
+        )
+    if not resolve_master_ledger_write_allowed():
+        raise PermissionError(
+            "MASTER_LEDGER_WRITE_ALLOWED=false — blockchain must not append Master ledger"
+        )
+
+
+def revoke_master_ledger_write(*, client: Any | None = None) -> dict[str, Any]:
+    """
+    Permanently revoke blockchain Master-ledger write after genesis.
+    Updates chain blockchain_state + blockchain.secrets MASTER_LEDGER_WRITE_ALLOWED=false.
+    """
+    owns = client is None
+    mongo = client if client is not None else get_mongo_client()
+    if mongo is None:
+        raise RuntimeError("Blockchain database is unavailable")
+    now = utc_now()
+    try:
+        get_blockchain_db(mongo)[BLOCKCHAIN_STATE_COLLECTION].update_one(
+            {"state_id": MASTER_LEDGER_WRITE_STATE_ID},
+            {
+                "$set": {
+                    "state_id": MASTER_LEDGER_WRITE_STATE_ID,
+                    "revoked": True,
+                    "revoked_at": now,
+                    "updated_at": now,
+                },
+                "$setOnInsert": {"created_at": now},
+            },
+            upsert=True,
+        )
+        secrets_path = update_blockchain_secret_value("MASTER_LEDGER_WRITE_ALLOWED", "false")
+        return {
+            "revoked": True,
+            "revoked_at": now,
+            "secrets_file": secrets_path.as_posix(),
+            "MASTER_LEDGER_WRITE_ALLOWED": "false",
+        }
+    finally:
+        if owns and mongo is not None:
+            mongo.close()
 
 
 def _load_blockchain_core() -> Any:
@@ -283,6 +367,10 @@ def initialize_blockchain_genesis(*, force: bool = False, client: Any | None = N
         if force:
             db[BLOCKCHAIN_BLOCKS_COLLECTION].delete_many({"status": "genesis"})
             _genesis_state_collection(mongo).delete_one({"state_id": GENESIS_STATE_ID})
+            get_blockchain_db(mongo)[BLOCKCHAIN_STATE_COLLECTION].delete_one(
+                {"state_id": MASTER_LEDGER_WRITE_STATE_ID}
+            )
+            update_blockchain_secret_value("MASTER_LEDGER_WRITE_ALLOWED", "true")
             lock_path = genesis_lock_path()
             if lock_path.exists():
                 lock_path.unlink()
@@ -368,9 +456,38 @@ def initialize_blockchain_genesis(*, force: bool = False, client: Any | None = N
             creator_id=creator_id,
         )
 
+        from legder import append_block_id_ledger_master, build_block_id_ledger_doc
+
+        # Genesis-only Master LucidTops_LedgerDB.BlockID append, then revoke write.
+        ledger_doc = append_block_id_ledger_master(
+            client=mongo,
+            block_id=block_id,
+            creator_id=creator_id,
+            creation_timestamp=now,
+            rewards=reward_count,
+            last_block_id=previous_hash,
+            session_data_count=0,
+            new_block_id=new_block_id,
+            session_id=None,
+            status="committed",
+        )
+        if not ledger_doc:
+            ledger_doc = build_block_id_ledger_doc(
+                block_id=block_id,
+                creator_id=creator_id,
+                creation_timestamp=now,
+                rewards=reward_count,
+                last_block_id=previous_hash,
+                session_data_count=0,
+                new_block_id=new_block_id,
+                session_id=None,
+                status="committed",
+            )
+
         token_outputs = _publish_genesis_token_outputs(core, minted_tokens=minted_tokens)
         manifest_path = _write_genesis_manifest(block=block_record, token_outputs=token_outputs)
         _mark_genesis_initialized(client=mongo, block=block_record)
+        revoke_result = revoke_master_ledger_write(client=mongo)
 
         block_record.pop("_id", None)
         return {
@@ -379,6 +496,10 @@ def initialize_blockchain_genesis(*, force: bool = False, client: Any | None = N
             "creator_id": creator_id,
             "image_schema_profile": GENESIS_IMAGE_SCHEMA_PROFILE,
             "block": block_record,
+            "ledger_doc": ledger_doc,
+            "master_ledger_write_revoked": revoke_result,
+            "chain_database": _resolve_blockchain_db_name(),
+            "master_ledger_database": resolve_master_ledger_database_name(),
             "minted_tokens": minted_tokens,
             "token_outputs": token_outputs,
             "tokens_log_path": tokens_log.as_posix(),

@@ -56,6 +56,7 @@ for line in text.splitlines():
 fi
 
 python -c "from blockchain_secrets import ensure_blockchain_secrets; print(ensure_blockchain_secrets())"
+python -c "from blockchain_secrets import confirm_local_deploy_config; import json; print(json.dumps(confirm_local_deploy_config(), indent=2, default=str))"
 
 if [ -z "${BLOCKCHAIN_SECRETS_FILE:-}" ] || [ ! -f "${BLOCKCHAIN_SECRETS_FILE}" ]; then
   echo "BLOCKCHAIN_SECRETS_FILE missing after write — ${BLOCKCHAIN_SECRETS_FILE:-unset}" >&2

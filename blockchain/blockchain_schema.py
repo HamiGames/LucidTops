@@ -20,6 +20,8 @@ from __future__ import annotations
 # --- collection names ---
 
 LEDGER_RECORDS_COLLECTION = "ledger_records"
+# Canonical public ledger collection in LucidTops_LedgerDB (Databases/DBSchemas.py)
+LEDGER_BLOCK_ID_COLLECTION = "BlockID"
 BLOCKCHAIN_BLOCKS_COLLECTION = "blockchain_blocks"
 BLOCKCHAIN_STATE_COLLECTION = "blockchain_state"
 LUCID_TOKENS_COLLECTION = "lucid_tokens"
@@ -84,6 +86,7 @@ BLOCK_STATUSES: tuple[str, ...] = (
 
 BLOCKCHAIN_SUPPLY_STATE_ID = "lucid_token_supply"
 GENESIS_STATE_ID = "blockchain_genesis_initialized"
+MASTER_LEDGER_WRITE_STATE_ID = "master_ledger_write_revoked"
 
 # --- tally / block-winner selection ---
 
@@ -115,6 +118,16 @@ LEDGER_RECORDS_FIELDS: tuple[str, ...] = (
     "hash_algorithm",
     "record_type",
     "created_at",
+)
+
+# Public LucidTops_LedgerDB.BlockID fields (matches Databases/DBSchemas.BLOCK_ID_FIELDS)
+BLOCK_ID_LEDGER_FIELDS: tuple[str, ...] = (
+    "BlockID",
+    "creator_id",
+    "creation_timestamp",
+    "Rewards",
+    "LastBlockID",
+    "Session-data-count",
 )
 
 BLOCKCHAIN_BLOCKS_FIELDS: tuple[str, ...] = (
@@ -247,6 +260,7 @@ TASK_TOKEN_FIELDS: tuple[str, ...] = (
 
 COLLECTION_SCHEMAS: dict[str, tuple[str, ...]] = {
     LEDGER_RECORDS_COLLECTION: LEDGER_RECORDS_FIELDS,
+    LEDGER_BLOCK_ID_COLLECTION: BLOCK_ID_LEDGER_FIELDS,
     BLOCKCHAIN_BLOCKS_COLLECTION: BLOCKCHAIN_BLOCKS_FIELDS,
     BLOCKCHAIN_STATE_COLLECTION: BLOCKCHAIN_STATE_FIELDS,
     LUCID_TOKENS_COLLECTION: LUCID_TOKEN_FIELDS,

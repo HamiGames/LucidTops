@@ -174,15 +174,17 @@ def _verify_blockchain_and_ledger_writes(
     client: Any,
     core: Any,
     block_hash: str,
+    block_id: str | None = None,
+    ledger_doc: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Confirm the new block exists in blockchain_blocks and ledger_records."""
+    """Confirm chain writes; require ledger_doc for ops (no Master BlockID write post-genesis)."""
     db = get_blockchain_db(client)
     block_record = db[BLOCKCHAIN_BLOCKS_COLLECTION].find_one(
         {"block_hash": block_hash},
         {"_id": 0},
     )
     if block_record is None:
-        raise RuntimeError("New block was not written to the blockchain system")
+        raise RuntimeError("New block was not written to the blockchain chain database")
 
     ledger_record = db[LEDGER_RECORDS_COLLECTION].find_one(
         {"aggregate_hash": block_hash, "record_type": "block"},
@@ -190,14 +192,24 @@ def _verify_blockchain_and_ledger_writes(
         sort=[("created_at", -1)],
     )
     if ledger_record is None:
-        raise RuntimeError("New block hash was not written to the blockchain ledger system")
+        raise RuntimeError("New block hash was not written to the chain ledger_records")
+
+    resolved_block_id = str(block_id or block_record.get("blockID") or block_hash)
+    if not ledger_doc or not ledger_doc.get("BlockID"):
+        raise RuntimeError(
+            "ledger_doc missing — operations requires BlockID payload for Master/Node transport"
+        )
+    if str(ledger_doc.get("BlockID")) != resolved_block_id:
+        raise RuntimeError("ledger_doc.BlockID does not match confirmed chain BlockID")
 
     ledger_last_hash = core.get_ledger_last_hash(client=client)
     return {
         "blockchain_collection": BLOCKCHAIN_BLOCKS_COLLECTION,
         "ledger_collection": LEDGER_RECORDS_COLLECTION,
+        "block_id_collection": "ops_transports_master_BlockID",
         "block_record": block_record,
         "ledger_record": ledger_record,
+        "ledger_doc": dict(ledger_doc),
         "ledger_last_hash": ledger_last_hash,
     }
 
@@ -210,6 +222,7 @@ def create_new_block(
     chain_id: str | None = None,
     reported_memory_gb: int | None = None,
     use_data_insert: bool = True,
+    packet: list[dict[str, Any]] | None = None,
     client: Any | None = None,
 ) -> dict[str, Any]:
     """Run the create-block protocol: tally, governance, New_BlockID→BlockID, ledger, rewards."""
@@ -237,21 +250,21 @@ def create_new_block(
             reported_memory_gb=reported_memory_gb,
         )
 
-        packet = None
-        if use_data_insert and not is_genesis:
+        resolved_packet = packet
+        if resolved_packet is None and use_data_insert and not is_genesis:
             try:
                 from DataInsert import build_data_insert_packet
 
                 prepared = build_data_insert_packet(client=mongo)
-                packet = prepared.get("packet") or None
+                resolved_packet = prepared.get("packet") or None
             except Exception:
-                packet = None
+                resolved_packet = None
 
         creation = core.create_block(
             chain_id=chain_id,
             node_user_id=resolved_node_user_id,
             reported_memory_gb=reported_memory_gb,
-            packet=packet,
+            packet=resolved_packet,
             client=mongo,
         )
 
@@ -264,8 +277,11 @@ def create_new_block(
             client=mongo,
             core=core,
             block_hash=block_hash,
+            block_id=creation.get("BlockID") or block.get("blockID"),
+            ledger_doc=creation.get("ledger_doc"),
         )
         minted_tokens = list(creation.get("minted_tokens") or [])
+        ledger_doc = creation.get("ledger_doc") or writes["ledger_doc"]
 
         return {
             "block_hash": block_hash,
@@ -283,6 +299,7 @@ def create_new_block(
             "lucid_tokens_minted": len(minted_tokens),
             "minted_tokens": minted_tokens,
             "block": block,
+            "ledger_doc": ledger_doc,
             "supply": creation.get("supply"),
             "blockchain": {
                 "collection": writes["blockchain_collection"],
@@ -291,9 +308,11 @@ def create_new_block(
             },
             "ledger": {
                 "collection": writes["ledger_collection"],
+                "block_id_collection": writes["block_id_collection"],
                 "record_type": "block",
                 "aggregate_hash": block_hash,
                 "record": writes["ledger_record"],
+                "ledger_doc": ledger_doc,
                 "ledger_last_hash": writes["ledger_last_hash"],
             },
         }

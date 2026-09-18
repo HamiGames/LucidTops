@@ -2,8 +2,9 @@
 includes:
 - hardware pull at time of operation (pull_information.py)
 - blockchain.secrets creation from pull (blockchain_secrets.py)
-- the genesis block creation (configBlock.py)
-- the insertion of the genesis block into the ledger system (legder.py / LucidTops_LedgerDB)
+- the genesis block creation (configBlock.py) into local chain DB
+- genesis-only Master LucidTops_LedgerDB.BlockID append then revoke Master write
+- day-to-day Master/Node ledger append owned by operations via ledger_doc
 - the creation of the blockchain system governance protocol (blockGov.py)
 - the creation of the blockchain system tally system (tally.py)
 - FastAPI route connection (ConnectBlockRoutes.py)
@@ -42,6 +43,7 @@ from blockchain_schema import (  # noqa: E402
     BLOCKCHAIN_BLOCKS_COLLECTION,
     BLOCKCHAIN_STATE_COLLECTION,
     COLLECTION_SCHEMAS,
+    LEDGER_BLOCK_ID_COLLECTION,
     LEDGER_RECORDS_COLLECTION,
 )
 from blockchain_secrets import (  # noqa: E402
@@ -219,25 +221,43 @@ def _resolve_docker_dns_host(host: str, *, port: int) -> bool:
 
 
 def verify_linked_containers(*, client: Any) -> dict[str, Any]:
-    """Verify linked stack containers are reachable via Docker DNS."""
+    """Verify linked stack containers are reachable via Docker DNS.
+
+    Day-to-day governance mediation uses operations; MasterServer DNS is
+    informational (genesis foundation only — not a standing API channel).
+    """
     mongodb_host = resolve_mongodb_host()
     master_host = resolve_master_server_internal_host()
     master_port = resolve_master_server_internal_port()
+    from blockchain_secrets import get_secret
+
+    ops_host = get_secret("OPERATIONS_DOCKER_DNS_NAME") or "lucid-operations"
+    ops_port_raw = get_secret("OPERATIONS_BIND_PORT")
+    try:
+        ops_port = int(ops_port_raw) if ops_port_raw else 0
+    except ValueError:
+        ops_port = 0
     checks = {
         "mongodb": client is not None,
         "mongodb_host": mongodb_host,
+        "operations_dns": (
+            _resolve_docker_dns_host(ops_host, port=ops_port) if ops_port else False
+        ),
+        "operations_host": ops_host,
+        "operations_port": ops_port or None,
         "master_server_dns": _resolve_docker_dns_host(
             master_host,
             port=master_port,
         ),
         "master_server_host": master_host,
         "master_server_port": master_port,
+        "master_server_note": "genesis_foundation_only",
     }
     return {
         "linked": all(
             (
                 checks["mongodb"],
-                checks["master_server_dns"],
+                checks["operations_dns"] or checks["master_server_dns"],
             )
         ),
         "checks": checks,
@@ -246,10 +266,17 @@ def verify_linked_containers(*, client: Any) -> dict[str, Any]:
 
 
 def ensure_blockchain_collections(*, client: Any) -> dict[str, Any]:
-    """Ensure blockchain MongoDB collections exist (schema-aligned indexes)."""
+    """Ensure local chain MongoDB collections exist (schema-aligned indexes).
+
+    Master LucidTops_LedgerDB.BlockID is not owned by blockchain as primary writer;
+    ops appends post-genesis. Genesis may create Master BlockID index once.
+    """
     db = get_blockchain_db(client)
     ensured: list[str] = []
     for collection_name in COLLECTION_SCHEMAS:
+        if collection_name == LEDGER_BLOCK_ID_COLLECTION:
+            # BlockID schema listed for contracts; public rows live on Master ledger DB.
+            continue
         db[collection_name].create_index("created_at")
         ensured.append(collection_name)
     db[BLOCKCHAIN_BLOCKS_COLLECTION].create_index(
@@ -262,11 +289,32 @@ def ensure_blockchain_collections(*, client: Any) -> dict[str, Any]:
     db[LEDGER_RECORDS_COLLECTION].create_index([("created_at", -1)])
     db[LEDGER_RECORDS_COLLECTION].create_index("record_type")
     db[LEDGER_RECORDS_COLLECTION].create_index("BlockID", sparse=True)
-    return {"collections_ensured": ensured}
+
+    master_index: dict[str, Any] | None = None
+    try:
+        from configBlock import assert_master_ledger_write_allowed, get_master_ledger_db
+
+        assert_master_ledger_write_allowed(client=client)
+        master_db = get_master_ledger_db(client)
+        master_db[LEDGER_BLOCK_ID_COLLECTION].create_index(
+            "BlockID", unique=True, sparse=True
+        )
+        master_db[LEDGER_BLOCK_ID_COLLECTION].create_index(
+            [("creation_timestamp", -1)]
+        )
+        master_index = {"BlockID": "ensured_during_genesis_window"}
+    except PermissionError:
+        master_index = {"BlockID": "skipped_write_revoked"}
+
+    return {
+        "collections_ensured": ensured,
+        "chain_database": True,
+        "master_ledger_blockid_index": master_index,
+    }
 
 
 def verify_genesis_ledger_insertion(*, client: Any) -> dict[str, Any]:
-    """Verify genesis block and immutable ledger record alignment (legder.py / Ledger.py)."""
+    """Verify genesis block in chain DB + Master BlockID row (genesis-only append)."""
     db = get_blockchain_db(client)
     genesis_block = db[BLOCKCHAIN_BLOCKS_COLLECTION].find_one({"status": "genesis"}, {"_id": 0})
     if genesis_block is None:
@@ -290,9 +338,21 @@ def verify_genesis_ledger_insertion(*, client: Any) -> dict[str, Any]:
     if ledger_record is None:
         return {
             "aligned": False,
-            "reason": "genesis ledger record missing",
+            "reason": "genesis chain ledger_records missing",
             "block_hash": block_hash,
         }
+
+    master_block: dict[str, Any] | None = None
+    try:
+        from configBlock import get_master_ledger_db
+
+        block_id = str(genesis_block.get("blockID") or block_hash)
+        master_block = get_master_ledger_db(client)[LEDGER_BLOCK_ID_COLLECTION].find_one(
+            {"BlockID": block_id},
+            {"_id": 0},
+        )
+    except Exception:
+        master_block = None
 
     return {
         "aligned": True,
@@ -301,6 +361,8 @@ def verify_genesis_ledger_insertion(*, client: Any) -> dict[str, Any]:
         "block_hash": block_hash,
         "ledger_last_hash": get_ledger_last_hash(client=client),
         "ledger_record": ledger_record,
+        "master_BlockID_present": master_block is not None,
+        "master_ledger_doc": master_block,
     }
 
 

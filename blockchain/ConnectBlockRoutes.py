@@ -1,6 +1,7 @@
-"""Connect blockchain FastAPI routes for cross-container communication
-(NodeUser, MasterServer, AdminUser, MasterClassUser, User).
-Hosts/ports/onions come from blockchain.secrets created at operation time via hardware pull.
+"""Connect blockchain FastAPI routes — two surfaces:
+
+1. Governance (create/tally/sync/connect): ops-only via DockerDNS + blockchain secrets.
+2. Ledger (LucidLedger*): public read-only BlockID records for LucidLedger.js on BLOCKCHAIN_ONION.
 
 RULES of CODE CREATION:
 - No hardcoded values, all values are created at time of operation.
@@ -46,9 +47,8 @@ from configBlock import (  # noqa: E402
 
 BLOCKCHAIN_ROUTES_STATE_ID = "blockchain_routes_connected"
 
-BLOCKCHAIN_ROUTE_PATHS: tuple[str, ...] = (
-    "/health",
-    "/genesis-status",
+# Governance — operations DockerDNS only (authenticated).
+GOVERNANCE_ROUTE_PATHS: tuple[str, ...] = (
     "/blockchain-create",
     "/blockchain-find",
     "/blockchain-connect",
@@ -58,6 +58,12 @@ BLOCKCHAIN_ROUTE_PATHS: tuple[str, ...] = (
     "/blockchain-report",
     "/blockchain-transfer",
     "/blockchain-control",
+    "/server-blockchain-sync",
+    "/tally-winner",
+)
+
+# Public ledger — read-only on BLOCKCHAIN_ONION (no mutate).
+PUBLIC_LEDGER_ROUTE_PATHS: tuple[str, ...] = (
     "/LucidLedger",
     "/LucidLedger-find",
     "/LucidLedger-connect",
@@ -67,8 +73,13 @@ BLOCKCHAIN_ROUTE_PATHS: tuple[str, ...] = (
     "/LucidLedger-report",
     "/LucidLedger-transfer",
     "/LucidLedger-control",
-    "/server-blockchain-sync",
-    "/tally-winner",
+)
+
+BLOCKCHAIN_ROUTE_PATHS: tuple[str, ...] = (
+    "/health",
+    "/genesis-status",
+    *GOVERNANCE_ROUTE_PATHS,
+    *PUBLIC_LEDGER_ROUTE_PATHS,
 )
 
 
@@ -95,6 +106,8 @@ def resolve_blockchain_route_targets() -> dict[str, str]:
             port=resolve_blockchain_bind_port(),
             prefix=prefix,
         ),
+        "governance_access": "operations_dockerdns_only",
+        "ledger_access": "public_read_only",
     }
 
     blockchain_onion = resolve_blockchain_onion()
@@ -129,21 +142,35 @@ def build_route_connection_manifest() -> dict[str, Any]:
     """Build cross-container blockchain route manifest from blockchain.secrets."""
     prefix = resolve_blockchain_api_prefix()
     targets = resolve_blockchain_route_targets()
-    routes = {
-        route: {
+    routes: dict[str, Any] = {}
+    for route in BLOCKCHAIN_ROUTE_PATHS:
+        is_public_ledger = route in PUBLIC_LEDGER_ROUTE_PATHS
+        is_governance = route in GOVERNANCE_ROUTE_PATHS
+        routes[route] = {
             "api_path": f"{prefix}{route}",
             "tor_service": f"{prefix}{route}",
             "network": "tor",
             "tor_only": True,
+            "surface": (
+                "public_ledger"
+                if is_public_ledger
+                else ("governance" if is_governance else "status")
+            ),
+            "auth_required": is_governance,
+            "read_only": is_public_ledger or route in {"/health", "/genesis-status"},
         }
-        for route in BLOCKCHAIN_ROUTE_PATHS
-    }
     return {
         "subsystem": "blockchain-system",
+        "parts": {
+            "blockchain": "governance_foundation_regulations",
+            "ledger": "public_read_only_block_record",
+        },
         "network": "tor",
         "tor_only": True,
         "targets": targets,
         "routes": routes,
+        "governance_routes": list(GOVERNANCE_ROUTE_PATHS),
+        "public_ledger_routes": list(PUBLIC_LEDGER_ROUTE_PATHS),
         "blockchain_onion": resolve_blockchain_onion() or None,
         "master_server_onion": resolve_master_server_onion() or None,
         "secrets_configured": bool(resolve_blockchain_secret()),
@@ -202,7 +229,7 @@ def get_blockchain_route_connection(*, client: Any | None = None) -> dict[str, A
 
 
 def create_blockchain_fastapi_app() -> Any:
-    """Build FastAPI app serving blockchain operations (DockerDNS / Tor compatible)."""
+    """Build FastAPI app: governance (ops auth) + public read-only ledger."""
     try:
         from fastapi import FastAPI, Header, HTTPException
         from fastapi.responses import JSONResponse
@@ -213,7 +240,11 @@ def create_blockchain_fastapi_app() -> Any:
 
     from CreateBlock import create_new_block
     from distribution import sync_ledger_distribution
-    from legder import get_ledger_last_hash, get_ledger_records
+    from legder import (
+        get_ledger_last_hash,
+        get_public_block_id_record,
+        get_public_block_id_records,
+    )
     from tally import select_tally_winner
 
     prefix = resolve_blockchain_api_prefix()
@@ -230,7 +261,9 @@ def create_blockchain_fastapi_app() -> Any:
         return {
             "status": "ok",
             "subsystem": "blockchain",
+            "parts": ["governance", "ledger"],
             "genesis_initialized": is_genesis_initialized(),
+            "blockchain_onion": resolve_blockchain_onion() or None,
             "timestamp": utc_now(),
         }
 
@@ -247,51 +280,67 @@ def create_blockchain_fastapi_app() -> Any:
         x_blockchain_secret: str | None = Header(default=None),
         x_blockchain_secret_key: str | None = Header(default=None),
     ) -> JSONResponse:
+        """Governance create — operations DockerDNS only."""
         _auth(x_blockchain_secret, x_blockchain_secret_key)
         body = payload or {}
+        packet = body.get("packet")
+        if packet is not None and not isinstance(packet, list):
+            raise HTTPException(status_code=400, detail="packet must be a list when provided")
         result = create_new_block(
             actor_type=body.get("actor_type") or "master_server",
             invoker=body.get("invoker"),
             node_user_id=body.get("node_user_id"),
             chain_id=body.get("chain_id"),
             reported_memory_gb=body.get("reported_memory_gb"),
+            use_data_insert=bool(body.get("use_data_insert", packet is None)),
+            packet=packet,
         )
         return JSONResponse(result)
 
     @app.get(f"{prefix}/LucidLedger")
-    def lucid_ledger(
-        limit: int | None = None,
-        record_type: str | None = None,
-        x_blockchain_secret: str | None = Header(default=None),
-        x_blockchain_secret_key: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _auth(x_blockchain_secret, x_blockchain_secret_key)
+    def lucid_ledger(limit: int | None = None) -> dict[str, Any]:
+        """Public read-only Master LucidTops_LedgerDB.BlockID (ops-authored rows)."""
         mongo = get_mongo_client()
         if mongo is None:
             raise HTTPException(status_code=503, detail="Database unavailable")
         try:
-            records = get_ledger_records(
-                client=mongo, limit=limit, record_type=record_type
-            )
+            records = get_public_block_id_records(client=mongo, limit=limit)
             return {
+                "blocks": records,
                 "records": records,
                 "count": len(records),
                 "ledger_last_hash": get_ledger_last_hash(client=mongo),
+                "surface": "public_ledger",
+                "source": "master_LucidTops_LedgerDB",
+                "blockchain_onion": resolve_blockchain_onion() or None,
+                "read_only": True,
             }
         finally:
             mongo.close()
 
     @app.get(f"{prefix}/LucidLedger-find")
-    def lucid_ledger_find(
-        x_blockchain_secret: str | None = Header(default=None),
-        x_blockchain_secret_key: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _auth(x_blockchain_secret, x_blockchain_secret_key)
+    def lucid_ledger_find(block_id: str | None = None) -> dict[str, Any]:
+        """Public find by BlockID or return ledger last hash."""
         mongo = get_mongo_client()
         if mongo is None:
             raise HTTPException(status_code=503, detail="Database unavailable")
         try:
-            return {"ledger_last_hash": get_ledger_last_hash(client=mongo)}
+            if block_id:
+                record = get_public_block_id_record(client=mongo, block_id=block_id)
+                if record is None:
+                    raise HTTPException(status_code=404, detail="BlockID not found")
+                return {
+                    "block": record,
+                    "records": [record],
+                    "count": 1,
+                    "surface": "public_ledger",
+                    "read_only": True,
+                }
+            return {
+                "ledger_last_hash": get_ledger_last_hash(client=mongo),
+                "surface": "public_ledger",
+                "read_only": True,
+            }
         finally:
             mongo.close()
 
@@ -334,6 +383,10 @@ def serve_blockchain_api() -> None:
         import uvicorn
     except ImportError as exc:
         raise RuntimeError("uvicorn is required to serve blockchain FastAPI") from exc
+
+    from blockchain_secrets import confirm_local_deploy_config
+
+    confirm_local_deploy_config()
 
     host = resolve_blockchain_bind_host()
     port = resolve_blockchain_bind_port()
