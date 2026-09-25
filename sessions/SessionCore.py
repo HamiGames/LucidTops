@@ -67,6 +67,138 @@ SESSION_REQUIRED_FIELDS: tuple[str, ...] = (
 )
 
 
+def _coerce_int(value: Any, default: int = 0) -> int:
+    try:
+        if value is None:
+            return default
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _is_unlimited_max_sessions(max_sessions: Any) -> bool:
+    if max_sessions is None:
+        return True
+    if isinstance(max_sessions, str) and max_sessions.strip().lower() in {
+        "unlimited",
+        "-1",
+        "",
+    }:
+        return True
+    try:
+        return int(max_sessions) < 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _load_user_session_quota(*, user_id: str, client: Any) -> dict[str, Any]:
+    """
+    Resolve Tier_selected / session-count / max-sessions for UserID.
+    Prefers LucidTopsUserDB.UserID, falls back to master users + tiers.
+    """
+    profile: dict[str, Any] = {}
+    try:
+        from config import get_config_value_optional
+
+        user_db_name = get_config_value_optional("LUCIDTOPS_USER_DB_NAME") or (
+            get_config_value_optional("LUCIDTOPSUSERDB_NAME") or "LucidTopsUserDB"
+        )
+        user_col_name = get_config_value_optional("USER_DB_COLLECTION") or "UserID"
+        doc = client[user_db_name][user_col_name].find_one({"UserID": user_id})
+        if doc:
+            profile = dict(doc)
+    except Exception:
+        profile = {}
+
+    master = get_master_db(client)
+    user_doc = master.users.find_one({"UserID": user_id}) or {}
+    if not profile:
+        profile = dict(user_doc)
+
+    tier_selected = profile.get("Tier_selected")
+    if tier_selected is None:
+        tier_selected = profile.get("tier")
+    if tier_selected is None:
+        tier_selected = user_doc.get("Tier_selected", user_doc.get("tier"))
+
+    session_count = profile.get("session-count")
+    if session_count is None:
+        session_count = user_doc.get("session-count", 0)
+
+    max_sessions = profile.get("max-sessions")
+    if max_sessions is None:
+        max_sessions = user_doc.get("max-sessions")
+
+    if max_sessions is None or tier_selected is None:
+        try:
+            from Select_tier import retrieve_user_tier
+
+            tier_rec = retrieve_user_tier(user_id, client=client) or {}
+        except Exception:
+            tier_rec = {}
+        if tier_selected is None and tier_rec.get("tier") is not None:
+            tier_selected = tier_rec.get("tier")
+        if max_sessions is None:
+            if tier_rec.get("unlimited_sessions"):
+                max_sessions = None
+            elif tier_rec.get("sessions_per_month") is not None:
+                max_sessions = tier_rec.get("sessions_per_month")
+
+    return {
+        "Tier_selected": tier_selected,
+        "session-count": _coerce_int(session_count, 0),
+        "max-sessions": max_sessions,
+    }
+
+
+def _assert_session_create_auto_pass(*, user_id: str, client: Any) -> dict[str, Any]:
+    """Auto-pass when Tier_selected is set and session-count < max-sessions."""
+    quota = _load_user_session_quota(user_id=user_id, client=client)
+    tier_selected = quota.get("Tier_selected")
+    if tier_selected is None or str(tier_selected).strip() == "":
+        raise PermissionError(
+            "SessionID create requires Tier_selected on UserID profile (LucidTopsUserDB)"
+        )
+    session_count = _coerce_int(quota.get("session-count"), 0)
+    max_sessions = quota.get("max-sessions")
+    if not _is_unlimited_max_sessions(max_sessions):
+        max_int = _coerce_int(max_sessions, 0)
+        if session_count >= max_int:
+            raise PermissionError(
+                f"session-count {session_count} reached max-sessions {max_int} for UserID"
+            )
+    return quota
+
+
+def _increment_user_session_count(*, user_id: str, client: Any) -> None:
+    master = get_master_db(client)
+    master.users.update_one(
+        {"UserID": user_id},
+        {
+            "$inc": {"session-count": 1},
+            "$set": {"updated_at": utc_now()},
+            "$setOnInsert": {"UserID": user_id, "created_at": utc_now()},
+        },
+        upsert=True,
+    )
+    try:
+        from config import get_config_value_optional
+
+        user_db_name = get_config_value_optional("LUCIDTOPS_USER_DB_NAME") or (
+            get_config_value_optional("LUCIDTOPSUSERDB_NAME") or "LucidTopsUserDB"
+        )
+        user_col_name = get_config_value_optional("USER_DB_COLLECTION") or "UserID"
+        client[user_db_name][user_col_name].update_one(
+            {"UserID": user_id},
+            {
+                "$inc": {"session-count": 1},
+                "$set": {"updated_at": utc_now()},
+            },
+        )
+    except Exception:
+        pass
+
+
 def _session_date() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
@@ -161,11 +293,14 @@ def create_session(*, host_user_id: str, id_token: str, client: Any) -> dict[str
     """
     MasterServer creates SessionID for a UserID and inserts into LucidTops_SessionsDB.
     Allowed without Rdp (RDP.txt: creation-only exception).
+    Auto-passes when Tier_selected is set and session-count < max-sessions.
     """
     if not host_user_id or not id_token:
         raise ValueError("host UserID and IDToken/TokenID are required")
     if not verify_user_id_token(user_id=host_user_id, id_token=id_token, client=client):
         raise PermissionError("Host UserID authentication failed")
+
+    _assert_session_create_auto_pass(user_id=host_user_id, client=client)
 
     session_id = generate_session_id(host_user_id=host_user_id)
     while session_records_collection(client).find_one({"sessionID": session_id}):
@@ -185,6 +320,7 @@ def create_session(*, host_user_id: str, id_token: str, client: Any) -> dict[str
         status=record["sessionStatus"],
         client=client,
     )
+    _increment_user_session_count(user_id=host_user_id, client=client)
     get_master_db(client).users.update_one(
         {"UserID": host_user_id},
         {"$set": {"last_session_ID": session_id, "updated_at": utc_now()}},
@@ -277,7 +413,9 @@ def connect_session(
         raise LookupError("Session not found or sessionKey mismatch")
 
     user_ids = list(record.get("userIDs") or [])
-    if user_id not in user_ids:
+    is_new_join = user_id not in user_ids
+    if is_new_join:
+        _assert_session_create_auto_pass(user_id=user_id, client=client)
         user_ids.append(user_id)
     agreements = dict(record.get("participant_agreements") or {})
     agreements[user_id] = agreements.get(user_id, False)
@@ -318,6 +456,8 @@ def connect_session(
         user_ids=user_ids,
         client=client,
     )
+    if is_new_join:
+        _increment_user_session_count(user_id=user_id, client=client)
     updated = session_records_collection(client).find_one({"sessionID": session_id.strip()}) or {}
     return {
         "sessionID": session_id.strip(),
