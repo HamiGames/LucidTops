@@ -1,0 +1,6 @@
+*.txt
+*.js
+*.html 
+*.dockerfile
+*.Dockerfile
+*.py
