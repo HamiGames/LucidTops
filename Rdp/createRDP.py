@@ -538,6 +538,18 @@ def pull_information() -> dict[str, Any]:
         "lucid-sessions",
         "lucidtops-sessions",
     )
+    operations_meta = _match_container(
+        docker_state.get("containers", {}),
+        "operations",
+        "lucid-operations",
+        "lucidtops-operations",
+    )
+    rdp_meta = _match_container(
+        docker_state.get("containers", {}),
+        "rdp",
+        "lucid-rdp",
+        "lucidtops-rdp",
+    )
     proxy_meta = _match_container(
         docker_state.get("containers", {}),
         "proxy",
@@ -570,6 +582,8 @@ def pull_information() -> dict[str, Any]:
         "docker_networks": docker_state.get("networks", []),
         "docker_containers": docker_state.get("containers", {}),
         "sessions_container": sessions_meta or {},
+        "operations_container": operations_meta or {},
+        "rdp_container": rdp_meta or {},
         "proxy_container": proxy_meta or {},
         "lucid_tops_root": lucid_root.as_posix(),
         "secrets_dir": secrets_dir.as_posix(),
@@ -598,6 +612,9 @@ _INHERIT_KEY_PREFIXES: tuple[str, ...] = (
     "PROXY_RDP_DNS",
     "SESSIONS_",
     "SESSION_",
+    "OPERATIONS_",
+    "MASTER_SERVER",
+    "DOCKER_NETWORK",
     "DOCKERDNS_INVENTORY",
     "LUCID_TOPS_ROOT",
     "SECRETS_DIR",
@@ -642,9 +659,26 @@ def _merge_prior_secrets(secrets_dir: Path) -> dict[str, str]:
     return merged
 
 
+def _pick_prior(prior: dict[str, str], *keys: str) -> str:
+    for key in keys:
+        value = prior.get(key, "").strip() or _env(key)
+        if value:
+            return value
+    return ""
+
+
+def _container_dns(meta: dict[str, Any]) -> str:
+    name = str(meta.get("name") or "").strip()
+    if name:
+        return name
+    ip_addr = str(meta.get("ip") or "").strip()
+    return ip_addr
+
+
 def _resolve_sessions_dns(info: dict[str, Any], prior: dict[str, str]) -> str:
     for key in (
         "RDP_SESSIONS_DNS",
+        "SESSIONS_DOCKER_DNS_NAME",
         "PROXY_SESSIONS_DNS",
         "SESSIONS_DNS",
         "SESSIONS_SERVICE_NAME",
@@ -679,6 +713,7 @@ def _resolve_sessions_dns(info: dict[str, Any], prior: dict[str, str]) -> str:
 def _resolve_sessions_port(prior: dict[str, str]) -> str:
     for key in (
         "RDP_SESSIONS_PORT",
+        "SESSIONS_BIND_PORT",
         "SESSIONS_PORT",
         "SESSION_API_PORT",
         "PROXY_SESSIONS_PORT",
@@ -686,8 +721,90 @@ def _resolve_sessions_port(prior: dict[str, str]) -> str:
         value = prior.get(key, "").strip() or _env(key)
         if value:
             return value
-    # Allocate ephemeral only when no prior sessions port exists on hardware secrets
-    return str(_allocate_ephemeral_port())
+    raise RuntimeError(
+        "RDP_SESSIONS_PORT missing — sessions bind port must be pulled at time of operation"
+    )
+
+
+def _resolve_operations_dns(info: dict[str, Any], prior: dict[str, str]) -> str:
+    picked = _pick_prior(
+        prior,
+        "RDP_OPERATIONS_DNS",
+        "OPERATIONS_DOCKER_DNS_NAME",
+        "PROXY_OPERATIONS_DNS",
+        "OPERATIONS_DNS",
+        "OPERATIONS_SERVICE_NAME",
+    )
+    if picked:
+        return picked
+    name = _container_dns(info.get("operations_container") or {})
+    if name:
+        return name
+    raise RuntimeError(
+        "RDP_OPERATIONS_DNS missing — operations DockerDNS name must be pulled "
+        "at time of operation"
+    )
+
+
+def _resolve_operations_port(prior: dict[str, str]) -> str:
+    picked = _pick_prior(
+        prior,
+        "RDP_OPERATIONS_PORT",
+        "OPERATIONS_BIND_PORT",
+        "OPERATIONS_PORT",
+        "PROXY_OPERATIONS_PORT",
+    )
+    if picked:
+        return picked
+    raise RuntimeError(
+        "RDP_OPERATIONS_PORT missing — operations bind port must be pulled at time of operation"
+    )
+
+
+def _resolve_self_dns(info: dict[str, Any], prior: dict[str, str]) -> str:
+    picked = _pick_prior(
+        prior,
+        "RDP_SELF_DNS",
+        "RDP_DOCKER_DNS_NAME",
+        "PROXY_RDP_DNS",
+    )
+    if picked:
+        return picked
+    name = _container_dns(info.get("rdp_container") or {})
+    if name:
+        return name
+    primary_ip = str(info.get("primary_ip") or "").strip()
+    if primary_ip:
+        return primary_ip
+    raise RuntimeError("RDP_SELF_DNS missing — Rdp DockerDNS name must be pulled at time of operation")
+
+
+def _resolve_network_name(info: dict[str, Any], prior: dict[str, str]) -> str:
+    picked = _pick_prior(
+        prior,
+        "RDP_DOCKER_NETWORK_NAME",
+        "DOCKER_NETWORK_NAME",
+        "SESSIONS_NETWORK_NAME",
+        "OPERATIONS_NETWORK_NAME",
+    )
+    if picked:
+        return picked
+    for meta in (
+        info.get("sessions_container") or {},
+        info.get("operations_container") or {},
+        info.get("rdp_container") or {},
+    ):
+        network = str(meta.get("network") or "").strip()
+        if network and network not in {"bridge", "host", "none"}:
+            return network
+    networks = info.get("docker_networks") or []
+    for row in networks:
+        name = str(row.get("name") or "").strip()
+        if name.startswith("lucid"):
+            return name
+    raise RuntimeError(
+        "RDP_DOCKER_NETWORK_NAME missing — must match sessions and operations Docker network"
+    )
 
 
 def _token_urlsafe(nbytes_key: str, prior: dict[str, str]) -> str:
@@ -728,6 +845,10 @@ def apply_pull_to_rdp_configuration(
 
     sessions_dns = _resolve_sessions_dns(info, existing)
     sessions_port = _resolve_sessions_port(existing)
+    operations_dns = _resolve_operations_dns(info, existing)
+    operations_port = _resolve_operations_port(existing)
+    self_dns = _resolve_self_dns(info, existing)
+    network_name = _resolve_network_name(info, existing)
 
     tor_listen = info.get("tor_listen")
     socks_host = (
@@ -788,11 +909,22 @@ def apply_pull_to_rdp_configuration(
     if not log_lines:
         log_lines = str(max(50, int(info.get("cpu_count") or 1) * 25))
 
+    required_permissions = (
+        "screen_share,mouse_control,keyboard_control,file_share,user_control,"
+        "audio_control,usb_control,sessions_sync,viewer_window,peer_agree,"
+        "terminate,reconnect,session_attach,peer_find,peer_connect,host_create,"
+        "activity_record"
+    )
     gov_permissions = (
         existing.get("RDP_GOV_PERMISSIONS", "").strip()
         or _env("RDP_GOV_PERMISSIONS")
-        or "screen_share,mouse_control,keyboard_control,file_share,user_control,audio_control,usb_control,sessions_sync"
+        or required_permissions
     )
+    if gov_permissions:
+        have = {item.strip() for item in gov_permissions.split(",") if item.strip()}
+        need = {item.strip() for item in required_permissions.split(",") if item.strip()}
+        gov_permissions = ",".join(dict.fromkeys([*gov_permissions.split(","), *sorted(need - have)]))
+        gov_permissions = ",".join(item.strip() for item in gov_permissions.split(",") if item.strip())
     gov_restrictions = (
         existing.get("RDP_GOV_RESTRICTIONS", "").strip() or _env("RDP_GOV_RESTRICTIONS") or ""
     )
@@ -830,14 +962,39 @@ def apply_pull_to_rdp_configuration(
         "RDP_SESSIONS_SCHEME": existing.get("RDP_SESSIONS_SCHEME", "").strip()
         or _env("RDP_SESSIONS_SCHEME")
         or "http",
+        "RDP_SESSIONS_API_PREFIX": _pick_prior(existing, "RDP_SESSIONS_API_PREFIX", "SESSION_API_PREFIX")
+        or "/sessions",
+        "RDP_SELF_DNS": self_dns,
+        "RDP_DOCKER_NETWORK_NAME": network_name,
         "RDP_USER_DNS": existing.get("RDP_USER_DNS", "").strip()
         or existing.get("PROXY_USER_DNS", "").strip()
         or _env("RDP_USER_DNS")
         or sessions_dns,
-        "RDP_OPERATIONS_DNS": existing.get("RDP_OPERATIONS_DNS", "").strip()
-        or existing.get("PROXY_OPERATIONS_DNS", "").strip()
-        or _env("RDP_OPERATIONS_DNS")
-        or "",
+        "RDP_OPERATIONS_DNS": operations_dns,
+        "RDP_OPERATIONS_PORT": str(operations_port),
+        "RDP_OPERATIONS_SCHEME": existing.get("RDP_OPERATIONS_SCHEME", "").strip()
+        or _env("RDP_OPERATIONS_SCHEME")
+        or existing.get("OPERATIONS_URL_SCHEME", "").strip()
+        or "http",
+        "RDP_OPERATIONS_API_PREFIX": _pick_prior(
+            existing, "RDP_OPERATIONS_API_PREFIX", "OPERATIONS_API_PREFIX"
+        )
+        or "/operations",
+        "RDP_OPERATIONS_MASTER_SERVER_ID": _pick_prior(
+            existing,
+            "RDP_OPERATIONS_MASTER_SERVER_ID",
+            "MASTER_SERVER_ID",
+            "MASTER_SERVERID",
+        ),
+        "RDP_OPERATIONS_TOKEN": _pick_prior(
+            existing,
+            "RDP_OPERATIONS_TOKEN",
+            "MASTER_SERVER_TOKEN",
+            "MASTER_SERVER_TOKEN_ID",
+        ),
+        "RDP_HTTP_TIMEOUT": existing.get("RDP_HTTP_TIMEOUT", "").strip()
+        or _env("RDP_HTTP_TIMEOUT")
+        or str(max(5, int(info.get("cpu_count") or 1))),
         "TOR_SOCKS_HOST": socks_host,
         "TOR_SOCKS_PORT": str(socks_port),
         "RDP_API_KEY": api_key,
@@ -878,10 +1035,34 @@ def apply_pull_to_rdp_configuration(
         "RDP_AUDIO_CHANNELS": existing.get("RDP_AUDIO_CHANNELS", "").strip()
         or _env("RDP_AUDIO_CHANNELS")
         or "1",
-        "RDP_SESSION_VALIDATE_PATH": existing.get("RDP_SESSION_VALIDATE_PATH", "").strip()
-        or _env("RDP_SESSION_VALIDATE_PATH")
-        or existing.get("SESSION_CONNECT_HANDSHAKE_GUI_ROUTE", "").strip()
-        or "/api/sessions/validate",
+        "RDP_SESSIONS_HEALTH_PATH": _pick_prior(existing, "RDP_SESSIONS_HEALTH_PATH", "SESSION_HEALTH_PATH")
+        or "/health",
+        "RDP_OPERATIONS_HEALTH_PATH": _pick_prior(existing, "RDP_OPERATIONS_HEALTH_PATH")
+        or "/health",
+        "RDP_SESSION_VALIDATE_PATH": _pick_prior(existing, "RDP_SESSION_VALIDATE_PATH")
+        or "/session-validate",
+        "RDP_SESSION_FIND_PATH": _pick_prior(existing, "RDP_SESSION_FIND_PATH") or "/session-find",
+        "RDP_SESSION_CREATE_PATH": _pick_prior(existing, "RDP_SESSION_CREATE_PATH") or "/session-create",
+        "RDP_SESSION_CONNECT_PATH": _pick_prior(existing, "RDP_SESSION_CONNECT_PATH")
+        or "/session-connect",
+        "RDP_SESSION_AGREE_PATH": _pick_prior(existing, "RDP_SESSION_AGREE_PATH") or "/session-agree",
+        "RDP_SESSION_DISCONNECT_PATH": _pick_prior(existing, "RDP_SESSION_DISCONNECT_PATH")
+        or "/session-disconnect",
+        "RDP_SESSION_END_PATH": _pick_prior(existing, "RDP_SESSION_END_PATH") or "/session-end",
+        "RDP_SESSION_RECORD_PATH": _pick_prior(existing, "RDP_SESSION_RECORD_PATH")
+        or "/session-record",
+        "RDP_SESSION_RECONNECT_PATH": _pick_prior(existing, "RDP_SESSION_RECONNECT_PATH")
+        or "/session-reconnect",
+        "RDP_OPERATIONS_SESSION_CONTROL_PATH": _pick_prior(
+            existing, "RDP_OPERATIONS_SESSION_CONTROL_PATH"
+        )
+        or "/session-control",
+        "RDP_OPERATIONS_SESSION_RECORD_PATH": _pick_prior(
+            existing, "RDP_OPERATIONS_SESSION_RECORD_PATH"
+        )
+        or "/session-record",
+        "RDP_VIEWER_WINDOW_TARGET": _pick_prior(existing, "RDP_VIEWER_WINDOW_TARGET")
+        or "frontend/webpage/RemoteView.js",
         "RDP_SECRETS_NAME": existing.get("RDP_SECRETS_NAME", "").strip()
         or _env("RDP_SECRETS_NAME")
         or "rdp.secrets",
@@ -979,6 +1160,27 @@ def build_and_write_rdp_secrets(*, overwrite_keys: bool = False) -> dict[str, An
                 "RDP_USB_DEVICES_JSON",
                 "LUCID_TOPS_ROOT",
                 "SECRETS_DIR",
+                "RDP_SESSIONS_DNS",
+                "RDP_SESSIONS_PORT",
+                "RDP_OPERATIONS_DNS",
+                "RDP_OPERATIONS_PORT",
+                "RDP_SELF_DNS",
+                "RDP_DOCKER_NETWORK_NAME",
+                "RDP_SESSIONS_API_PREFIX",
+                "RDP_OPERATIONS_API_PREFIX",
+                "RDP_SESSION_VALIDATE_PATH",
+                "RDP_SESSION_FIND_PATH",
+                "RDP_SESSION_CREATE_PATH",
+                "RDP_SESSION_CONNECT_PATH",
+                "RDP_SESSION_AGREE_PATH",
+                "RDP_SESSION_DISCONNECT_PATH",
+                "RDP_SESSION_END_PATH",
+                "RDP_SESSION_RECORD_PATH",
+                "RDP_SESSION_RECONNECT_PATH",
+                "RDP_OPERATIONS_SESSION_CONTROL_PATH",
+                "RDP_OPERATIONS_SESSION_RECORD_PATH",
+                "RDP_VIEWER_WINDOW_TARGET",
+                "RDP_GOV_PERMISSIONS",
             }:
                 merged[key] = value
 
@@ -1012,6 +1214,8 @@ def build_and_write_rdp_secrets(*, overwrite_keys: bool = False) -> dict[str, An
         "hardware_mac": merged.get("HARDWARE_PRIMARY_MAC", ""),
         "rdp_port": merged.get("RDP_PORT", ""),
         "sessions_dns": merged.get("RDP_SESSIONS_DNS", ""),
+        "operations_dns": merged.get("RDP_OPERATIONS_DNS", ""),
+        "docker_network": merged.get("RDP_DOCKER_NETWORK_NAME", ""),
         "pulled_at": merged.get("PULLED_AT", ""),
     }
 

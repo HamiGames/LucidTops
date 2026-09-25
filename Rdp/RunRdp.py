@@ -56,6 +56,9 @@ def run_server(*, overwrite_secrets: bool = False) -> None:
     require_rdp_secret = rdp_secrets.require_rdp_secret
     require_rdp_secret_int = rdp_secrets.require_rdp_secret_int
 
+    dns = _load_local("DockerDns")
+    dns.assert_dns_configured()
+
     rdp_main = _load_local("RdpMain")
     start_report = rdp_main.start_rdp_container()
 

@@ -52,7 +52,7 @@ require_rdp_secret_int = _rdp_secrets.require_rdp_secret_int
 get_rdp_secret = _rdp_secrets.get_rdp_secret
 load_rdp_secrets = _rdp_secrets.load_rdp_secrets
 
-_RUNTIME: dict[str, Any] = {"sessions": {}}
+_RUNTIME: dict[str, Any] = {"sessions": {}, "chunks": {}}
 
 
 def utc_now() -> str:
@@ -71,7 +71,11 @@ def audio_control_config() -> dict[str, Any]:
     }
 
 
-def start_audio(*, session_id: str, user_id: str, id_token: str) -> dict[str, Any]:
+def start_audio(
+    *, session_id: str, user_id: str, id_token: str, control_on: bool
+) -> dict[str, Any]:
+    if not control_on:
+        raise RuntimeError("host control audio is off")
     if not str(session_id).strip():
         raise RuntimeError("session_id missing — SessionID required for audio")
     if not user_id.strip() or not id_token.strip():
@@ -83,6 +87,7 @@ def start_audio(*, session_id: str, user_id: str, id_token: str) -> dict[str, An
         "status": "streaming",
         "started_at": utc_now(),
     }
+    _RUNTIME["chunks"].setdefault(sid, [])
     return {
         "status": "started",
         "session_id": sid,
@@ -92,11 +97,38 @@ def start_audio(*, session_id: str, user_id: str, id_token: str) -> dict[str, An
     }
 
 
+def push_audio(*, session_id: str, chunk_b64: str, user_id: str) -> dict[str, Any]:
+    sid = str(session_id).strip()
+    if sid not in _RUNTIME["sessions"]:
+        raise RuntimeError("audio path is not open for this SessionID")
+    if not chunk_b64.strip():
+        raise RuntimeError("audio chunk missing")
+    bucket: list[dict[str, str]] = _RUNTIME["chunks"].setdefault(sid, [])
+    bucket.append({"user_id": user_id, "chunk_b64": chunk_b64, "at": utc_now()})
+    return {"status": "queued", "session_id": sid, "queued": len(bucket), "queued_at": utc_now()}
+
+
+def pull_audio(*, session_id: str) -> dict[str, Any]:
+    sid = str(session_id).strip()
+    if sid not in _RUNTIME["sessions"]:
+        raise RuntimeError("audio path is not open for this SessionID")
+    bucket: list[dict[str, str]] = _RUNTIME["chunks"].get(sid) or []
+    chunk = bucket.pop(0) if bucket else None
+    return {
+        "status": "pulled" if chunk else "empty",
+        "session_id": sid,
+        "chunk": chunk,
+        "remaining": len(bucket),
+        "pulled_at": utc_now(),
+    }
+
+
 def stop_audio(*, session_id: str) -> dict[str, Any]:
     sid = str(session_id).strip()
     if not sid:
         raise RuntimeError("session_id missing")
     previous = _RUNTIME["sessions"].pop(sid, None)
+    _RUNTIME["chunks"].pop(sid, None)
     return {
         "status": "stopped",
         "session_id": sid,

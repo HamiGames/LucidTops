@@ -39,8 +39,6 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.error import URLError
-from urllib.request import Request, urlopen
 
 _DIR = Path(__file__).resolve().parent
 if str(_DIR) not in sys.path:
@@ -79,6 +77,7 @@ _UserControl = _load_local("UserControl")
 _AudioControl = _load_local("AudioControl")
 _UsbControl = _load_local("UsbControl")
 _gov = _load_local("Rdp-gov", "Rdp-gov.py")
+_dns = _load_local("DockerDns")
 
 _RUNTIME: dict[str, Any] = {"running": False, "started_at": None, "stopped_at": None}
 
@@ -104,6 +103,10 @@ def rdp_container_config() -> dict[str, Any]:
         "dockerdns": require_rdp_secret("RDP_DOCKERDNS_COMPATIBLE"),
         "sessions_dns": require_rdp_secret("RDP_SESSIONS_DNS"),
         "sessions_port": require_rdp_secret_int("RDP_SESSIONS_PORT"),
+        "operations_dns": require_rdp_secret("RDP_OPERATIONS_DNS"),
+        "operations_port": require_rdp_secret_int("RDP_OPERATIONS_PORT"),
+        "self_dns": require_rdp_secret("RDP_SELF_DNS"),
+        "docker_network": require_rdp_secret("RDP_DOCKER_NETWORK_NAME"),
         "hardware_ip": get_rdp_secret("HARDWARE_PRIMARY_IP"),
         "hardware_mac": get_rdp_secret("HARDWARE_PRIMARY_MAC"),
         **rdp_status(),
@@ -111,95 +114,54 @@ def rdp_container_config() -> dict[str, Any]:
 
 
 def sessions_base_url() -> str:
-    scheme = require_rdp_secret("RDP_SESSIONS_SCHEME")
-    host = require_rdp_secret("RDP_SESSIONS_DNS")
-    port = require_rdp_secret_int("RDP_SESSIONS_PORT")
-    return f"{scheme}://{host}:{port}"
+    return _dns.sessions_base_url()
+
+
+def operations_base_url() -> str:
+    return _dns.operations_base_url()
 
 
 def sessions_link_health() -> dict[str, Any]:
     """Probe sessions container via DockerDNS using secrets from pull."""
-    base = sessions_base_url()
-    health_path = get_rdp_secret("RDP_SESSIONS_HEALTH_PATH") or "/health"
-    url = f"{base.rstrip('/')}/{health_path.lstrip('/')}"
-    try:
-        req = Request(url, method="GET")
-        with urlopen(req, timeout=5) as resp:
-            code = getattr(resp, "status", None) or resp.getcode()
-            body = resp.read(512).decode("utf-8", errors="replace")
-        return {
-            "reachable": True,
-            "url": url,
-            "status_code": code,
-            "body_preview": body[:200],
-            "checked_at": utc_now(),
-        }
-    except (URLError, OSError, TimeoutError, ValueError) as exc:
-        return {
-            "reachable": False,
-            "url": url,
-            "error": str(exc),
-            "checked_at": utc_now(),
-        }
+    return _dns.link_health(target="sessions")
+
+
+def operations_link_health() -> dict[str, Any]:
+    """Probe operations container via DockerDNS using secrets from pull."""
+    return _dns.link_health(target="operations")
 
 
 def validate_session_id(
     *, session_id: str, user_id: str, id_token: str
 ) -> dict[str, Any]:
-    """Validate SessionID with sessions container (peer meeting location)."""
-    sid = str(session_id).strip()
-    if not sid:
-        raise RuntimeError("SessionID missing — required to operate Rdp inside a session")
-    if not user_id.strip() or not id_token.strip():
-        raise RuntimeError("UserID/TokenID missing for SessionID validation")
+    """Validate an active agreed SessionID with the sessions container."""
+    validation = _dns.require_active_session(
+        session_id=session_id, user_id=user_id, id_token=id_token
+    )
+    validation["status"] = "validated"
+    validation["validated_at"] = utc_now()
+    return validation
 
-    base = sessions_base_url()
-    validate_path = require_rdp_secret("RDP_SESSION_VALIDATE_PATH")
-    url = f"{base.rstrip('/')}/{validate_path.lstrip('/')}"
-    payload = (
-        f'{{"session_id":"{sid}","UserID":"{user_id}","TokenID":"{id_token}"}}'
-    ).encode("utf-8")
-    try:
-        req = Request(
-            url,
-            data=payload,
-            method="POST",
-            headers={"Content-Type": "application/json"},
-        )
-        with urlopen(req, timeout=8) as resp:
-            code = getattr(resp, "status", None) or resp.getcode()
-            body = resp.read().decode("utf-8", errors="replace")
-        if int(code) >= 400:
-            raise RuntimeError(f"SessionID validation rejected by sessions: HTTP {code}")
-        return {
-            "status": "validated",
-            "session_id": sid,
-            "user_id": user_id,
-            "sessions_url": url,
-            "status_code": code,
-            "body_preview": body[:300],
-            "validated_at": utc_now(),
-        }
-    except (URLError, OSError, TimeoutError, ValueError) as exc:
-        # When sessions is unreachable, still require SessionID present for peer ops;
-        # record link failure for status (peer meeting must use sessions when online).
-        health = sessions_link_health()
-        if not health.get("reachable"):
-            return {
-                "status": "session_id_accepted_offline",
-                "session_id": sid,
-                "user_id": user_id,
-                "sessions_url": url,
-                "sessions_error": str(exc),
-                "sessions_health": health,
-                "validated_at": utc_now(),
-            }
-        raise RuntimeError(f"SessionID validation failed: {exc}") from exc
+
+def stop_peer_channels(*, session_id: str) -> dict[str, Any]:
+    """Stop screen, audio, mouse, keyboard, USB, and file state for a SessionID."""
+    sid = str(session_id).strip()
+    return {
+        "session_id": sid,
+        "screen": _ScreenShare.stop_screen_share(session_id=sid),
+        "audio": _AudioControl.stop_audio(session_id=sid),
+        "mouse": _MouseControl.clear_mouse_session(session_id=sid),
+        "keyboard": _keyboardControl.clear_keyboard_session(session_id=sid),
+        "usb": _UsbControl.detach_usb(session_id=sid),
+        "files": _FileShare.clear_file_share(session_id=sid),
+        "stopped_at": utc_now(),
+    }
 
 
 def start_rdp_container() -> dict[str, Any]:
     ensure_rdp_secrets(overwrite=False)
     load_rdp_secrets(reload=True)
+    _dns.assert_dns_configured()
     cfg = rdp_container_config()
     _gov.governance_policy()
     _RUNTIME["running"] = True
@@ -212,6 +174,7 @@ def start_rdp_container() -> dict[str, Any]:
         "status": "started",
         "config": cfg,
         "sessions_link": sessions_link_health(),
+        "operations_link": operations_link_health(),
         "started_at": _RUNTIME["started_at"],
     }
 
@@ -247,6 +210,7 @@ def status_rdp_container() -> dict[str, Any]:
         "usb": _UsbControl.usb_control_config(),
         "governance": _gov.governance_policy(),
         "sessions_link": sessions_link_health(),
+        "operations_link": operations_link_health(),
         "checked_at": utc_now(),
     }
 

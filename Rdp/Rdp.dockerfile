@@ -51,6 +51,8 @@ RUN test -f /app/Rdp/createRDP.py \
  && test -f /app/Rdp/RunRdp.py \
  && test -f /app/Rdp/rdp_secrets.py \
  && test -f /app/Rdp/RdpMain.py \
+ && test -f /app/Rdp/DockerDns.py \
+ && test -f /app/Rdp/ViewerWindow.py \
  && test -s /app/Rdp/requirements.txt \
  && chmod +x /app/Rdp/createRDP.py /app/Rdp/RunRdp.py
 

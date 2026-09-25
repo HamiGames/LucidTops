@@ -71,18 +71,55 @@ def mouse_control_config() -> dict[str, Any]:
     }
 
 
+def _inject_mouse(*, x: int, y: int, button: str, action: str) -> None:
+    try:
+        from pynput.mouse import Button, Controller
+    except ImportError as exc:
+        raise RuntimeError(f"mouse control library missing: {exc}") from exc
+    name = button.strip().lower()
+    if name in {"left", "1"}:
+        btn = Button.left
+    elif name in {"right", "2"}:
+        btn = Button.right
+    else:
+        btn = Button.middle
+    mouse = Controller()
+    mouse.position = (x, y)
+    act = action.strip().lower()
+    if act in {"press", "down"}:
+        mouse.press(btn)
+    elif act in {"release", "up"}:
+        mouse.release(btn)
+    elif act == "click":
+        mouse.click(btn)
+    elif act != "move":
+        raise RuntimeError(f"unsupported mouse action: {action}")
+
+
 def apply_mouse_event(
-    *, session_id: str, x: int, y: int, button: str, action: str
+    *,
+    session_id: str,
+    x: int,
+    y: int,
+    button: str,
+    action: str,
+    control_on: bool,
+    caller_is_host: bool,
 ) -> dict[str, Any]:
+    if not control_on:
+        raise RuntimeError("host control mouse is off")
     if not str(session_id).strip():
         raise RuntimeError("session_id missing — SessionID required for mouse control")
     if not button.strip() or not action.strip():
         raise RuntimeError("button/action missing for mouse event")
+    if caller_is_host:
+        raise RuntimeError("host mouse is local — viewer events are the remote control path")
     cfg = mouse_control_config()
     max_w = int(cfg["max_width"])
     max_h = int(cfg["max_height"])
     if x < 0 or y < 0 or x > max_w or y > max_h:
         raise RuntimeError("mouse coordinates outside pulled screen geometry")
+    _inject_mouse(x=x, y=y, button=button, action=action)
     event = {
         "status": "applied",
         "session_id": str(session_id).strip(),
@@ -90,11 +127,16 @@ def apply_mouse_event(
         "y": y,
         "button": button,
         "action": action,
-        "config": cfg,
         "applied_at": utc_now(),
     }
     _LAST_EVENT[str(session_id).strip()] = event
     return event
+
+
+def clear_mouse_session(*, session_id: str) -> dict[str, Any]:
+    sid = str(session_id).strip()
+    previous = _LAST_EVENT.pop(sid, None)
+    return {"status": "cleared", "session_id": sid, "previous": previous, "cleared_at": utc_now()}
 
 
 def mouse_control_status(*, session_id: str | None = None) -> dict[str, Any]:

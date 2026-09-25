@@ -103,7 +103,9 @@ def usb_control_config() -> dict[str, Any]:
     }
 
 
-def list_usb_devices(*, session_id: str, refresh: bool = False) -> dict[str, Any]:
+def list_usb_devices(*, session_id: str, refresh: bool = False, control_on: bool = False) -> dict[str, Any]:
+    if not control_on:
+        raise RuntimeError("host control usb is off")
     if not str(session_id).strip():
         raise RuntimeError("session_id missing — SessionID required for USB")
     if refresh:
@@ -121,7 +123,11 @@ def list_usb_devices(*, session_id: str, refresh: bool = False) -> dict[str, Any
     }
 
 
-def attach_usb(*, session_id: str, device_id: str, user_id: str) -> dict[str, Any]:
+def attach_usb(
+    *, session_id: str, device_id: str, user_id: str, control_on: bool
+) -> dict[str, Any]:
+    if not control_on:
+        raise RuntimeError("host control usb is off")
     if not str(session_id).strip():
         raise RuntimeError("session_id missing — SessionID required for USB attach")
     if not device_id.strip():

@@ -101,7 +101,11 @@ def screen_share_config() -> dict[str, Any]:
     }
 
 
-def start_screen_share(*, session_id: str, user_id: str, id_token: str) -> dict[str, Any]:
+def start_screen_share(
+    *, session_id: str, user_id: str, id_token: str, control_on: bool
+) -> dict[str, Any]:
+    if not control_on:
+        raise RuntimeError("host control screen is off")
     if not str(session_id).strip():
         raise RuntimeError("session_id missing — SessionID required for screenshare")
     if not user_id.strip() or not id_token.strip():
@@ -119,6 +123,42 @@ def start_screen_share(*, session_id: str, user_id: str, id_token: str) -> dict[
         "user_id": user_id,
         "config": cfg,
         "started_at": _RUNTIME["sessions"][sid]["started_at"],
+    }
+
+
+def capture_frame(*, session_id: str) -> dict[str, Any]:
+    """Grab one host-desktop frame with mss for the viewer window."""
+    sid = str(session_id).strip()
+    if sid not in _RUNTIME["sessions"]:
+        raise RuntimeError("screen share is not started for this SessionID")
+    cfg = screen_share_config()
+    try:
+        import base64
+
+        import cv2
+        import mss
+        import numpy as np
+    except ImportError as exc:
+        raise RuntimeError(f"screen capture libraries missing: {exc}") from exc
+    with mss.mss() as sct:
+        monitor = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
+        raw = np.array(sct.grab(monitor))
+    frame = cv2.cvtColor(raw, cv2.COLOR_BGRA2BGR)
+    max_w = int(cfg["max_width"])
+    max_h = int(cfg["max_height"])
+    height, width = frame.shape[:2]
+    scale = min(max_w / max(width, 1), max_h / max(height, 1), 1.0)
+    if scale < 1.0:
+        frame = cv2.resize(frame, (max(1, int(width * scale)), max(1, int(height * scale))))
+    ok, encoded = cv2.imencode(".jpg", frame)
+    if not ok:
+        raise RuntimeError("screen frame encode failed")
+    return {
+        "status": "frame",
+        "session_id": sid,
+        "content_type": "image/jpeg",
+        "frame_jpeg_base64": base64.b64encode(encoded.tobytes()).decode("ascii"),
+        "captured_at": utc_now(),
     }
 
 

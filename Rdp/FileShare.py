@@ -71,11 +71,37 @@ def file_share_config() -> dict[str, Any]:
     }
 
 
-def share_file(*, session_id: str, relative_path: str) -> dict[str, Any]:
+_SHARED: dict[str, list[str]] = {}
+
+
+def _path_allowed(relative_path: str, allowed: list[str] | None) -> bool:
+    cleaned = relative_path.strip().replace("\\", "/").lstrip("/")
+    if not allowed:
+        return True
+    for item in allowed:
+        prefix = str(item).strip().replace("\\", "/").lstrip("/")
+        if not prefix:
+            continue
+        if cleaned == prefix or cleaned.startswith(prefix.rstrip("/") + "/"):
+            return True
+    return False
+
+
+def share_file(
+    *,
+    session_id: str,
+    relative_path: str,
+    control_on: bool,
+    allowed_paths: list[str] | None = None,
+) -> dict[str, Any]:
+    if not control_on:
+        raise RuntimeError("host control transfer is off")
     if not str(session_id).strip():
         raise RuntimeError("session_id missing — SessionID required for file share")
     if not relative_path.strip():
         raise RuntimeError("relative_path missing")
+    if not _path_allowed(relative_path, allowed_paths):
+        raise RuntimeError("file path is outside host transfer_paths")
     cfg = file_share_config()
     root = Path(cfg["share_root"])
     root.mkdir(parents=True, exist_ok=True)
@@ -87,14 +113,22 @@ def share_file(*, session_id: str, relative_path: str) -> dict[str, Any]:
     size = target.stat().st_size
     if size > int(cfg["max_bytes"]):
         raise RuntimeError("shared file exceeds RDP_FILE_SHARE_MAX_BYTES")
+    sid = str(session_id).strip()
+    _SHARED.setdefault(sid, []).append(target.as_posix())
     return {
         "status": "shared",
-        "session_id": str(session_id).strip(),
+        "session_id": sid,
         "path": target.as_posix(),
         "size": size,
         "config": cfg,
         "shared_at": utc_now(),
     }
+
+
+def clear_file_share(*, session_id: str) -> dict[str, Any]:
+    sid = str(session_id).strip()
+    previous = _SHARED.pop(sid, None)
+    return {"status": "cleared", "session_id": sid, "previous": previous, "cleared_at": utc_now()}
 
 
 def list_shareable(*, session_id: str) -> dict[str, Any]:

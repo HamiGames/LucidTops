@@ -18,7 +18,6 @@ requirements:
 from __future__ import annotations
 
 import importlib.util
-import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -51,21 +50,51 @@ require_rdp_secret_int = _rdp_secrets.require_rdp_secret_int
 get_rdp_secret = _rdp_secrets.get_rdp_secret
 load_rdp_secrets = _rdp_secrets.load_rdp_secrets
 rdp_status = _rdp_secrets.rdp_status
+_dns = _load_local("DockerDns")
 
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _load_settings_js() -> dict[str, Any]:
-    path = Path(require_rdp_secret("RDP_SETTINGS_JS_PATH")).expanduser()
-    if not path.exists():
-        return {}
-    try:
-        loaded = json.loads(path.read_text(encoding="utf-8"))
-        return loaded if isinstance(loaded, dict) else {}
-    except (OSError, json.JSONDecodeError):
-        return {}
+def controls_from_operations(body: dict[str, Any]) -> dict[str, Any]:
+    controls = body.get("controls")
+    if isinstance(controls, dict):
+        return controls
+    return {}
+
+
+def control_enabled(controls: dict[str, Any], key: str) -> bool:
+    value = controls.get(key)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes"}
+    return False
+
+
+def require_control(
+    *,
+    validation: dict[str, Any],
+    user_id: str,
+    id_token: str,
+    key: str,
+) -> dict[str, Any]:
+    """Host settings.js controls from operations. Viewer cannot change them."""
+    session_id = str(validation.get("session_id") or validation.get("sessionID") or "")
+    host_user_id = str(validation.get("hostUserID") or "")
+    if not session_id or not host_user_id:
+        raise RuntimeError("host control requires an active SessionID and hostUserID")
+    loaded = _dns.load_host_controls(
+        session_id=session_id,
+        user_id=user_id,
+        id_token=id_token,
+        host_user_id=host_user_id,
+    )
+    controls = controls_from_operations(loaded)
+    if not control_enabled(controls, key):
+        raise RuntimeError(f"host control disabled: {key}")
+    return {"controls": controls, "operations": loaded}
 
 
 def user_control_config() -> dict[str, Any]:
@@ -82,19 +111,40 @@ def user_control_config() -> dict[str, Any]:
 
 
 def enforce_user_controls(
-    *, user_id: str, id_token: str, settings: dict[str, Any] | None = None
+    *,
+    user_id: str,
+    id_token: str,
+    session_id: str,
+    settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not user_id.strip() or not id_token.strip():
         raise RuntimeError("UserID/IDToken missing for user control")
+    if not str(session_id).strip():
+        raise RuntimeError("SessionID missing for user control")
     cfg = user_control_config()
-    applied = dict(_load_settings_js())
     if settings:
-        applied.update(settings)
+        applied = _dns.apply_host_controls(
+            session_id=session_id,
+            user_id=user_id,
+            id_token=id_token,
+            settings=settings,
+        )
+    else:
+        validation = _dns.fetch_validation(
+            session_id=session_id, user_id=user_id, id_token=id_token
+        )
+        applied = _dns.load_host_controls(
+            session_id=session_id,
+            user_id=user_id,
+            id_token=id_token,
+            host_user_id=str(validation.get("hostUserID") or user_id),
+        )
     return {
         "status": "enforced",
         "user_id": user_id,
+        "session_id": str(session_id).strip(),
         "token_id_present": bool(id_token.strip()),
-        "settings_applied": applied,
+        "settings_applied": controls_from_operations(applied),
         "config": cfg,
         "enforced_at": utc_now(),
     }

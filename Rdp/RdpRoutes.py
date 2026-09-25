@@ -76,6 +76,8 @@ _UserControl = _load_local("UserControl")
 _AudioControl = _load_local("AudioControl")
 _UsbControl = _load_local("UsbControl")
 _gov = _load_local("Rdp-gov", "Rdp-gov.py")
+_dns = _load_local("DockerDns")
+_ViewerWindow = _load_local("ViewerWindow")
 
 
 def utc_now() -> str:
@@ -108,6 +110,26 @@ class UsbAttachPayload(RdpAuthPayload):
     device_id: str
 
 
+class AgreePayload(RdpAuthPayload):
+    multi_connection: bool = False
+
+
+class ConnectPayload(RdpAuthPayload):
+    session_key: str
+
+
+class TerminatePayload(RdpAuthPayload):
+    mode: str = "disconnect"
+
+
+class AudioChunkPayload(RdpAuthPayload):
+    chunk_b64: str
+
+
+class SettingsPayload(RdpAuthPayload):
+    Session_settings: dict[str, Any] | None = None
+
+
 def _require_api_key(x_lucid_api_key: str | None) -> None:
     expected = require_rdp_secret("RDP_API_KEY")
     if not x_lucid_api_key or x_lucid_api_key.strip() != expected:
@@ -123,6 +145,7 @@ def _require_session(payload: RdpAuthPayload) -> str:
 def _gate_session_action(*, action: str, payload: RdpAuthPayload) -> dict[str, Any]:
     sid = _require_session(payload)
     try:
+        _dns.assert_dns_configured()
         _gov.validate_rdp_action(
             action=action, user_id=payload.UserID, id_token=payload.IDToken
         )
@@ -132,6 +155,35 @@ def _gate_session_action(*, action: str, payload: RdpAuthPayload) -> dict[str, A
     except RuntimeError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     return validation
+
+
+def _host_controls(validation: dict[str, Any], payload: RdpAuthPayload, key: str) -> dict[str, Any]:
+    try:
+        loaded = _UserControl.require_control(
+            validation=validation,
+            user_id=payload.UserID,
+            id_token=payload.IDToken,
+            key=key,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    return loaded["controls"]
+
+
+def _record(payload: RdpAuthPayload, action: str) -> dict[str, Any]:
+    try:
+        return _dns.record_activity(
+            session_id=str(payload.session_id),
+            user_id=payload.UserID,
+            id_token=payload.IDToken,
+            action=action,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+def _caller_is_host(validation: dict[str, Any], payload: RdpAuthPayload) -> bool:
+    return payload.UserID == str(validation.get("hostUserID") or "")
 
 
 def create_rdp_app() -> FastAPI:
@@ -196,11 +248,14 @@ def create_rdp_app() -> FastAPI:
     ) -> dict[str, Any]:
         _require_api_key(x_lucid_api_key)
         validation = _gate_session_action(action="screen_share", payload=payload)
+        _host_controls(validation, payload, "screen")
         result = _ScreenShare.start_screen_share(
             session_id=str(payload.session_id),
             user_id=payload.UserID,
             id_token=payload.IDToken,
+            control_on=True,
         )
+        result["activity"] = _record(payload, "screen_share_start")
         result["session_validation"] = validation
         return result
 
@@ -211,7 +266,9 @@ def create_rdp_app() -> FastAPI:
     ) -> dict[str, Any]:
         _require_api_key(x_lucid_api_key)
         sid = _require_session(payload)
-        return _ScreenShare.stop_screen_share(session_id=sid)
+        result = _ScreenShare.stop_screen_share(session_id=sid)
+        result["activity"] = _record(payload, "screen_share_stop")
+        return result
 
     @app.post(f"{api_prefix}/mouse/event")
     def mouse_event(
@@ -220,13 +277,17 @@ def create_rdp_app() -> FastAPI:
     ) -> dict[str, Any]:
         _require_api_key(x_lucid_api_key)
         validation = _gate_session_action(action="mouse_control", payload=payload)
+        _host_controls(validation, payload, "mouse")
         result = _MouseControl.apply_mouse_event(
             session_id=str(payload.session_id),
             x=payload.x,
             y=payload.y,
             button=payload.button,
             action=payload.action,
+            control_on=True,
+            caller_is_host=_caller_is_host(validation, payload),
         )
+        result["activity"] = _record(payload, "mouse_control")
         result["session_validation"] = validation
         return result
 
@@ -237,11 +298,15 @@ def create_rdp_app() -> FastAPI:
     ) -> dict[str, Any]:
         _require_api_key(x_lucid_api_key)
         validation = _gate_session_action(action="keyboard_control", payload=payload)
+        _host_controls(validation, payload, "keyboard")
         result = _keyboardControl.apply_keyboard_event(
             session_id=str(payload.session_id),
             key=payload.key,
             action=payload.action,
+            control_on=True,
+            caller_is_host=_caller_is_host(validation, payload),
         )
+        result["activity"] = _record(payload, "keyboard_control")
         result["session_validation"] = validation
         return result
 
@@ -252,15 +317,22 @@ def create_rdp_app() -> FastAPI:
     ) -> dict[str, Any]:
         _require_api_key(x_lucid_api_key)
         validation = _gate_session_action(action="file_share", payload=payload)
+        controls = _host_controls(validation, payload, "transfer")
+        paths = controls.get("transfer_paths")
+        allowed = paths if isinstance(paths, list) else []
         result = _FileShare.share_file(
-            session_id=str(payload.session_id), relative_path=payload.relative_path
+            session_id=str(payload.session_id),
+            relative_path=payload.relative_path,
+            control_on=True,
+            allowed_paths=allowed,
         )
+        result["activity"] = _record(payload, "file_share")
         result["session_validation"] = validation
         return result
 
     @app.post(f"{api_prefix}/user-control/enforce")
     def user_control_enforce(
-        payload: RdpAuthPayload,
+        payload: SettingsPayload,
         x_lucid_api_key: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_api_key(x_lucid_api_key)
@@ -270,8 +342,12 @@ def create_rdp_app() -> FastAPI:
             )
         except RuntimeError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
+        sid = _require_session(payload)
         return _UserControl.enforce_user_controls(
-            user_id=payload.UserID, id_token=payload.IDToken
+            user_id=payload.UserID,
+            id_token=payload.IDToken,
+            session_id=sid,
+            settings=getattr(payload, "Session_settings", None),
         )
 
     @app.post(f"{api_prefix}/audio/start")
@@ -281,11 +357,14 @@ def create_rdp_app() -> FastAPI:
     ) -> dict[str, Any]:
         _require_api_key(x_lucid_api_key)
         validation = _gate_session_action(action="audio_control", payload=payload)
+        _host_controls(validation, payload, "audio")
         result = _AudioControl.start_audio(
             session_id=str(payload.session_id),
             user_id=payload.UserID,
             id_token=payload.IDToken,
+            control_on=True,
         )
+        result["activity"] = _record(payload, "audio_start")
         result["session_validation"] = validation
         return result
 
@@ -296,7 +375,9 @@ def create_rdp_app() -> FastAPI:
     ) -> dict[str, Any]:
         _require_api_key(x_lucid_api_key)
         sid = _require_session(payload)
-        return _AudioControl.stop_audio(session_id=sid)
+        result = _AudioControl.stop_audio(session_id=sid)
+        result["activity"] = _record(payload, "audio_stop")
+        return result
 
     @app.post(f"{api_prefix}/usb/list")
     def usb_list(
@@ -305,8 +386,9 @@ def create_rdp_app() -> FastAPI:
     ) -> dict[str, Any]:
         _require_api_key(x_lucid_api_key)
         validation = _gate_session_action(action="usb_control", payload=payload)
+        _host_controls(validation, payload, "usb")
         result = _UsbControl.list_usb_devices(
-            session_id=str(payload.session_id), refresh=True
+            session_id=str(payload.session_id), refresh=True, control_on=True
         )
         result["session_validation"] = validation
         return result
@@ -318,11 +400,14 @@ def create_rdp_app() -> FastAPI:
     ) -> dict[str, Any]:
         _require_api_key(x_lucid_api_key)
         validation = _gate_session_action(action="usb_control", payload=payload)
+        _host_controls(validation, payload, "usb")
         result = _UsbControl.attach_usb(
             session_id=str(payload.session_id),
             device_id=payload.device_id,
             user_id=payload.UserID,
+            control_on=True,
         )
+        result["activity"] = _record(payload, "usb_attach")
         result["session_validation"] = validation
         return result
 
@@ -333,6 +418,242 @@ def create_rdp_app() -> FastAPI:
     ) -> dict[str, Any]:
         _require_api_key(x_lucid_api_key)
         sid = _require_session(payload)
-        return _UsbControl.detach_usb(session_id=sid)
+        result = _UsbControl.detach_usb(session_id=sid)
+        result["activity"] = _record(payload, "usb_detach")
+        return result
+
+    @app.post(f"{api_prefix}/screen-share/frame")
+    def screen_share_frame(
+        payload: RdpAuthPayload,
+        x_lucid_api_key: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_api_key(x_lucid_api_key)
+        validation = _gate_session_action(action="screen_share", payload=payload)
+        _host_controls(validation, payload, "screen")
+        return _ScreenShare.capture_frame(session_id=str(payload.session_id))
+
+    @app.post(f"{api_prefix}/audio/push")
+    def audio_push(
+        payload: AudioChunkPayload,
+        x_lucid_api_key: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_api_key(x_lucid_api_key)
+        validation = _gate_session_action(action="audio_control", payload=payload)
+        _host_controls(validation, payload, "audio")
+        return _AudioControl.push_audio(
+            session_id=str(payload.session_id),
+            chunk_b64=payload.chunk_b64,
+            user_id=payload.UserID,
+        )
+
+    @app.post(f"{api_prefix}/audio/pull")
+    def audio_pull(
+        payload: RdpAuthPayload,
+        x_lucid_api_key: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_api_key(x_lucid_api_key)
+        validation = _gate_session_action(action="audio_control", payload=payload)
+        _host_controls(validation, payload, "audio")
+        return _AudioControl.pull_audio(session_id=str(payload.session_id))
+
+    @app.post(f"{api_prefix}/session-attach")
+    def session_attach(
+        payload: SettingsPayload,
+        x_lucid_api_key: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_api_key(x_lucid_api_key)
+        validation = _gate_session_action(action="session_attach", payload=payload)
+        if payload.Session_settings and _caller_is_host(validation, payload):
+            try:
+                _dns.apply_host_controls(
+                    session_id=str(payload.session_id),
+                    user_id=payload.UserID,
+                    id_token=payload.IDToken,
+                    settings=payload.Session_settings,
+                )
+            except RuntimeError as exc:
+                raise HTTPException(status_code=403, detail=str(exc)) from exc
+        caller = payload.UserID
+        viewer = str(validation.get("viewerUserID") or "")
+        try:
+            if caller == viewer:
+                controls = _dns.load_host_controls(
+                    session_id=str(payload.session_id),
+                    user_id=payload.UserID,
+                    id_token=payload.IDToken,
+                    host_user_id=str(validation.get("hostUserID") or ""),
+                )
+                result = _ViewerWindow.launch_viewer_window(
+                    validation=validation,
+                    controls=_UserControl.controls_from_operations(controls),
+                )
+            else:
+                result = _ViewerWindow.host_desktop_source(validation=validation)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        result["activity"] = _record(payload, "session_attach")
+        return result
+
+    @app.post(f"{api_prefix}/host-create")
+    def host_create(
+        payload: RdpAuthPayload,
+        x_lucid_api_key: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_api_key(x_lucid_api_key)
+        try:
+            _dns.assert_dns_configured()
+            _gov.validate_rdp_action(
+                action="host_create", user_id=payload.UserID, id_token=payload.IDToken
+            )
+            created = _dns.create_host_session(
+                user_id=payload.UserID, id_token=payload.IDToken
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        created["role"] = "host"
+        return created
+
+    @app.post(f"{api_prefix}/peer-find")
+    def peer_find(
+        payload: RdpAuthPayload,
+        x_lucid_api_key: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_api_key(x_lucid_api_key)
+        sid = _require_session(payload)
+        try:
+            _dns.assert_dns_configured()
+            _gov.validate_rdp_action(
+                action="peer_find", user_id=payload.UserID, id_token=payload.IDToken
+            )
+            found = _dns.find_peer(
+                session_id=sid, user_id=payload.UserID, id_token=payload.IDToken
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        found["role"] = "viewer"
+        return found
+
+    @app.post(f"{api_prefix}/peer-connect")
+    def peer_connect(
+        payload: ConnectPayload,
+        x_lucid_api_key: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_api_key(x_lucid_api_key)
+        sid = _require_session(payload)
+        try:
+            _dns.assert_dns_configured()
+            _gov.validate_rdp_action(
+                action="peer_connect", user_id=payload.UserID, id_token=payload.IDToken
+            )
+            joined = _dns.connect_peer(
+                session_id=sid,
+                session_key=payload.session_key,
+                user_id=payload.UserID,
+                id_token=payload.IDToken,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        joined["role"] = "viewer"
+        return joined
+
+    @app.post(f"{api_prefix}/peer-agree")
+    def peer_agree(
+        payload: AgreePayload,
+        x_lucid_api_key: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_api_key(x_lucid_api_key)
+        sid = _require_session(payload)
+        try:
+            _dns.assert_dns_configured()
+            _gov.validate_rdp_action(
+                action="peer_agree", user_id=payload.UserID, id_token=payload.IDToken
+            )
+            agreed = _dns.agree_connection(
+                session_id=sid,
+                user_id=payload.UserID,
+                id_token=payload.IDToken,
+                multi_connection=payload.multi_connection,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        agreed["popup"] = "accept_connection"
+        try:
+            agreed["activity"] = _dns.record_activity(
+                session_id=sid,
+                user_id=payload.UserID,
+                id_token=payload.IDToken,
+                action="peer_agree",
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return agreed
+
+    @app.post(f"{api_prefix}/peer-terminate")
+    def peer_terminate(
+        payload: TerminatePayload,
+        x_lucid_api_key: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_api_key(x_lucid_api_key)
+        sid = _require_session(payload)
+        mode = payload.mode.strip().lower()
+        if mode not in {"disconnect", "end"}:
+            raise HTTPException(status_code=400, detail="mode must be disconnect or end")
+        try:
+            _dns.assert_dns_configured()
+            _gov.validate_rdp_action(
+                action="terminate", user_id=payload.UserID, id_token=payload.IDToken
+            )
+            validation = _dns.fetch_validation(
+                session_id=sid, user_id=payload.UserID, id_token=payload.IDToken
+            )
+            if not validation.get("is_participant"):
+                raise RuntimeError("UserID is not a SessionID participant")
+            closed = _dns.terminate_participant(
+                session_id=sid,
+                user_id=payload.UserID,
+                id_token=payload.IDToken,
+                mode=mode,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        closed["channels"] = _RdpMain.stop_peer_channels(session_id=sid)
+        try:
+            closed["activity"] = _dns.record_activity(
+                session_id=sid,
+                user_id=payload.UserID,
+                id_token=payload.IDToken,
+                action=f"terminate_{mode}",
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return closed
+
+    @app.post(f"{api_prefix}/peer-reconnect")
+    def peer_reconnect(
+        payload: RdpAuthPayload,
+        x_lucid_api_key: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_api_key(x_lucid_api_key)
+        sid = _require_session(payload)
+        try:
+            _dns.assert_dns_configured()
+            _gov.validate_rdp_action(
+                action="reconnect", user_id=payload.UserID, id_token=payload.IDToken
+            )
+            renewed = _dns.reconnect_session(
+                session_id=sid, user_id=payload.UserID, id_token=payload.IDToken
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        try:
+            renewed["activity"] = _dns.record_activity(
+                session_id=sid,
+                user_id=payload.UserID,
+                id_token=payload.IDToken,
+                action="reconnect",
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return renewed
 
     return app
