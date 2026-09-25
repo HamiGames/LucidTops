@@ -28,6 +28,12 @@ LUCID_TOKENS_COLLECTION = "lucid_tokens"
 SESSION_RECORDS_COLLECTION = "session_records"
 SESSION_ID_LOG_COLLECTION = "session_id_log"
 SESSION_KEYS_COLLECTION = "session_keys"
+# Canonical LucidTops_SessionsDB collections (Databases.txt / DBSchemas.py)
+SESSIONS_DB_SESSION_ID_COLLECTION = "SessionID"
+SESSIONS_DB_SESSION_DATA_COLLECTION = "session-data"
+SESSIONS_DB_SESSION_DATA_CHUNK_COLLECTION = "session-data-chunk"
+SESSIONS_DB_BLOCK_DATA_QUEUE_COLLECTION = "block-data-queue"
+SESSIONS_DB_BLOCK_QUEUE_ID_COLLECTION = "block-queue-ID"
 TALLY_RECORDS_COLLECTION = "tally_records"
 TALLY_SYNC_COLLECTION = "tally_sync"
 TASK_TOKENS_COLLECTION = "task_tokens"
@@ -226,6 +232,60 @@ SESSION_KEY_FIELDS: tuple[str, ...] = (
     "updated_at",
 )
 
+# --- LucidTops_SessionsDB canonical collections (Databases/DBSchemas.py) ---
+
+SESSIONS_DB_SESSION_ID_FIELDS: tuple[str, ...] = (
+    "SessionID",
+    "Host_UserID",
+    "Viewer_UserID",
+    "creation_timestamp",
+    "join_timestamp_start",
+    "Viewer_log",
+    "Host_log",
+    "Session_End_timestamp",
+    "Session_settings",
+    "SessionID_status",
+    "session-data-ref",
+    "block-queue-ID",
+)
+
+SESSIONS_DB_SESSION_DATA_FIELDS: tuple[str, ...] = (
+    "SessionID",
+    "Host_UserID",
+    "Viewer_UserID",
+    "payload",
+    "Status",
+    "created_at",
+    "aggregate_hash",
+)
+
+SESSIONS_DB_SESSION_DATA_CHUNK_FIELDS: tuple[str, ...] = (
+    "chunk_id",
+    "SessionID",
+    "session-data-ref",
+    "chunk_index",
+    "compressed_payload",
+    "chunk_hash",
+    "created_at",
+)
+
+SESSIONS_DB_BLOCK_DATA_QUEUE_FIELDS: tuple[str, ...] = (
+    "block-queue-ID",
+    "chunk_refs",
+    "chunk_count",
+    "status",
+    "created_at",
+    "updated_at",
+)
+
+SESSIONS_DB_BLOCK_QUEUE_ID_FIELDS: tuple[str, ...] = (
+    "block-queue-ID",
+    "block-data-queue-ref",
+    "awaiting_block",
+    "target_BlockID",
+    "created_at",
+)
+
 TALLY_RECORDS_FIELDS: tuple[str, ...] = (
     "entity_type",
     "entity_id",
@@ -267,6 +327,11 @@ COLLECTION_SCHEMAS: dict[str, tuple[str, ...]] = {
     SESSION_RECORDS_COLLECTION: SESSION_RECORDS_FIELDS,
     SESSION_ID_LOG_COLLECTION: SESSION_ID_LOG_FIELDS,
     SESSION_KEYS_COLLECTION: SESSION_KEY_FIELDS,
+    SESSIONS_DB_SESSION_ID_COLLECTION: SESSIONS_DB_SESSION_ID_FIELDS,
+    SESSIONS_DB_SESSION_DATA_COLLECTION: SESSIONS_DB_SESSION_DATA_FIELDS,
+    SESSIONS_DB_SESSION_DATA_CHUNK_COLLECTION: SESSIONS_DB_SESSION_DATA_CHUNK_FIELDS,
+    SESSIONS_DB_BLOCK_DATA_QUEUE_COLLECTION: SESSIONS_DB_BLOCK_DATA_QUEUE_FIELDS,
+    SESSIONS_DB_BLOCK_QUEUE_ID_COLLECTION: SESSIONS_DB_BLOCK_QUEUE_ID_FIELDS,
     TALLY_RECORDS_COLLECTION: TALLY_RECORDS_FIELDS,
     TALLY_SYNC_COLLECTION: TALLY_SYNC_FIELDS,
     TASK_TOKENS_COLLECTION: TASK_TOKEN_FIELDS,
