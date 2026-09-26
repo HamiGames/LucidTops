@@ -193,6 +193,64 @@ def store_user_tier(
             {"$set": record, "$setOnInsert": {"created_at": utc_now()}},
             upsert=True,
         )
+        # Seed LucidTopsUserDB / users profile gating fields (Databases.txt).
+        max_sessions = (
+            None
+            if definition["unlimited_sessions"]
+            else definition["sessions_per_month"]
+        )
+        profile_set = {
+            "Tier_selected": tier,
+            "tier": tier,
+            "max-sessions": max_sessions,
+            "updated_at": utc_now(),
+        }
+        db.users.update_one(
+            {"UserID": cleaned_user},
+            {
+                "$set": profile_set,
+                "$setOnInsert": {"session-count": 0, "created_at": utc_now()},
+            },
+            upsert=True,
+        )
+        db.users.update_one(
+            {"UserID": cleaned_user, "session-count": {"$exists": False}},
+            {"$set": {"session-count": 0}},
+        )
+        try:
+            user_db_name = get_config_value_optional("LUCIDTOPS_USER_DB_NAME") or (
+                get_config_value_optional("LUCIDTOPSUSERDB_NAME") or "LucidTopsUserDB"
+            )
+            user_col_name = (
+                get_config_value_optional("USER_DB_COLLECTION") or "UserID"
+            )
+            user_db = mongo[user_db_name]
+            user_db[user_col_name].update_one(
+                {"UserID": cleaned_user},
+                {
+                    "$set": {
+                        "Tier_selected": tier,
+                        "max-sessions": max_sessions,
+                        "updated_at": utc_now(),
+                    },
+                    "$setOnInsert": {
+                        "UserID": cleaned_user,
+                        "session-count": 0,
+                        "created_at": utc_now(),
+                    },
+                },
+                upsert=True,
+            )
+            user_db[user_col_name].update_one(
+                {"UserID": cleaned_user, "session-count": {"$exists": False}},
+                {"$set": {"session-count": 0}},
+            )
+        except Exception:
+            # Named UserDB may be unreachable from this host; master users still seeded.
+            pass
+        record["Tier_selected"] = tier
+        record["max-sessions"] = max_sessions
+        record["session-count"] = 0
         return record
     finally:
         if client is None:
