@@ -79,6 +79,10 @@ if [ "${RUN_DATABASES_BOOTSTRAP_ON_START:-true}" = "true" ]; then
   python BootstrapDatabases.py
 fi
 
+if [ "${RUN_SESSIONSDB_SCHEMA_PATCH:-false}" = "true" ]; then
+  python patch_sessionsdb_collections.py --apply
+fi
+
 if [ -z "${DATABASES_SECRETS_FILE:-}" ] || [ ! -f "${DATABASES_SECRETS_FILE}" ]; then
   echo "DATABASES_SECRETS_FILE missing after bootstrap — ${DATABASES_SECRETS_FILE:-unset}" >&2
   exit 1

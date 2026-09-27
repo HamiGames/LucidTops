@@ -1,8 +1,9 @@
 """MongoDB collection field schemas for LucidTops named Databases.
 
 Field contracts from documentation/Databases.txt:
-- LucidTops_SessionsDB collection SessionID
-- LucidTopsUserDB collection UserID
+- LucidTops_SessionsDB collections: SessionID, session-data, session-data-chunk,
+  block-data-queue, block-queue-ID
+- LucidTopsUserDB collection UserID (includes session-count, max-sessions)
 - LucidTopsNodeDB collection {NodeID}
 - LucidTopsLedgerDB / LucidTops_LedgerDB collection BlockID
 - LucidTopsPaySystemsDB collection {UserID}_{timestamp}
@@ -34,7 +35,61 @@ SESSION_ID_FIELDS: tuple[str, ...] = (
     "Host_log",
     "Session_End_timestamp",
     "Session_settings",
+    "SessionID_status",
+    "session-data-ref",
+    "block-queue-ID",
 )
+
+# --- LucidTops_SessionsDB collection schema: collection name:"session-data" ---
+SESSION_DATA_FIELDS: tuple[str, ...] = (
+    "SessionID",
+    "Host_UserID",
+    "Viewer_UserID",
+    "payload",
+    "Status",
+    "created_at",
+    "aggregate_hash",
+)
+
+# --- LucidTops_SessionsDB collection schema: collection name:"session-data-chunk" ---
+SESSION_DATA_CHUNK_FIELDS: tuple[str, ...] = (
+    "chunk_id",
+    "SessionID",
+    "session-data-ref",
+    "chunk_index",
+    "compressed_payload",
+    "chunk_hash",
+    "created_at",
+)
+
+# --- LucidTops_SessionsDB collection schema: collection name:"block-data-queue" ---
+BLOCK_DATA_QUEUE_FIELDS: tuple[str, ...] = (
+    "block-queue-ID",
+    "chunk_refs",
+    "chunk_count",
+    "status",
+    "created_at",
+    "updated_at",
+)
+
+# --- LucidTops_SessionsDB collection schema: collection name:"block-queue-ID" ---
+BLOCK_QUEUE_ID_FIELDS: tuple[str, ...] = (
+    "block-queue-ID",
+    "block-data-queue-ref",
+    "awaiting_block",
+    "target_BlockID",
+    "created_at",
+)
+
+# Canonical LucidTops_SessionsDB collection names (documentation/Databases.txt).
+SESSIONS_DB_COLLECTION_SESSION_ID = "SessionID"
+SESSIONS_DB_COLLECTION_SESSION_DATA = "session-data"
+SESSIONS_DB_COLLECTION_SESSION_DATA_CHUNK = "session-data-chunk"
+SESSIONS_DB_COLLECTION_BLOCK_DATA_QUEUE = "block-data-queue"
+SESSIONS_DB_COLLECTION_BLOCK_QUEUE_ID = "block-queue-ID"
+
+# Cap: block-data-queue holds less than 100 session-data-chunks.
+BLOCK_DATA_QUEUE_MAX_CHUNKS = 99
 
 # --- LucidTopsUserDB collection schema: collection name: "UserID" ---
 USER_ID_FIELDS: tuple[str, ...] = (
@@ -43,6 +98,8 @@ USER_ID_FIELDS: tuple[str, ...] = (
     "Email",
     "Password",
     "Tier_selected",
+    "session-count",
+    "max-sessions",
     "Payment_API",
     "purchase_date",
     "renwal_date",
@@ -135,16 +192,77 @@ def schema_template(fields: tuple[str, ...]) -> dict[str, None]:
     return {field: None for field in fields}
 
 
+def _collection_spec(
+    name: str,
+    fields: tuple[str, ...],
+    indexes: tuple[tuple[str, dict[str, Any]], ...] = (),
+) -> dict[str, Any]:
+    return {
+        "name": name,
+        "fields": fields,
+        "indexes": indexes,
+    }
+
+
+def _sessions_db_collections() -> list[dict[str, Any]]:
+    """LucidTops_SessionsDB multi-collection contract (Databases.txt)."""
+    session_id_name = resolve_collection_name(
+        "SESSIONS_DB_COLLECTION", SESSIONS_DB_COLLECTION_SESSION_ID
+    )
+    return [
+        _collection_spec(
+            session_id_name,
+            SESSION_ID_FIELDS,
+            (("SessionID", {"unique": True, "sparse": True}),),
+        ),
+        _collection_spec(
+            resolve_collection_name(
+                "SESSIONS_DB_SESSION_DATA_COLLECTION",
+                SESSIONS_DB_COLLECTION_SESSION_DATA,
+            ),
+            SESSION_DATA_FIELDS,
+            (("SessionID", {"unique": True, "sparse": True}),),
+        ),
+        _collection_spec(
+            resolve_collection_name(
+                "SESSIONS_DB_SESSION_DATA_CHUNK_COLLECTION",
+                SESSIONS_DB_COLLECTION_SESSION_DATA_CHUNK,
+            ),
+            SESSION_DATA_CHUNK_FIELDS,
+            (("chunk_id", {"unique": True, "sparse": True}),),
+        ),
+        _collection_spec(
+            resolve_collection_name(
+                "SESSIONS_DB_BLOCK_DATA_QUEUE_COLLECTION",
+                SESSIONS_DB_COLLECTION_BLOCK_DATA_QUEUE,
+            ),
+            BLOCK_DATA_QUEUE_FIELDS,
+            (("block-queue-ID", {"unique": True, "sparse": True}),),
+        ),
+        _collection_spec(
+            resolve_collection_name(
+                "SESSIONS_DB_BLOCK_QUEUE_ID_COLLECTION",
+                SESSIONS_DB_COLLECTION_BLOCK_QUEUE_ID,
+            ),
+            BLOCK_QUEUE_ID_FIELDS,
+            (("block-queue-ID", {"unique": True, "sparse": True}),),
+        ),
+    ]
+
+
 def database_schema_map() -> dict[str, dict[str, Any]]:
     """
-    Map DockerDNS database container -> primary collection contract.
-    Collection names resolve from secrets when overridden.
+    Map DockerDNS database container -> collection contract(s).
+    Single-collection DBs keep collection/fields; SessionsDB uses collections[].
     """
+    sessions_collections = _sessions_db_collections()
+    primary = sessions_collections[0]
     return {
         "LucidTops_SessionsDB": {
-            "collection": resolve_collection_name("SESSIONS_DB_COLLECTION", "SessionID"),
-            "fields": SESSION_ID_FIELDS,
-            "indexes": (("SessionID", {"unique": True, "sparse": True}),),
+            "collection": primary["name"],
+            "fields": primary["fields"],
+            "indexes": primary["indexes"],
+            "collections": sessions_collections,
             "omit_fields_on_replica": (),
         },
         "LucidTopsUserDB": {
@@ -194,41 +312,112 @@ def schema_for_database(db_name: str) -> dict[str, Any]:
     return mapping[db_name]
 
 
-def apply_schema_to_database(db: Any, db_name: str, *, created_at: str) -> dict[str, Any]:
-    """Insert schema template + indexes into a live pymongo Database object."""
-    spec = schema_for_database(db_name)
-    collection_name = str(spec["collection"])
-    fields: tuple[str, ...] = tuple(spec["fields"])
+def collections_for_spec(spec: dict[str, Any]) -> list[dict[str, Any]]:
+    """Normalize single- or multi-collection schema specs to a list."""
+    multi = spec.get("collections")
+    if multi:
+        return list(multi)
+    return [
+        {
+            "name": str(spec["collection"]),
+            "fields": tuple(spec["fields"]),
+            "indexes": tuple(spec.get("indexes") or ()),
+        }
+    ]
+
+
+def apply_collection_schema(
+    db: Any,
+    db_name: str,
+    collection_spec: dict[str, Any],
+    *,
+    created_at: str,
+    update_template_fields: bool = False,
+) -> dict[str, Any]:
+    """Ensure indexes + _schema_template for one collection (idempotent)."""
+    collection_name = str(collection_spec["name"])
+    fields: tuple[str, ...] = tuple(collection_spec["fields"])
     col = db[collection_name]
     col.create_index("_id")
-    for field, options in spec.get("indexes") or ():
+    for field, options in collection_spec.get("indexes") or ():
         col.create_index(field, **options)
-    if not col.find_one({"_schema_template": True}):
+    existing = col.find_one({"_schema_template": True})
+    if not existing:
         col.insert_one(
             {
                 "_schema_template": True,
                 "fields": list(fields),
                 "database": db_name,
+                "collection": collection_name,
                 "created_at": created_at,
             }
         )
+        action = "inserted"
+    elif update_template_fields and list(existing.get("fields") or []) != list(fields):
+        col.update_one(
+            {"_id": existing["_id"]},
+            {
+                "$set": {
+                    "fields": list(fields),
+                    "collection": collection_name,
+                    "updated_at": created_at,
+                }
+            },
+        )
+        action = "updated"
+    else:
+        action = "unchanged"
     return {
         "database": db_name,
         "collection": collection_name,
         "fields": list(fields),
+        "action": action,
+    }
+
+
+def apply_schema_to_database(
+    db: Any,
+    db_name: str,
+    *,
+    created_at: str,
+    update_template_fields: bool = False,
+) -> dict[str, Any]:
+    """Insert schema template + indexes for all collections on a live pymongo Database."""
+    spec = schema_for_database(db_name)
+    applied: list[dict[str, Any]] = []
+    for collection_spec in collections_for_spec(spec):
+        applied.append(
+            apply_collection_schema(
+                db,
+                db_name,
+                collection_spec,
+                created_at=created_at,
+                update_template_fields=update_template_fields,
+            )
+        )
+    primary = applied[0] if applied else {}
+    return {
+        "database": db_name,
+        "collection": primary.get("collection"),
+        "fields": primary.get("fields", []),
+        "collections": applied,
     }
 
 
 def schemas_status() -> dict[str, Any]:
+    contracts: dict[str, Any] = {}
+    for name, spec in database_schema_map().items():
+        cols = collections_for_spec(spec)
+        contracts[name] = {
+            "collection": cols[0]["name"] if cols else spec.get("collection"),
+            "field_count": len(cols[0]["fields"]) if cols else len(spec.get("fields") or ()),
+            "collections": [
+                {"name": c["name"], "field_count": len(c["fields"])} for c in cols
+            ],
+        }
     return {
         "databases": list(ALL_NAMED_DB_CONTAINERS),
-        "contracts": {
-            name: {
-                "collection": spec["collection"],
-                "field_count": len(spec["fields"]),
-            }
-            for name, spec in database_schema_map().items()
-        },
+        "contracts": contracts,
         "secret_prefixes": {
             name: secret_key_prefix(name) for name in ALL_NAMED_DB_CONTAINERS
         },
