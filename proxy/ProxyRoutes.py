@@ -1,20 +1,29 @@
 """ this script builds the FastAPI routing system for the Proxy container.
 includes:
-- ProxyGate for public Frontend → backend / rdp / node forwards
-- internal DockerDNS routes limited to ProxyGate-selected containers
-- clearnet payment-result path via Clearnet-package (SOCKS5 from secrets)
+- one Frontend → MasterServer (backend) forward through ProxyGate
+- nginx reverse proxy remains the container framework; this app is the uvicorn surface it forwards into
 - bind/title/prefix/timeouts from proxy.secrets created by hardware pull at operation
 
 purpose:
-1. gateway for public access to internal containers via ProxyGate
-2. gateway for internal containers via DockerDNS under gate policy
-3. maintain Proxy protocols for internal and public use
-4. increase security and limit external access to internal containers
+1. transport Frontend requests to MasterServer (the backend container)
+2. support MasterServer hosting the frontend by forwarding those requests
+3. carry MasterServer request paths, including a request that starts the RDP container
+4. refuse routes to none-linking containers
 
-concerns:
-1. security of the internal containers and public use
-2. security of the DockerDNS surface
-3. connection compatibility across containers (DockerDNS + FastAPI)
+selected containers:
+- frontend (transport to backend only)
+- MasterServer (backend)
+
+none-linking (no route from this file):
+- sessions
+- operations
+- blockchain
+- node
+- RDP
+- PaySystems
+
+only the backend links directly to the proxy.
+login and registration checks stay on MasterServer.
 
 restrictions:
 - No hardcoded values, all values are created at time of operation.
@@ -33,11 +42,12 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request, Response
-from fastapi.responses import JSONResponse
 
 _PROXY_DIR = Path(__file__).resolve().parent
 if str(_PROXY_DIR) not in sys.path:
     sys.path.insert(0, str(_PROXY_DIR))
+
+_MASTER_SERVER_TARGETS = frozenset({"backend", "masterserver"})
 
 
 def _load_local(module_name: str, filename: str | None = None) -> Any:
@@ -58,7 +68,6 @@ def _load_local(module_name: str, filename: str | None = None) -> Any:
 
 _buildsecrets = _load_local("buildsecrets")
 _ProxyGate = _load_local("ProxyGate")
-get_proxy_secret = _buildsecrets.get_proxy_secret
 load_proxy_secrets = _buildsecrets.load_proxy_secrets
 require_proxy_secret = _buildsecrets.require_proxy_secret
 get_none_linking_containers = _ProxyGate.get_none_linking_containers
@@ -70,8 +79,36 @@ SELECTED_CONTAINERS = _ProxyGate.SELECTED_CONTAINERS
 PROXY_DIR = _PROXY_DIR
 
 
-def _load_clearnet_package() -> Any:
-    return _load_local("clearnet_package", "Clearnet-package.py")
+def _normalize_name(name: str) -> str:
+    return name.strip().lower()
+
+
+def _assert_frontend_to_masterserver(*, source: str, target: str) -> None:
+    """Allow only Frontend → MasterServer. None-linking targets stay closed."""
+    src = _normalize_name(source)
+    dst = _normalize_name(target)
+    if src == "frontend" and dst in _MASTER_SERVER_TARGETS:
+        return
+    none_linking = {_normalize_name(item) for item in get_none_linking_containers()}
+    if dst in none_linking:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "allowed": False,
+                "reason": "none_linking_or_blocked",
+                "source": src,
+                "target": dst,
+            },
+        )
+    raise HTTPException(
+        status_code=403,
+        detail={
+            "allowed": False,
+            "reason": "route_denied",
+            "source": src,
+            "target": dst,
+        },
+    )
 
 
 def create_proxy_app() -> FastAPI:
@@ -104,8 +141,13 @@ def create_proxy_app() -> FastAPI:
 
     @app.get(f"{api_prefix}/dns")
     async def proxy_dns_map() -> dict[str, Any]:
+        selected = {
+            name: url
+            for name, url in gate.dns.selected_map().items()
+            if _normalize_name(name) in _MASTER_SERVER_TARGETS
+        }
         return {
-            "selected": gate.dns.selected_map(),
+            "selected": selected,
             "none_linking": sorted(get_none_linking_containers()),
         }
 
@@ -118,6 +160,7 @@ def create_proxy_app() -> FastAPI:
         x_lucid_proxy_token: str | None,
         x_lucid_hmac_sha256: str | None,
     ) -> Response:
+        _assert_frontend_to_masterserver(source=source, target=target)
         body = await request.body()
         decision = gate.authorize_request(
             source=source,
@@ -133,16 +176,16 @@ def create_proxy_app() -> FastAPI:
         if not upstream_url:
             raise HTTPException(status_code=502, detail="upstream_unresolved")
 
+        dropped = {
+            "host",
+            "content-length",
+            "x-lucid-proxy-token",
+            "x-lucid-hmac-sha256",
+        }
         headers = {
             key: value
             for key, value in request.headers.items()
-            if key.lower()
-            not in {
-                "host",
-                "content-length",
-                "x-lucid-proxy-token",
-                "x-lucid-hmac-sha256",
-            }
+            if key.lower() not in dropped
         }
         headers.update(gate.gate_headers(source=source, target=target))
 
@@ -182,7 +225,7 @@ def create_proxy_app() -> FastAPI:
         x_lucid_proxy_token: str | None = Header(default=None),
         x_lucid_hmac_sha256: str | None = Header(default=None),
     ) -> Response:
-        """Public Frontend → MasterServer via ProxyGate (never direct)."""
+        """Frontend → MasterServer. Page hosting and RDP start are paths on this forward."""
         return await _forward(
             request=request,
             source="frontend",
@@ -192,111 +235,13 @@ def create_proxy_app() -> FastAPI:
             x_lucid_hmac_sha256=x_lucid_hmac_sha256,
         )
 
-    @app.api_route(
-        f"{api_prefix}/frontend/rdp/{{path:path}}",
-        methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
-    )
-    async def frontend_to_rdp(
-        path: str,
-        request: Request,
-        x_lucid_proxy_token: str | None = Header(default=None),
-        x_lucid_hmac_sha256: str | None = Header(default=None),
-    ) -> Response:
-        return await _forward(
-            request=request,
-            source="frontend",
-            target="rdp",
-            upstream_path=path,
-            x_lucid_proxy_token=x_lucid_proxy_token,
-            x_lucid_hmac_sha256=x_lucid_hmac_sha256,
-        )
-
-    @app.api_route(
-        f"{api_prefix}/frontend/node/{{path:path}}",
-        methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
-    )
-    async def frontend_to_node(
-        path: str,
-        request: Request,
-        x_lucid_proxy_token: str | None = Header(default=None),
-        x_lucid_hmac_sha256: str | None = Header(default=None),
-    ) -> Response:
-        return await _forward(
-            request=request,
-            source="frontend",
-            target="node",
-            upstream_path=path,
-            x_lucid_proxy_token=x_lucid_proxy_token,
-            x_lucid_hmac_sha256=x_lucid_hmac_sha256,
-        )
-
-    @app.api_route(
-        f"{api_prefix}/internal/{{target}}/{{path:path}}",
-        methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
-    )
-    async def internal_dockerdns(
-        target: str,
-        path: str,
-        request: Request,
-        x_lucid_proxy_token: str | None = Header(default=None),
-        x_lucid_hmac_sha256: str | None = Header(default=None),
-        x_lucid_proxy_source: str | None = Header(default=None),
-    ) -> Response:
-        """DockerDNS internal routing limited to ProxyGate-selected containers."""
-        source = x_lucid_proxy_source or require_proxy_secret(
-            "PROXY_DEFAULT_INTERNAL_SOURCE"
-        )
-        normalized = target.strip().lower()
-        none_linking = get_none_linking_containers()
-        selected = get_selected_containers()
-        if normalized in none_linking:
-            raise HTTPException(
-                status_code=403,
-                detail={
-                    "allowed": False,
-                    "reason": "none_linking_or_blocked",
-                    "target": normalized,
-                },
-            )
-        if normalized not in selected and normalized != "masterserver":
-            raise HTTPException(
-                status_code=404,
-                detail={"allowed": False, "reason": "unknown_target", "target": normalized},
-            )
-        return await _forward(
-            request=request,
-            source=source,
-            target=normalized,
-            upstream_path=path,
-            x_lucid_proxy_token=x_lucid_proxy_token,
-            x_lucid_hmac_sha256=x_lucid_hmac_sha256,
-        )
-
-    @app.post(f"{api_prefix}/clearnet/payment-result")
-    async def clearnet_payment_result(
-        request: Request,
-        x_lucid_hmac_sha256: str | None = Header(default=None),
-    ) -> JSONResponse:
-        """
-        Accept payment payloads from PaySystems; egress via Clearnet-package.
-        Only valid/invalid results are returned toward MasterServer.
-        """
-        clearnet = _load_clearnet_package()
-        payload = await request.json()
-        if not isinstance(payload, dict):
-            raise HTTPException(status_code=400, detail="payment payload must be an object")
-        result = clearnet.request_clearnet_payment(
-            payment_payload=payload,
-            signature=x_lucid_hmac_sha256,
-        )
-        return JSONResponse(result)
-
     @app.get(f"{api_prefix}/gate/authorize")
     async def authorize_probe(
         source: str,
         target: str,
         x_lucid_proxy_token: str | None = Header(default=None),
     ) -> dict[str, Any]:
+        _assert_frontend_to_masterserver(source=source, target=target)
         return gate.authorize_request(
             source=source,
             target=target,
