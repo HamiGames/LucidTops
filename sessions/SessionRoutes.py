@@ -7,6 +7,8 @@ SessionRoutes:
 - /session-end: end a peer to peer remote desktop sharing session
 - /session-record: record a peer to peer remote desktop sharing session
 - /session-validate: Rdp SessionID + UserID + TokenID validation
+- /session-agree: peer accept popup (multi-connection stored for the host)
+- /session-reconnect: new SessionID seeded by the last SessionID
 - /session-transfer: mark transfer metadata for operations
 
 RULES:
@@ -31,6 +33,7 @@ from .SessionCore import (
     disconnect_session,
     end_session,
     find_session,
+    reconnect_session,
     record_session_event,
     transfer_session_metadata,
     validate_session_for_rdp,
@@ -60,6 +63,8 @@ SESSION_ROUTES: tuple[str, ...] = (
     "/session-record",
     "/session-transfer",
     "/session-validate",
+    "/session-agree",
+    "/session-reconnect",
 )
 
 
@@ -112,6 +117,9 @@ if BaseModel is not object and Field is not None:
     class SessionRecordPayload(SessionScopedPayload):
         action: str = Field(...)
 
+    class SessionAgreePayload(SessionScopedPayload):
+        multi_connection: bool = False
+
     class SessionTransferPayload(BaseModel):
         session_id: str = Field(
             ...,
@@ -139,6 +147,7 @@ else:
     SessionConnectPayload = Any  # type: ignore[misc, assignment]
     SessionScopedPayload = Any  # type: ignore[misc, assignment]
     SessionRecordPayload = Any  # type: ignore[misc, assignment]
+    SessionAgreePayload = Any  # type: ignore[misc, assignment]
     SessionTransferPayload = Any  # type: ignore[misc, assignment]
     SessionValidatePayload = Any  # type: ignore[misc, assignment]
 
@@ -201,20 +210,13 @@ def create_session_router(*, prefix: str = "") -> Any:
         if client is None:
             raise HTTPException(status_code=503, detail="Master server database unavailable")
         try:
-            result = connect_session(
+            return connect_session(
                 session_id=payload.session_id,
                 session_key=payload.session_key,
                 user_id=payload.user_id,
                 id_token=payload.id_token,
                 client=client,
             )
-            agree_session(
-                session_id=payload.session_id,
-                user_id=payload.user_id,
-                id_token=payload.id_token,
-                client=client,
-            )
-            return result
         except Exception as exc:
             _raise_http(exc)
             raise
@@ -293,6 +295,43 @@ def create_session_router(*, prefix: str = "") -> Any:
             return transfer_session_metadata(
                 session_id=payload.session_id,
                 target=payload.target,
+                client=client,
+            )
+        except Exception as exc:
+            _raise_http(exc)
+            raise
+        finally:
+            client.close()
+
+    @router.post("/session-agree")
+    def session_agree(payload: SessionAgreePayload) -> dict[str, Any]:
+        client = get_mongo_client()
+        if client is None:
+            raise HTTPException(status_code=503, detail="Master server database unavailable")
+        try:
+            return agree_session(
+                session_id=payload.session_id,
+                user_id=payload.user_id,
+                id_token=payload.id_token,
+                multi_connection=payload.multi_connection,
+                client=client,
+            )
+        except Exception as exc:
+            _raise_http(exc)
+            raise
+        finally:
+            client.close()
+
+    @router.post("/session-reconnect")
+    def session_reconnect(payload: SessionScopedPayload) -> dict[str, Any]:
+        client = get_mongo_client()
+        if client is None:
+            raise HTTPException(status_code=503, detail="Master server database unavailable")
+        try:
+            return reconnect_session(
+                session_id=payload.session_id,
+                user_id=payload.user_id,
+                id_token=payload.id_token,
                 client=client,
             )
         except Exception as exc:

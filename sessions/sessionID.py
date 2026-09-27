@@ -524,10 +524,16 @@ def write_sessions_secrets_template(
     return write_sessions_secrets(secrets_dir, force=force)
 
 
-def generate_session_id(*, host_user_id: str, nonce: str | None = None) -> str:
+def generate_session_id(
+    *,
+    host_user_id: str,
+    nonce: str | None = None,
+    seed_session_id: str | None = None,
+) -> str:
     """
     Create a unique SessionID as int(10) digit string (fixes.txt §12.7).
-    Digits are derived from SHA-512 of operation-time material (UserID + nonce + time + hardware).
+    Digits are derived from SHA-512 of operation-time material.
+    Reconnect passes the previous SessionID as the seed.
     """
     assert_runtime_compatibility()
     if not host_user_id or not str(host_user_id).strip():
@@ -537,11 +543,20 @@ def generate_session_id(*, host_user_id: str, nonce: str | None = None) -> str:
     alphabet = resolve_session_id_alphabet()
     hardware_ip = resolve_session_secret("HARDWARE_PRIMARY_IP")
     hardware_mac = resolve_session_secret("HARDWARE_PRIMARY_MAC")
-    operation_nonce = nonce if nonce is not None else secrets.token_hex(16)
-    seed = (
-        f"{host_user_id.strip()}:{operation_nonce}:{utc_now()}:"
-        f"{hardware_ip}:{hardware_mac}:{secrets.token_hex(8)}"
-    )
+    if seed_session_id is not None:
+        cleaned_seed = str(seed_session_id).strip()
+        if not validate_session_id(cleaned_seed):
+            raise ValueError("seed SessionID must be a valid int(10)")
+        seed = (
+            f"{cleaned_seed}:{host_user_id.strip()}:{utc_now()}:"
+            f"{hardware_ip}:{hardware_mac}"
+        )
+    else:
+        operation_nonce = nonce if nonce is not None else secrets.token_hex(16)
+        seed = (
+            f"{host_user_id.strip()}:{operation_nonce}:{utc_now()}:"
+            f"{hardware_ip}:{hardware_mac}:{secrets.token_hex(8)}"
+        )
     digest = hashlib.sha512(seed.encode("utf-8")).hexdigest()
     value = int(digest, 16)
     chars: list[str] = []

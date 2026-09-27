@@ -245,8 +245,10 @@ def _empty_session_record(
                 "timestamp": now,
             }
         ],
-        "participant_agreements": {host_user_id: True},
+        "participant_agreements": {host_user_id: False},
         "all_agreed": False,
+        "multi_connection": False,
+        "seed_session_id": None,
         "compressed": False,
         "operations_handoff": None,
         "aggregate_hash": None,
@@ -336,6 +338,59 @@ def create_session(*, host_user_id: str, id_token: str, client: Any) -> dict[str
 
 
 @with_mongo
+def reconnect_session(
+    *, session_id: str, user_id: str, id_token: str, client: Any
+) -> dict[str, Any]:
+    """Create a new SessionID seeded by the previous SessionID when multi-connection was agreed."""
+    previous = session_records_collection(client).find_one({"sessionID": session_id.strip()})
+    if not previous:
+        raise LookupError("Session not found")
+    if not previous.get("multi_connection"):
+        raise PermissionError("multi-connection agreement was not selected")
+    if user_id != previous.get("hostUserID"):
+        raise PermissionError("Only the host UserID may reconnect")
+    if not verify_user_id_token(user_id=user_id, id_token=id_token, client=client):
+        raise PermissionError("Host UserID authentication failed")
+
+    _assert_session_create_auto_pass(user_id=user_id, client=client)
+    new_id = generate_session_id(host_user_id=user_id, seed_session_id=session_id.strip())
+    while session_records_collection(client).find_one({"sessionID": new_id}):
+        new_id = generate_session_id(host_user_id=user_id, seed_session_id=session_id.strip())
+
+    session_key = generate_session_key()
+    record = _empty_session_record(
+        session_id=new_id,
+        session_key=session_key,
+        host_user_id=user_id,
+    )
+    record["seed_session_id"] = session_id.strip()
+    record["multi_connection"] = True
+    session_records_collection(client).insert_one(record)
+    log_session_id(
+        session_id=new_id,
+        host_user_id=user_id,
+        user_ids=record["userIDs"],
+        status=record["sessionStatus"],
+        client=client,
+    )
+    _increment_user_session_count(user_id=user_id, client=client)
+    get_master_db(client).users.update_one(
+        {"UserID": user_id},
+        {"$set": {"last_session_ID": new_id, "updated_at": utc_now()}},
+    )
+    return {
+        "sessionID": new_id,
+        "SessionID": int(new_id),
+        "sessionKey": session_key,
+        "hostUserID": user_id,
+        "seed_session_id": session_id.strip(),
+        "multi_connection": True,
+        "sessionStatus": record["sessionStatus"],
+        "SessionID_status": record["SessionID_status"],
+    }
+
+
+@with_mongo
 def find_session(*, session_id: str, client: Any) -> dict[str, Any]:
     if not validate_session_id(session_id):
         raise ValueError("A valid sessionID is required for peer search")
@@ -385,6 +440,11 @@ def validate_session_for_rdp(
         "user_id": user_id,
         "UserID": user_id,
         "is_participant": is_participant,
+        "hostUserID": record.get("hostUserID"),
+        "viewerUserID": record.get("viewerUserID"),
+        "all_agreed": bool(record.get("all_agreed", False)),
+        "can_commence": can_commence_session(record),
+        "multi_connection": bool(record.get("multi_connection", False)),
         "sessionStatus": record.get("sessionStatus"),
         "SessionID_status": record.get("SessionID_status", record.get("sessionStatus")),
         "validated_at": utc_now(),
@@ -471,7 +531,14 @@ def connect_session(
 
 
 @with_mongo
-def agree_session(*, session_id: str, user_id: str, id_token: str, client: Any) -> dict[str, Any]:
+def agree_session(
+    *,
+    session_id: str,
+    user_id: str,
+    id_token: str,
+    client: Any,
+    multi_connection: bool | None = None,
+) -> dict[str, Any]:
     record = session_records_collection(client).find_one({"sessionID": session_id.strip()})
     if not record:
         raise LookupError("Session not found")
@@ -488,18 +555,19 @@ def agree_session(*, session_id: str, user_id: str, id_token: str, client: Any) 
         if all_agreed and len(record.get("userIDs") or []) >= 2
         else record.get("sessionStatus", "pending")
     )
+    updates: dict[str, Any] = {
+        "participant_agreements": agreements,
+        "all_agreed": all_agreed,
+        "sessionStatus": status_value,
+        "SessionID_status": status_value,
+        "updated_at": utc_now(),
+    }
+    if user_id == record.get("hostUserID") and multi_connection is not None:
+        updates["multi_connection"] = bool(multi_connection)
 
     session_records_collection(client).update_one(
         {"sessionID": session_id.strip()},
-        {
-            "$set": {
-                "participant_agreements": agreements,
-                "all_agreed": all_agreed,
-                "sessionStatus": status_value,
-                "SessionID_status": status_value,
-                "updated_at": utc_now(),
-            }
-        },
+        {"$set": updates},
     )
     touch_session_id_log(session_id=session_id, status=status_value, client=client)
     updated = session_records_collection(client).find_one({"sessionID": session_id.strip()}) or record
@@ -509,6 +577,7 @@ def agree_session(*, session_id: str, user_id: str, id_token: str, client: Any) 
         "sessionID": session_id.strip(),
         "userID": user_id,
         "all_agreed": all_agreed,
+        "multi_connection": bool(updated.get("multi_connection", False)),
         "can_commence": can_commence_session(updated),
         "sessionStatus": status_value,
         "SessionID_status": status_value,
