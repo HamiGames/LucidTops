@@ -94,6 +94,7 @@ def share_file(
     control_on: bool,
     allowed_paths: list[str] | None = None,
 ) -> dict[str, Any]:
+    _load_local("DockerDns").require_tor_peer()
     if not control_on:
         raise RuntimeError("host control transfer is off")
     if not str(session_id).strip():

@@ -106,6 +106,7 @@ def apply_mouse_event(
     control_on: bool,
     caller_is_host: bool,
 ) -> dict[str, Any]:
+    _load_local("DockerDns").require_tor_peer()
     if not control_on:
         raise RuntimeError("host control mouse is off")
     if not str(session_id).strip():

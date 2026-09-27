@@ -149,12 +149,35 @@ def _gate_session_action(*, action: str, payload: RdpAuthPayload) -> dict[str, A
         _gov.validate_rdp_action(
             action=action, user_id=payload.UserID, id_token=payload.IDToken
         )
-        validation = _RdpMain.validate_session_id(
-            session_id=sid, user_id=payload.UserID, id_token=payload.IDToken
+        validation = _RdpMain.assert_operational_conditions(
+            user_id=payload.UserID,
+            id_token=payload.IDToken,
+            session_id=sid,
+            require_acceptance=True,
+            require_viewer_logger=True,
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     return validation
+
+
+def _gate_session_lookup(*, action: str, payload: RdpAuthPayload) -> dict[str, Any]:
+    """Login, tier, and an existing SessionID. Acceptance and the viewer logger are not required yet."""
+    sid = _require_session(payload)
+    try:
+        _dns.assert_dns_configured()
+        _gov.validate_rdp_action(
+            action=action, user_id=payload.UserID, id_token=payload.IDToken
+        )
+        return _RdpMain.assert_operational_conditions(
+            user_id=payload.UserID,
+            id_token=payload.IDToken,
+            session_id=sid,
+            require_acceptance=False,
+            require_viewer_logger=False,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
 
 
 def _host_controls(validation: dict[str, Any], payload: RdpAuthPayload, key: str) -> dict[str, Any]:
@@ -336,19 +359,24 @@ def create_rdp_app() -> FastAPI:
         x_lucid_api_key: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_api_key(x_lucid_api_key)
+        sid = _require_session(payload)
         try:
             _gov.validate_rdp_action(
                 action="user_control", user_id=payload.UserID, id_token=payload.IDToken
             )
+            lookup = _gate_session_lookup(action="user_control", payload=payload)
+            if not _caller_is_host(lookup, payload):
+                _gov.breach_settings_override(
+                    user_id=payload.UserID, id_token=payload.IDToken
+                )
+            return _UserControl.enforce_user_controls(
+                user_id=payload.UserID,
+                id_token=payload.IDToken,
+                session_id=sid,
+                settings=getattr(payload, "Session_settings", None),
+            )
         except RuntimeError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
-        sid = _require_session(payload)
-        return _UserControl.enforce_user_controls(
-            user_id=payload.UserID,
-            id_token=payload.IDToken,
-            session_id=sid,
-            settings=getattr(payload, "Session_settings", None),
-        )
 
     @app.post(f"{api_prefix}/audio/start")
     def audio_start(
@@ -462,21 +490,34 @@ def create_rdp_app() -> FastAPI:
         x_lucid_api_key: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_api_key(x_lucid_api_key)
-        validation = _gate_session_action(action="session_attach", payload=payload)
-        if payload.Session_settings and _caller_is_host(validation, payload):
+        lookup = _gate_session_lookup(action="session_attach", payload=payload)
+        if payload.Session_settings:
+            if not _caller_is_host(lookup, payload):
+                try:
+                    _gov.breach_settings_override(
+                        user_id=payload.UserID, id_token=payload.IDToken
+                    )
+                except RuntimeError as exc:
+                    raise HTTPException(status_code=403, detail=str(exc)) from exc
             try:
-                _dns.apply_host_controls(
-                    session_id=str(payload.session_id),
+                _UserControl.enforce_user_controls(
                     user_id=payload.UserID,
                     id_token=payload.IDToken,
+                    session_id=str(payload.session_id),
                     settings=payload.Session_settings,
                 )
             except RuntimeError as exc:
                 raise HTTPException(status_code=403, detail=str(exc)) from exc
         caller = payload.UserID
-        viewer = str(validation.get("viewerUserID") or "")
+        viewer = str(lookup.get("viewerUserID") or "")
         try:
             if caller == viewer:
+                _dns.start_role_logger(
+                    session_id=str(payload.session_id),
+                    user_id=payload.UserID,
+                    role="viewer",
+                )
+                validation = _gate_session_action(action="session_attach", payload=payload)
                 controls = _dns.load_host_controls(
                     session_id=str(payload.session_id),
                     user_id=payload.UserID,
@@ -488,7 +529,21 @@ def create_rdp_app() -> FastAPI:
                     controls=_UserControl.controls_from_operations(controls),
                 )
             else:
-                result = _ViewerWindow.host_desktop_source(validation=validation)
+                _dns.start_role_logger(
+                    session_id=str(payload.session_id),
+                    user_id=payload.UserID,
+                    role="host",
+                )
+                if not payload.Session_settings and not lookup.get("Session_settings"):
+                    file_settings = _UserControl.settings_from_file()
+                    if file_settings:
+                        _UserControl.enforce_user_controls(
+                            user_id=payload.UserID,
+                            id_token=payload.IDToken,
+                            session_id=str(payload.session_id),
+                            settings=file_settings,
+                        )
+                result = _ViewerWindow.host_desktop_source(validation=lookup)
         except RuntimeError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         result["activity"] = _record(payload, "session_attach")
@@ -501,13 +556,28 @@ def create_rdp_app() -> FastAPI:
     ) -> dict[str, Any]:
         _require_api_key(x_lucid_api_key)
         try:
-            _dns.assert_dns_configured()
-            _gov.validate_rdp_action(
-                action="host_create", user_id=payload.UserID, id_token=payload.IDToken
+            created = _gate_session_lookup(action="host_create", payload=payload)
+            if payload.UserID != str(created.get("hostUserID") or ""):
+                raise RuntimeError("Host_UserID is the owner of the SessionID")
+            _dns.start_role_logger(
+                session_id=str(payload.session_id),
+                user_id=payload.UserID,
+                role="host",
             )
-            created = _dns.create_host_session(
-                user_id=payload.UserID, id_token=payload.IDToken
+            created = _dns.attach_existing_session(
+                session_id=str(payload.session_id),
+                user_id=payload.UserID,
+                id_token=payload.IDToken,
             )
+            if not created.get("Session_settings"):
+                file_settings = _UserControl.settings_from_file()
+                if file_settings:
+                    created["settings"] = _UserControl.enforce_user_controls(
+                        user_id=payload.UserID,
+                        id_token=payload.IDToken,
+                        session_id=str(payload.session_id),
+                        settings=file_settings,
+                    )
         except RuntimeError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         created["role"] = "host"
@@ -521,10 +591,7 @@ def create_rdp_app() -> FastAPI:
         _require_api_key(x_lucid_api_key)
         sid = _require_session(payload)
         try:
-            _dns.assert_dns_configured()
-            _gov.validate_rdp_action(
-                action="peer_find", user_id=payload.UserID, id_token=payload.IDToken
-            )
+            _gate_session_lookup(action="peer_find", payload=payload)
             found = _dns.find_peer(
                 session_id=sid, user_id=payload.UserID, id_token=payload.IDToken
             )
@@ -541,15 +608,15 @@ def create_rdp_app() -> FastAPI:
         _require_api_key(x_lucid_api_key)
         sid = _require_session(payload)
         try:
-            _dns.assert_dns_configured()
-            _gov.validate_rdp_action(
-                action="peer_connect", user_id=payload.UserID, id_token=payload.IDToken
-            )
+            _gate_session_lookup(action="peer_connect", payload=payload)
             joined = _dns.connect_peer(
                 session_id=sid,
                 session_key=payload.session_key,
                 user_id=payload.UserID,
                 id_token=payload.IDToken,
+            )
+            joined["logger"] = _dns.start_role_logger(
+                session_id=sid, user_id=payload.UserID, role="viewer"
             )
         except RuntimeError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
@@ -564,16 +631,18 @@ def create_rdp_app() -> FastAPI:
         _require_api_key(x_lucid_api_key)
         sid = _require_session(payload)
         try:
-            _dns.assert_dns_configured()
-            _gov.validate_rdp_action(
-                action="peer_agree", user_id=payload.UserID, id_token=payload.IDToken
-            )
+            lookup = _gate_session_lookup(action="peer_agree", payload=payload)
             agreed = _dns.agree_connection(
                 session_id=sid,
                 user_id=payload.UserID,
                 id_token=payload.IDToken,
                 multi_connection=payload.multi_connection,
             )
+            if payload.UserID == str(lookup.get("hostUserID") or ""):
+                agreed["accepted_by"] = "Host_UserID"
+                agreed["host_logger"] = _dns.start_role_logger(
+                    session_id=sid, user_id=payload.UserID, role="host"
+                )
         except RuntimeError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         agreed["popup"] = "accept_connection"

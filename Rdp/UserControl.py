@@ -18,6 +18,7 @@ requirements:
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -58,10 +59,8 @@ def utc_now() -> str:
 
 
 def controls_from_operations(body: dict[str, Any]) -> dict[str, Any]:
-    controls = body.get("controls")
-    if isinstance(controls, dict):
-        return controls
-    return {}
+    """Session_settings object. Name kept for existing callers."""
+    return _dns.controls_from_body(body)
 
 
 def control_enabled(controls: dict[str, Any], key: str) -> bool:
@@ -80,7 +79,7 @@ def require_control(
     id_token: str,
     key: str,
 ) -> dict[str, Any]:
-    """Host settings.js controls from operations. Viewer cannot change them."""
+    """Host settings.js controls frozen on the SessionID. Viewer cannot change them."""
     session_id = str(validation.get("session_id") or validation.get("sessionID") or "")
     host_user_id = str(validation.get("hostUserID") or "")
     if not session_id or not host_user_id:
@@ -103,11 +102,32 @@ def user_control_config() -> dict[str, Any]:
         "settings_js": Path(require_rdp_secret("RDP_SETTINGS_JS_PATH")).expanduser().as_posix(),
         "user_dns": get_rdp_secret("PROXY_USER_DNS") or require_rdp_secret("RDP_USER_DNS"),
         "sessions_dns": get_rdp_secret("PROXY_SESSIONS_DNS") or require_rdp_secret("RDP_SESSIONS_DNS"),
-        "operations_dns": get_rdp_secret("PROXY_OPERATIONS_DNS")
-        or get_rdp_secret("RDP_OPERATIONS_DNS"),
+        "backend_dns": require_rdp_secret("RDP_BACKEND_DNS"),
         "sessions_port": require_rdp_secret_int("RDP_SESSIONS_PORT"),
         "checked_at": utc_now(),
     }
+
+
+def settings_from_file() -> dict[str, Any]:
+    """Host settings.js written on the user console at container start."""
+    path = Path(require_rdp_secret("RDP_SETTINGS_JS_PATH")).expanduser()
+    if not path.exists():
+        return {}
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _settings_same(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    keys = ("mouse", "keyboard", "audio", "video", "screen", "usb", "transfer", "transfer_paths")
+    for key in keys:
+        if key not in left and key not in right:
+            continue
+        if left.get(key) != right.get(key):
+            return False
+    return True
 
 
 def enforce_user_controls(
@@ -122,29 +142,41 @@ def enforce_user_controls(
     if not str(session_id).strip():
         raise RuntimeError("SessionID missing for user control")
     cfg = user_control_config()
+    validation = _dns.fetch_validation(
+        session_id=session_id, user_id=user_id, id_token=id_token
+    )
+    host_user_id = str(validation.get("hostUserID") or "")
+    if user_id != host_user_id:
+        raise RuntimeError(
+            "attempt to override the Host_UserID settings is a breach of container use"
+        )
+    loaded = _dns.load_host_controls(
+        session_id=session_id,
+        user_id=user_id,
+        id_token=id_token,
+        host_user_id=host_user_id,
+    )
+    existing = controls_from_operations(loaded)
     if settings:
-        applied = _dns.apply_host_controls(
-            session_id=session_id,
-            user_id=user_id,
-            id_token=id_token,
-            settings=settings,
-        )
-    else:
-        validation = _dns.fetch_validation(
-            session_id=session_id, user_id=user_id, id_token=id_token
-        )
-        applied = _dns.load_host_controls(
-            session_id=session_id,
-            user_id=user_id,
-            id_token=id_token,
-            host_user_id=str(validation.get("hostUserID") or user_id),
-        )
+        if existing and not _settings_same(existing, settings):
+            raise RuntimeError(
+                "attempt to override the Host_UserID settings is a breach of container use"
+            )
+        if not existing:
+            applied = _dns.apply_host_controls(
+                session_id=session_id,
+                user_id=user_id,
+                id_token=id_token,
+                settings=settings,
+            )
+            existing = controls_from_operations(applied) or settings
     return {
         "status": "enforced",
         "user_id": user_id,
         "session_id": str(session_id).strip(),
         "token_id_present": bool(id_token.strip()),
-        "settings_applied": controls_from_operations(applied),
+        "settings_applied": existing,
+        "frozen": bool(existing),
         "config": cfg,
         "enforced_at": utc_now(),
     }

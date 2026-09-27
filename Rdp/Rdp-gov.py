@@ -86,3 +86,18 @@ def validate_rdp_action(*, action: str, user_id: str, id_token: str) -> dict[str
         "policy": policy,
         "validated_at": utc_now(),
     }
+
+
+def breach_settings_override(*, user_id: str, id_token: str) -> None:
+    """Any attempt to override Host_UserID settings is a breach of container use."""
+    try:
+        validate_rdp_action(
+            action="settings_override", user_id=user_id, id_token=id_token
+        )
+    except RuntimeError:
+        raise RuntimeError(
+            "attempt to override the Host_UserID settings is a breach of container use"
+        ) from None
+    raise RuntimeError(
+        "attempt to override the Host_UserID settings is a breach of container use"
+    )

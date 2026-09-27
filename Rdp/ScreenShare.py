@@ -104,6 +104,7 @@ def screen_share_config() -> dict[str, Any]:
 def start_screen_share(
     *, session_id: str, user_id: str, id_token: str, control_on: bool
 ) -> dict[str, Any]:
+    _load_local("DockerDns").require_tor_peer()
     if not control_on:
         raise RuntimeError("host control screen is off")
     if not str(session_id).strip():
@@ -128,6 +129,7 @@ def start_screen_share(
 
 def capture_frame(*, session_id: str) -> dict[str, Any]:
     """Grab one host-desktop frame with mss for the viewer window."""
+    _load_local("DockerDns").require_tor_peer()
     sid = str(session_id).strip()
     if sid not in _RUNTIME["sessions"]:
         raise RuntimeError("screen share is not started for this SessionID")

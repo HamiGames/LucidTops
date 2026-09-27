@@ -283,15 +283,7 @@ def _pull_secrets_dir(lucid_root: Path) -> Path:
     env_secrets = _env("SECRETS_DIR")
     if env_secrets:
         return Path(env_secrets).expanduser().resolve()
-    candidates = [
-        lucid_root / "Server" / "Secrets",
-        lucid_root / "secrets",
-        lucid_root / "Secrets",
-    ]
-    for candidate in candidates:
-        if candidate.is_dir():
-            return candidate.resolve()
-    chosen = candidates[0]
+    chosen = lucid_root / "Rdp" / "secrets"
     chosen.mkdir(parents=True, exist_ok=True)
     return chosen.resolve()
 
@@ -550,6 +542,14 @@ def pull_information() -> dict[str, Any]:
         "lucid-rdp",
         "lucidtops-rdp",
     )
+    backend_meta = _match_container(
+        docker_state.get("containers", {}),
+        "backend",
+        "lucid-backend",
+        "masterserver",
+        "master-server",
+        "lucid-master",
+    )
     proxy_meta = _match_container(
         docker_state.get("containers", {}),
         "proxy",
@@ -584,6 +584,7 @@ def pull_information() -> dict[str, Any]:
         "sessions_container": sessions_meta or {},
         "operations_container": operations_meta or {},
         "rdp_container": rdp_meta or {},
+        "backend_container": backend_meta or {},
         "proxy_container": proxy_meta or {},
         "lucid_tops_root": lucid_root.as_posix(),
         "secrets_dir": secrets_dir.as_posix(),
@@ -609,7 +610,9 @@ _INHERIT_KEY_PREFIXES: tuple[str, ...] = (
     "PROXY_SESSIONS_DNS",
     "PROXY_USER_DNS",
     "PROXY_OPERATIONS_DNS",
+    "PROXY_BACKEND_DNS",
     "PROXY_RDP_DNS",
+    "API_BASE_PATH",
     "SESSIONS_",
     "SESSION_",
     "OPERATIONS_",
@@ -737,27 +740,59 @@ def _resolve_operations_dns(info: dict[str, Any], prior: dict[str, str]) -> str:
     )
     if picked:
         return picked
-    name = _container_dns(info.get("operations_container") or {})
-    if name:
-        return name
-    raise RuntimeError(
-        "RDP_OPERATIONS_DNS missing — operations DockerDNS name must be pulled "
-        "at time of operation"
-    )
+    return _container_dns(info.get("operations_container") or {})
 
 
 def _resolve_operations_port(prior: dict[str, str]) -> str:
-    picked = _pick_prior(
+    return _pick_prior(
         prior,
         "RDP_OPERATIONS_PORT",
         "OPERATIONS_BIND_PORT",
         "OPERATIONS_PORT",
         "PROXY_OPERATIONS_PORT",
     )
+
+
+def _resolve_backend_dns(info: dict[str, Any], prior: dict[str, str]) -> str:
+    for key in (
+        "RDP_BACKEND_DNS",
+        "PROXY_BACKEND_DNS",
+        "BACKEND_DNS",
+        "MASTER_SERVER_DNS",
+    ):
+        value = prior.get(key, "").strip() or _env(key)
+        if value:
+            return value
+    backend = info.get("backend_container") or {}
+    if backend.get("ip"):
+        return str(backend["ip"]).strip()
+    name = str(backend.get("name") or "").strip()
+    if name:
+        return name
+    primary_ip = str(info.get("primary_ip") or "").strip()
+    if primary_ip:
+        return primary_ip
+    raise RuntimeError(
+        "RDP_BACKEND_DNS missing — backend DockerDNS / hardware IP must be "
+        "pulled at time of operation"
+    )
+
+
+def _resolve_backend_port(info: dict[str, Any], prior: dict[str, str]) -> str:
+    picked = _pick_prior(
+        prior,
+        "RDP_BACKEND_PORT",
+        "MASTER_SERVER_PORT",
+        "BACKEND_PORT",
+        "PROXY_BACKEND_PORT",
+    )
     if picked:
         return picked
+    listen = info.get("uvicorn_listen")
+    if listen and len(listen) > 1:
+        return str(listen[1])
     raise RuntimeError(
-        "RDP_OPERATIONS_PORT missing — operations bind port must be pulled at time of operation"
+        "RDP_BACKEND_PORT missing — backend bind port must be pulled at time of operation"
     )
 
 
@@ -847,6 +882,8 @@ def apply_pull_to_rdp_configuration(
     sessions_port = _resolve_sessions_port(existing)
     operations_dns = _resolve_operations_dns(info, existing)
     operations_port = _resolve_operations_port(existing)
+    backend_dns = _resolve_backend_dns(info, existing)
+    backend_port = _resolve_backend_port(info, existing)
     self_dns = _resolve_self_dns(info, existing)
     network_name = _resolve_network_name(info, existing)
 
@@ -854,15 +891,13 @@ def apply_pull_to_rdp_configuration(
     socks_host = (
         existing.get("TOR_SOCKS_HOST", "").strip()
         or _env("TOR_SOCKS_HOST")
-        or (tor_listen[0] if tor_listen and tor_listen[0] else primary_ip)
+        or (tor_listen[0] if tor_listen and tor_listen[0] else "")
     )
     socks_port = (
         existing.get("TOR_SOCKS_PORT", "").strip()
         or _env("TOR_SOCKS_PORT")
         or (str(tor_listen[1]) if tor_listen else "")
     )
-    if not socks_port:
-        socks_port = str(_allocate_ephemeral_port())
 
     log_dir = library_path / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -926,7 +961,9 @@ def apply_pull_to_rdp_configuration(
         gov_permissions = ",".join(dict.fromkeys([*gov_permissions.split(","), *sorted(need - have)]))
         gov_permissions = ",".join(item.strip() for item in gov_permissions.split(",") if item.strip())
     gov_restrictions = (
-        existing.get("RDP_GOV_RESTRICTIONS", "").strip() or _env("RDP_GOV_RESTRICTIONS") or ""
+        existing.get("RDP_GOV_RESTRICTIONS", "").strip()
+        or _env("RDP_GOV_RESTRICTIONS")
+        or "settings_override"
     )
 
     usb_snapshot = json.dumps(info.get("usb_devices") or [], separators=(",", ":"))
@@ -970,6 +1007,16 @@ def apply_pull_to_rdp_configuration(
         or existing.get("PROXY_USER_DNS", "").strip()
         or _env("RDP_USER_DNS")
         or sessions_dns,
+        "RDP_BACKEND_DNS": backend_dns,
+        "RDP_BACKEND_PORT": str(backend_port),
+        "RDP_BACKEND_SCHEME": existing.get("RDP_BACKEND_SCHEME", "").strip()
+        or _env("RDP_BACKEND_SCHEME")
+        or "http",
+        "RDP_BACKEND_API_PREFIX": _pick_prior(existing, "RDP_BACKEND_API_PREFIX", "API_BASE_PATH")
+        or "/api",
+        "RDP_BACKEND_HEALTH_PATH": _pick_prior(existing, "RDP_BACKEND_HEALTH_PATH") or "/health",
+        "RDP_BACKEND_ACCESS_PATH": _pick_prior(existing, "RDP_BACKEND_ACCESS_PATH")
+        or "/rdp-access",
         "RDP_OPERATIONS_DNS": operations_dns,
         "RDP_OPERATIONS_PORT": str(operations_port),
         "RDP_OPERATIONS_SCHEME": existing.get("RDP_OPERATIONS_SCHEME", "").strip()
@@ -1053,6 +1100,8 @@ def apply_pull_to_rdp_configuration(
         or "/session-record",
         "RDP_SESSION_RECONNECT_PATH": _pick_prior(existing, "RDP_SESSION_RECONNECT_PATH")
         or "/session-reconnect",
+        "RDP_SESSION_SETTINGS_PATH": _pick_prior(existing, "RDP_SESSION_SETTINGS_PATH")
+        or "/session-settings",
         "RDP_OPERATIONS_SESSION_CONTROL_PATH": _pick_prior(
             existing, "RDP_OPERATIONS_SESSION_CONTROL_PATH"
         )
@@ -1075,6 +1124,7 @@ def apply_pull_to_rdp_configuration(
         "PROXY_SESSIONS_DNS",
         "PROXY_USER_DNS",
         "PROXY_OPERATIONS_DNS",
+        "PROXY_BACKEND_DNS",
         "PROXY_RDP_DNS",
         "RDP_ONION",
     ):
@@ -1165,6 +1215,11 @@ def build_and_write_rdp_secrets(*, overwrite_keys: bool = False) -> dict[str, An
                 "RDP_OPERATIONS_DNS",
                 "RDP_OPERATIONS_PORT",
                 "RDP_SELF_DNS",
+                "RDP_BACKEND_DNS",
+                "RDP_BACKEND_PORT",
+                "RDP_BACKEND_API_PREFIX",
+                "RDP_BACKEND_ACCESS_PATH",
+                "RDP_SESSION_SETTINGS_PATH",
                 "RDP_DOCKER_NETWORK_NAME",
                 "RDP_SESSIONS_API_PREFIX",
                 "RDP_OPERATIONS_API_PREFIX",
@@ -1214,7 +1269,9 @@ def build_and_write_rdp_secrets(*, overwrite_keys: bool = False) -> dict[str, An
         "hardware_mac": merged.get("HARDWARE_PRIMARY_MAC", ""),
         "rdp_port": merged.get("RDP_PORT", ""),
         "sessions_dns": merged.get("RDP_SESSIONS_DNS", ""),
-        "operations_dns": merged.get("RDP_OPERATIONS_DNS", ""),
+        "backend_dns": merged.get("RDP_BACKEND_DNS", ""),
+        "secrets_dir": secrets_dir.as_posix(),
+        "library_path": str(info.get("library_path") or ""),
         "docker_network": merged.get("RDP_DOCKER_NETWORK_NAME", ""),
         "pulled_at": merged.get("PULLED_AT", ""),
     }

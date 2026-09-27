@@ -74,6 +74,7 @@ def audio_control_config() -> dict[str, Any]:
 def start_audio(
     *, session_id: str, user_id: str, id_token: str, control_on: bool
 ) -> dict[str, Any]:
+    _load_local("DockerDns").require_tor_peer()
     if not control_on:
         raise RuntimeError("host control audio is off")
     if not str(session_id).strip():
@@ -98,6 +99,7 @@ def start_audio(
 
 
 def push_audio(*, session_id: str, chunk_b64: str, user_id: str) -> dict[str, Any]:
+    _load_local("DockerDns").require_tor_peer()
     sid = str(session_id).strip()
     if sid not in _RUNTIME["sessions"]:
         raise RuntimeError("audio path is not open for this SessionID")
@@ -109,6 +111,7 @@ def push_audio(*, session_id: str, chunk_b64: str, user_id: str) -> dict[str, An
 
 
 def pull_audio(*, session_id: str) -> dict[str, Any]:
+    _load_local("DockerDns").require_tor_peer()
     sid = str(session_id).strip()
     if sid not in _RUNTIME["sessions"]:
         raise RuntimeError("audio path is not open for this SessionID")

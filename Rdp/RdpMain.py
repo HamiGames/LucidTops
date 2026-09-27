@@ -103,8 +103,8 @@ def rdp_container_config() -> dict[str, Any]:
         "dockerdns": require_rdp_secret("RDP_DOCKERDNS_COMPATIBLE"),
         "sessions_dns": require_rdp_secret("RDP_SESSIONS_DNS"),
         "sessions_port": require_rdp_secret_int("RDP_SESSIONS_PORT"),
-        "operations_dns": require_rdp_secret("RDP_OPERATIONS_DNS"),
-        "operations_port": require_rdp_secret_int("RDP_OPERATIONS_PORT"),
+        "backend_dns": require_rdp_secret("RDP_BACKEND_DNS"),
+        "backend_port": require_rdp_secret_int("RDP_BACKEND_PORT"),
         "self_dns": require_rdp_secret("RDP_SELF_DNS"),
         "docker_network": require_rdp_secret("RDP_DOCKER_NETWORK_NAME"),
         "hardware_ip": get_rdp_secret("HARDWARE_PRIMARY_IP"),
@@ -117,8 +117,8 @@ def sessions_base_url() -> str:
     return _dns.sessions_base_url()
 
 
-def operations_base_url() -> str:
-    return _dns.operations_base_url()
+def backend_base_url() -> str:
+    return _dns.backend_base_url()
 
 
 def sessions_link_health() -> dict[str, Any]:
@@ -126,9 +126,47 @@ def sessions_link_health() -> dict[str, Any]:
     return _dns.link_health(target="sessions")
 
 
-def operations_link_health() -> dict[str, Any]:
-    """Probe operations container via DockerDNS using secrets from pull."""
-    return _dns.link_health(target="operations")
+def backend_link_health() -> dict[str, Any]:
+    """Probe backend container via DockerDNS using secrets from pull."""
+    return _dns.link_health(target="backend")
+
+
+def assert_operational_conditions(
+    *,
+    user_id: str,
+    id_token: str,
+    session_id: str,
+    require_acceptance: bool = True,
+    require_viewer_logger: bool = True,
+) -> dict[str, Any]:
+    """RDP.txt operational conditions. Peer functions call this before they run."""
+    access = _dns.confirm_user_access(user_id=user_id, id_token=id_token)
+    health = sessions_link_health()
+    if not health.get("reachable"):
+        raise RuntimeError("Sessions container is not operational")
+    sid = str(session_id).strip()
+    if require_acceptance:
+        validation = validate_session_id(
+            session_id=sid, user_id=user_id, id_token=id_token
+        )
+    else:
+        validation = _dns.fetch_validation(
+            session_id=sid, user_id=user_id, id_token=id_token
+        )
+        if not str(validation.get("session_id") or "").strip():
+            raise RuntimeError("Valid SessionID must exist in LucidTops_SessionsDB")
+    if require_viewer_logger:
+        viewer = str(validation.get("viewerUserID") or "").strip()
+        if not _dns.viewer_logger_in_use(session_id=sid, viewer_user_id=viewer):
+            raise RuntimeError("Viewer logger is not in use")
+    validation["access"] = {
+        "login_complete": access.get("login_complete"),
+        "registered": access.get("registered"),
+        "Tier_selected": access.get("Tier_selected"),
+        "limitations": access.get("limitations"),
+    }
+    validation["sessions_link"] = health
+    return validation
 
 
 def validate_session_id(
@@ -162,6 +200,7 @@ def start_rdp_container() -> dict[str, Any]:
     ensure_rdp_secrets(overwrite=False)
     load_rdp_secrets(reload=True)
     _dns.assert_dns_configured()
+    _dns.assert_backend_configured()
     cfg = rdp_container_config()
     _gov.governance_policy()
     _RUNTIME["running"] = True
@@ -174,7 +213,7 @@ def start_rdp_container() -> dict[str, Any]:
         "status": "started",
         "config": cfg,
         "sessions_link": sessions_link_health(),
-        "operations_link": operations_link_health(),
+        "backend_link": backend_link_health(),
         "started_at": _RUNTIME["started_at"],
     }
 
@@ -210,7 +249,7 @@ def status_rdp_container() -> dict[str, Any]:
         "usb": _UsbControl.usb_control_config(),
         "governance": _gov.governance_policy(),
         "sessions_link": sessions_link_health(),
-        "operations_link": operations_link_health(),
+        "backend_link": backend_link_health(),
         "checked_at": utc_now(),
     }
 

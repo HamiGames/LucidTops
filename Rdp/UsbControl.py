@@ -104,6 +104,7 @@ def usb_control_config() -> dict[str, Any]:
 
 
 def list_usb_devices(*, session_id: str, refresh: bool = False, control_on: bool = False) -> dict[str, Any]:
+    _load_local("DockerDns").require_tor_peer()
     if not control_on:
         raise RuntimeError("host control usb is off")
     if not str(session_id).strip():
@@ -126,6 +127,7 @@ def list_usb_devices(*, session_id: str, refresh: bool = False, control_on: bool
 def attach_usb(
     *, session_id: str, device_id: str, user_id: str, control_on: bool
 ) -> dict[str, Any]:
+    _load_local("DockerDns").require_tor_peer()
     if not control_on:
         raise RuntimeError("host control usb is off")
     if not str(session_id).strip():

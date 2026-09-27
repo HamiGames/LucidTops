@@ -1,9 +1,10 @@
-"""DockerDNS client from the Rdp container to sessions and operations.
+"""DockerDNS client from the Rdp container to sessions and the backend.
 
-purpose (documentation/fixes.txt §4.9, §4.11, §5.5, §7.6):
-- sessions and operations are reached by the Docker DNS names those containers publish.
-- Rdp does not write LucidTops_SessionsDB.
-- peer routes require both DNS names to be present.
+purpose (documentation/RDP.txt):
+- sessions is the only DNS-selected container.
+- outbound calls go to the sessions container and the backend container.
+- Rdp does not write LucidTops_SessionsDB or LucidTopsUserDB.
+- peer media uses Tor; this module's HTTP client is coordination only.
 
 RULES:
 - No hardcoded values, all values are created at time of operation.
@@ -49,6 +50,9 @@ require_rdp_secret_int = _rdp_secrets.require_rdp_secret_int
 get_rdp_secret = _rdp_secrets.get_rdp_secret
 load_rdp_secrets = _rdp_secrets.load_rdp_secrets
 
+_VIEWER_LOGGERS: set[str] = set()
+_HOST_LOGGERS: set[str] = set()
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -65,28 +69,27 @@ def _join(prefix: str, path: str) -> str:
 
 
 def assert_dns_configured() -> dict[str, str]:
-    """Refuse peer routing when sessions or operations Docker DNS is empty."""
+    """Refuse peer routing when sessions Docker DNS is empty."""
     load_rdp_secrets()
     sessions_dns = require_rdp_secret("RDP_SESSIONS_DNS").strip()
-    operations_dns = require_rdp_secret("RDP_OPERATIONS_DNS").strip()
     sessions_port = require_rdp_secret("RDP_SESSIONS_PORT").strip()
-    operations_port = require_rdp_secret("RDP_OPERATIONS_PORT").strip()
-    if not sessions_dns or not operations_dns:
-        raise RuntimeError(
-            "Rdp DockerDNS names are empty — RDP_SESSIONS_DNS and "
-            "RDP_OPERATIONS_DNS are required"
-        )
-    if not sessions_port or not operations_port:
-        raise RuntimeError(
-            "Rdp DockerDNS ports are empty — RDP_SESSIONS_PORT and "
-            "RDP_OPERATIONS_PORT are required"
-        )
-    return {
-        "sessions_dns": sessions_dns,
-        "operations_dns": operations_dns,
-        "sessions_port": sessions_port,
-        "operations_port": operations_port,
-    }
+    if not sessions_dns:
+        raise RuntimeError("Rdp DockerDNS name is empty — RDP_SESSIONS_DNS is required")
+    if not sessions_port:
+        raise RuntimeError("Rdp DockerDNS port is empty — RDP_SESSIONS_PORT is required")
+    return {"sessions_dns": sessions_dns, "sessions_port": sessions_port}
+
+
+def assert_backend_configured() -> dict[str, str]:
+    """Refuse backend calls when backend Docker DNS is empty."""
+    load_rdp_secrets()
+    backend_dns = require_rdp_secret("RDP_BACKEND_DNS").strip()
+    backend_port = require_rdp_secret("RDP_BACKEND_PORT").strip()
+    if not backend_dns:
+        raise RuntimeError("Rdp backend DNS is empty — RDP_BACKEND_DNS is required")
+    if not backend_port:
+        raise RuntimeError("Rdp backend port is empty — RDP_BACKEND_PORT is required")
+    return {"backend_dns": backend_dns, "backend_port": backend_port}
 
 
 def sessions_base_url() -> str:
@@ -97,11 +100,11 @@ def sessions_base_url() -> str:
     return f"{scheme}://{host}:{port}"
 
 
-def operations_base_url() -> str:
-    assert_dns_configured()
-    scheme = require_rdp_secret("RDP_OPERATIONS_SCHEME")
-    host = require_rdp_secret("RDP_OPERATIONS_DNS")
-    port = require_rdp_secret_int("RDP_OPERATIONS_PORT")
+def backend_base_url() -> str:
+    assert_backend_configured()
+    scheme = require_rdp_secret("RDP_BACKEND_SCHEME")
+    host = require_rdp_secret("RDP_BACKEND_DNS")
+    port = require_rdp_secret_int("RDP_BACKEND_PORT")
     return f"{scheme}://{host}:{port}"
 
 
@@ -141,13 +144,13 @@ def _request(method: str, url: str, payload: dict[str, Any] | None = None) -> di
 
 
 def link_health(*, target: str) -> dict[str, Any]:
-    """Probe sessions or operations /health over DockerDNS."""
+    """Probe sessions or backend /health over DockerDNS."""
     if target == "sessions":
         base = sessions_base_url()
         health_path = get_rdp_secret("RDP_SESSIONS_HEALTH_PATH") or "/health"
-    elif target == "operations":
-        base = operations_base_url()
-        health_path = get_rdp_secret("RDP_OPERATIONS_HEALTH_PATH") or "/health"
+    elif target == "backend":
+        base = backend_base_url()
+        health_path = get_rdp_secret("RDP_BACKEND_HEALTH_PATH") or "/health"
     else:
         raise RuntimeError(f"unknown DockerDNS target: {target}")
     url = f"{base.rstrip('/')}/{health_path.lstrip('/')}"
@@ -175,8 +178,8 @@ def _sessions_path(secret_key: str) -> str:
     return _join(prefix, require_rdp_secret(secret_key))
 
 
-def _operations_path(secret_key: str) -> str:
-    prefix = require_rdp_secret("RDP_OPERATIONS_API_PREFIX")
+def _backend_path(secret_key: str) -> str:
+    prefix = require_rdp_secret("RDP_BACKEND_API_PREFIX")
     return _join(prefix, require_rdp_secret(secret_key))
 
 
@@ -185,25 +188,48 @@ def post_sessions(path_secret: str, payload: dict[str, Any]) -> dict[str, Any]:
     return _request("POST", url, payload)
 
 
-def _operations_identity(user_id: str, id_token: str) -> dict[str, str]:
-    master_id = require_rdp_secret("RDP_OPERATIONS_MASTER_SERVER_ID")
-    master_token = require_rdp_secret("RDP_OPERATIONS_TOKEN")
-    return {
-        "MasterServerID": master_id,
-        "TokenID": master_token,
-        "UserID": user_id,
-        "UserTokenID": id_token,
-    }
+def post_backend(path_secret: str, payload: dict[str, Any]) -> dict[str, Any]:
+    url = f"{backend_base_url().rstrip('/')}{_backend_path(path_secret)}"
+    return _request("POST", url, payload)
 
 
-def post_operations(
-    path_secret: str, *, user_id: str, id_token: str, extra: dict[str, Any] | None = None
-) -> dict[str, Any]:
-    url = f"{operations_base_url().rstrip('/')}{_operations_path(path_secret)}"
-    body = _operations_identity(user_id, id_token)
-    if extra:
-        body.update(extra)
-    return _request("POST", url, body)
+def require_tor_peer() -> dict[str, Any]:
+    """Peer media refuses to run when the pulled Tor SOCKS endpoint is missing."""
+    load_rdp_secrets()
+    host = get_rdp_secret("TOR_SOCKS_HOST").strip()
+    port_raw = get_rdp_secret("TOR_SOCKS_PORT").strip()
+    onion = get_rdp_secret("RDP_ONION").strip()
+    if not host or not port_raw or not onion:
+        raise RuntimeError(
+            "Tor SOCKS endpoint missing — peer media requires TOR_SOCKS_HOST, "
+            "TOR_SOCKS_PORT, and RDP_ONION from the hardware pull"
+        )
+    if not port_raw.isdigit() or int(port_raw) < 1:
+        raise RuntimeError("TOR_SOCKS_PORT is not a pulled Tor SOCKS port")
+    return {"socks_host": host, "socks_port": int(port_raw), "rdp_onion": onion}
+
+
+def confirm_user_access(*, user_id: str, id_token: str) -> dict[str, Any]:
+    """Backend confirms login, registration, limitations, and Tier_selected."""
+    if not user_id.strip() or not id_token.strip():
+        raise RuntimeError("UserID/TokenID missing")
+    body = post_backend(
+        "RDP_BACKEND_ACCESS_PATH",
+        {"UserID": user_id.strip(), "TokenID": id_token.strip()},
+    )
+    if not _flag(body.get("login_complete")):
+        raise RuntimeError("login must be complete to use the Rdp container")
+    if not _flag(body.get("registered")):
+        raise RuntimeError("MasterServer has not confirmed registration for this UserID")
+    tier_raw = body.get("Tier_selected", body.get("tier", 0))
+    try:
+        tier = int(tier_raw)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("Select_tier count is missing") from exc
+    if tier <= 0:
+        raise RuntimeError("Select_tier count must be more than 0")
+    body["Tier_selected"] = tier
+    return body
 
 
 def fetch_validation(*, session_id: str, user_id: str, id_token: str) -> dict[str, Any]:
@@ -246,25 +272,37 @@ def require_active_session(*, session_id: str, user_id: str, id_token: str) -> d
     if status != "active":
         raise RuntimeError(f"SessionID is not active ({status or 'missing'})")
     if not _flag(validation.get("all_agreed")):
-        raise RuntimeError("SessionID is not agreed by every participant")
+        raise RuntimeError("Viewer_UserID has not been accepted by the Host_UserID")
     if not _flag(validation.get("can_commence")):
         raise RuntimeError("SessionID cannot commence")
     return validation
 
 
+def controls_from_body(body: dict[str, Any]) -> dict[str, Any]:
+    for key in ("controls", "Session_settings", "settings"):
+        value = body.get(key)
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
 def load_host_controls(
     *, session_id: str, user_id: str, id_token: str, host_user_id: str
 ) -> dict[str, Any]:
-    """Read host settings.js controls from operations /session-control."""
-    return post_operations(
-        "RDP_OPERATIONS_SESSION_CONTROL_PATH",
-        user_id=user_id,
-        id_token=id_token,
-        extra={
-            "sessionID": str(session_id).strip(),
-            "hostUserID": host_user_id,
-        },
+    """Read Host_UserID Session_settings frozen on the SessionID."""
+    validation = fetch_validation(
+        session_id=session_id, user_id=user_id, id_token=id_token
     )
+    stored_host = str(validation.get("hostUserID") or "")
+    if host_user_id and stored_host and host_user_id != stored_host:
+        raise RuntimeError("hostUserID does not own this SessionID")
+    controls = controls_from_body(validation)
+    return {
+        "controls": controls,
+        "Session_settings": controls,
+        "hostUserID": stored_host,
+        "session_id": str(session_id).strip(),
+    }
 
 
 def apply_host_controls(
@@ -274,54 +312,112 @@ def apply_host_controls(
     id_token: str,
     settings: dict[str, Any],
 ) -> dict[str, Any]:
-    """Host one-time load of settings.js into operations session-control."""
-    return post_operations(
-        "RDP_OPERATIONS_SESSION_CONTROL_PATH",
-        user_id=user_id,
-        id_token=id_token,
-        extra={
+    """Freeze settings.js onto the SessionID once. Later writes are rejected by sessions."""
+    return post_sessions(
+        "RDP_SESSION_SETTINGS_PATH",
+        {
+            "session_id": str(session_id).strip(),
             "sessionID": str(session_id).strip(),
-            "hostUserID": user_id,
+            "UserID": user_id,
+            "TokenID": id_token,
             "Session_settings": settings,
         },
     )
 
 
+def _role_log_path(*, user_id: str, session_id: str) -> Path:
+    log_dir = Path(require_rdp_secret("RDP_LOG_DIR")).expanduser()
+    safe_user = str(user_id).strip().replace("/", "_").replace("\\", "_")
+    safe_session = str(session_id).strip().replace("/", "_").replace("\\", "_")
+    return log_dir / f"{safe_user}_{safe_session}.log"
+
+
+def start_role_logger(*, session_id: str, user_id: str, role: str) -> dict[str, Any]:
+    """Open Host_log or Viewer_log and mark that logger in use."""
+    sid = str(session_id).strip()
+    uid = str(user_id).strip()
+    if role not in {"host", "viewer"}:
+        raise RuntimeError("logger role must be host or viewer")
+    if not sid or not uid:
+        raise RuntimeError("SessionID and UserID are required to start the logger")
+    path = _role_log_path(user_id=uid, session_id=sid)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = f"{utc_now()} role={role} session={sid} user={uid} logger=started"
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(line + "\n")
+    if role == "viewer":
+        _VIEWER_LOGGERS.add(sid)
+    else:
+        _HOST_LOGGERS.add(sid)
+    return {
+        "status": "logging",
+        "role": role,
+        "session_id": sid,
+        "user_id": uid,
+        "log_path": path.as_posix(),
+        "log_name": path.name,
+        "started_at": utc_now(),
+    }
+
+
+def viewer_logger_in_use(*, session_id: str, viewer_user_id: str) -> bool:
+    """True when the Viewer_UserID log file is being written for this SessionID."""
+    sid = str(session_id).strip()
+    viewer = str(viewer_user_id).strip()
+    if not sid or not viewer:
+        return False
+    path = _role_log_path(user_id=viewer, session_id=sid)
+    if not path.exists() or path.stat().st_size <= 0:
+        return False
+    if sid not in _VIEWER_LOGGERS:
+        _VIEWER_LOGGERS.add(sid)
+    return True
+
+
+def _append_role_log(*, session_id: str, user_id: str, role: str, action: str) -> str:
+    path = _role_log_path(user_id=user_id, session_id=session_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = f"{utc_now()} role={role} session={session_id} user={user_id} action={action}"
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(line + "\n")
+    if role == "viewer":
+        _VIEWER_LOGGERS.add(str(session_id).strip())
+    else:
+        _HOST_LOGGERS.add(str(session_id).strip())
+    return path.as_posix()
+
+
 def record_activity(
     *, session_id: str, user_id: str, id_token: str, action: str
 ) -> dict[str, Any]:
-    """sessions /session-record and operations recorder /session-record."""
+    """Write the role log and POST sessions /session-record."""
+    validation = fetch_validation(
+        session_id=session_id, user_id=user_id, id_token=id_token
+    )
+    host = str(validation.get("hostUserID") or "")
+    role = "host" if user_id == host else "viewer"
+    log_path = _append_role_log(
+        session_id=str(session_id).strip(),
+        user_id=user_id,
+        role=role,
+        action=action,
+    )
     sessions_result = post_sessions(
         "RDP_SESSION_RECORD_PATH",
         {
             "sessionID": str(session_id).strip(),
+            "session_id": str(session_id).strip(),
             "UserID": user_id,
             "TokenID": id_token,
             "action": action,
         },
     )
-    operations_result = post_operations(
-        "RDP_OPERATIONS_SESSION_RECORD_PATH",
-        user_id=user_id,
-        id_token=id_token,
-        extra={"sessionID": str(session_id).strip(), "action": action},
-    )
-    _append_local_log(
-        f"{utc_now()} session={session_id} user={user_id} action={action}"
-    )
     return {
         "sessions": sessions_result,
-        "operations": operations_result,
+        "role": role,
+        "log_path": log_path,
         "recorded_at": utc_now(),
     }
-
-
-def _append_local_log(line: str) -> None:
-    log_dir = Path(require_rdp_secret("RDP_LOG_DIR")).expanduser()
-    log_dir.mkdir(parents=True, exist_ok=True)
-    path = log_dir / require_rdp_secret("RDP_LOG_NAME")
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(line + "\n")
 
 
 def find_peer(*, session_id: str, user_id: str, id_token: str) -> dict[str, Any]:
@@ -349,12 +445,22 @@ def connect_peer(
     )
 
 
-def create_host_session(*, user_id: str, id_token: str) -> dict[str, Any]:
-    """Forward SessionID creation to the sessions container."""
-    return post_sessions(
-        "RDP_SESSION_CREATE_PATH",
-        {"UserID": user_id, "TokenID": id_token},
+def attach_existing_session(*, session_id: str, user_id: str, id_token: str) -> dict[str, Any]:
+    """Attach Rdp to a SessionID sessions already wrote. Does not create a SessionID."""
+    if not str(session_id).strip():
+        raise RuntimeError(
+            "SessionID missing — Rdp attaches only after the sessions container has written the SessionID"
+        )
+    validation = fetch_validation(
+        session_id=session_id, user_id=user_id, id_token=id_token
     )
+    if not str(validation.get("session_id") or "").strip():
+        raise RuntimeError("Valid SessionID must exist in LucidTops_SessionsDB")
+    if not _flag(validation.get("is_participant")) and user_id != str(validation.get("hostUserID") or ""):
+        raise RuntimeError("UserID is not a SessionID participant")
+    validation["attached"] = True
+    validation["created_by_rdp"] = False
+    return validation
 
 
 def agree_connection(
