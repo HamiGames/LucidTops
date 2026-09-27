@@ -7,6 +7,7 @@ SessionRoutes:
 - /session-end: end a peer to peer remote desktop sharing session
 - /session-record: record a peer to peer remote desktop sharing session
 - /session-validate: Rdp SessionID + UserID + TokenID validation
+- /session-settings: freeze Host_UserID settings.js onto Session_settings
 - /session-agree: peer accept popup (multi-connection stored for the host)
 - /session-reconnect: new SessionID seeded by the last SessionID
 - /session-transfer: mark transfer metadata for operations
@@ -35,6 +36,7 @@ from .SessionCore import (
     find_session,
     reconnect_session,
     record_session_event,
+    store_session_settings,
     transfer_session_metadata,
     validate_session_for_rdp,
 )
@@ -63,6 +65,7 @@ SESSION_ROUTES: tuple[str, ...] = (
     "/session-record",
     "/session-transfer",
     "/session-validate",
+    "/session-settings",
     "/session-agree",
     "/session-reconnect",
 )
@@ -140,6 +143,9 @@ if BaseModel is not object and Field is not None:
 
         model_config = {"populate_by_name": True}
 
+    class SessionSettingsPayload(SessionValidatePayload):
+        Session_settings: dict[str, Any] = Field(...)
+
 else:
     UserAuthPayload = Any  # type: ignore[misc, assignment]
     SessionCreatePayload = Any  # type: ignore[misc, assignment]
@@ -150,6 +156,7 @@ else:
     SessionAgreePayload = Any  # type: ignore[misc, assignment]
     SessionTransferPayload = Any  # type: ignore[misc, assignment]
     SessionValidatePayload = Any  # type: ignore[misc, assignment]
+    SessionSettingsPayload = Any  # type: ignore[misc, assignment]
 
 
 def _raise_http(exc: Exception) -> None:
@@ -332,6 +339,25 @@ def create_session_router(*, prefix: str = "") -> Any:
                 session_id=payload.session_id,
                 user_id=payload.user_id,
                 id_token=payload.id_token,
+                client=client,
+            )
+        except Exception as exc:
+            _raise_http(exc)
+            raise
+        finally:
+            client.close()
+
+    @router.post("/session-settings")
+    def session_settings(payload: SessionSettingsPayload) -> dict[str, Any]:
+        client = get_mongo_client()
+        if client is None:
+            raise HTTPException(status_code=503, detail="Master server database unavailable")
+        try:
+            return store_session_settings(
+                session_id=payload.session_id,
+                user_id=payload.user_id,
+                id_token=payload.id_token,
+                settings=payload.Session_settings,
                 client=client,
             )
         except Exception as exc:

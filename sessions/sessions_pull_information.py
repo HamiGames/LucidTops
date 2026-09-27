@@ -174,7 +174,6 @@ def map_seed_to_sessions_keys(seed: dict[str, str]) -> dict[str, str]:
         ("MASTER_SERVER_PORT", "MASTER_SERVER_INTERNAL_PORT"),
         ("PROXY_SESSIONS_DNS", "SESSIONS_DOCKER_DNS_NAME"),
         ("PROXY_OPERATIONS_DNS", "OPERATIONS_DOCKER_DNS_NAME"),
-        ("PROXY_RDP_DNS", "RDP_DOCKER_DNS_NAME"),
         ("DOCKER_NETWORK_NAME", "SESSIONS_NETWORK_NAME"),
         ("HARDWARE_PRIMARY_IP", "HOST_PRIMARY_IP"),
         ("HARDWARE_PRIMARY_MAC", "HOST_PRIMARY_MAC"),
@@ -203,7 +202,6 @@ def enrich_sessions_pull(info: dict[str, Any]) -> dict[str, Any]:
     sessions_ctr = _match_container(
         containers, "sessions", "lucid-sessions", "lucidtops-sessions"
     )
-    rdp_ctr = _match_container(containers, "rdp", "lucid-rdp", "lucidtops-rdp")
     operations_ctr = _match_container(
         containers, "operations", "lucid-operations", "ops", "lucidtops-operations"
     )
@@ -229,12 +227,6 @@ def enrich_sessions_pull(info: dict[str, Any]) -> dict[str, Any]:
         uvicorn_port = _first_listen_port(info, "uvicorn", "python")
         sessions_port = str(uvicorn_port) if uvicorn_port else str(_allocate_ephemeral_port())
 
-    rdp_dns = (
-        _env("RDP_DOCKER_DNS_NAME")
-        or seed.get("RDP_DOCKER_DNS_NAME", "").strip()
-        or seed.get("PROXY_RDP_DNS", "").strip()
-        or _container_ip_or_name(rdp_ctr)
-    )
     operations_dns = (
         _env("OPERATIONS_DOCKER_DNS_NAME")
         or seed.get("OPERATIONS_DOCKER_DNS_NAME", "").strip()
@@ -280,13 +272,11 @@ def enrich_sessions_pull(info: dict[str, Any]) -> dict[str, Any]:
             "master_proxy_seed": seed,
             "docker_network_name": docker_network_name,
             "sessions_container": sessions_ctr or {},
-            "rdp_container": rdp_ctr or {},
             "operations_container": operations_ctr or {},
             "master_container": master_ctr or {},
             "sessions_docker_dns_name": sessions_dns,
             "sessions_bind_host": str(info.get("primary_ip") or "").strip(),
             "sessions_bind_port": str(sessions_port),
-            "rdp_docker_dns_name": rdp_dns,
             "operations_docker_dns_name": operations_dns,
             "operations_bind_port": str(operations_port),
             "master_server_internal_host": master_dns,
@@ -355,8 +345,6 @@ def bind_sessions_environ(
         "PROXY_SECRETS_FILE": str(info.get("proxy_secrets_file") or ""),
         "SERVER_SECRETS_DIR": str(info.get("server_secrets_dir") or ""),
     }
-    if info.get("rdp_docker_dns_name"):
-        mapping["RDP_DOCKER_DNS_NAME"] = str(info["rdp_docker_dns_name"])
     if info.get("operations_docker_dns_name"):
         mapping["OPERATIONS_DOCKER_DNS_NAME"] = str(info["operations_docker_dns_name"])
     if info.get("operations_bind_port"):
@@ -370,7 +358,6 @@ def bind_sessions_environ(
         "PROXY_BACKEND_DNS",
         "PROXY_SESSIONS_DNS",
         "PROXY_OPERATIONS_DNS",
-        "PROXY_RDP_DNS",
         "MASTER_SERVER_PORT",
         "MASTER_SERVER_ONION",
         "TOR_SOCKS_HOST",

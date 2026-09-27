@@ -185,11 +185,6 @@ def apply_pull_to_sessions_configuration(
     if not operations_handoff_path:
         operations_handoff_path = "/session-end"
 
-    rdp_dns = (
-        _pick(existing, "RDP_DOCKER_DNS_NAME", "PROXY_RDP_DNS")
-        or str(info.get("rdp_docker_dns_name") or "")
-    )
-
     network_name = (
         _pick(existing, "DOCKER_NETWORK_NAME", "SESSIONS_NETWORK_NAME")
         or str(info.get("docker_network_name") or "")
@@ -340,7 +335,6 @@ def apply_pull_to_sessions_configuration(
         "OPERATIONS_BIND_PORT": operations_port,
         "OPERATIONS_URL_SCHEME": operations_scheme,
         "OPERATIONS_SESSION_HANDOFF_PATH": operations_handoff_path,
-        "RDP_DOCKER_DNS_NAME": rdp_dns,
     }
 
     # Carry through Proxy/Master DockerDNS + Tor/Mongo facts when present in seed.
@@ -348,7 +342,6 @@ def apply_pull_to_sessions_configuration(
         "PROXY_BACKEND_DNS",
         "PROXY_SESSIONS_DNS",
         "PROXY_OPERATIONS_DNS",
-        "PROXY_RDP_DNS",
         "MASTER_SERVER_PORT",
         "MASTER_SERVER_ONION",
         "TOR_SOCKS_HOST",

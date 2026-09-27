@@ -248,6 +248,9 @@ def _empty_session_record(
         "participant_agreements": {host_user_id: False},
         "all_agreed": False,
         "multi_connection": False,
+        "Session_settings": {},
+        "Host_log": None,
+        "Viewer_log": None,
         "seed_session_id": None,
         "compressed": False,
         "operations_handoff": None,
@@ -447,7 +450,65 @@ def validate_session_for_rdp(
         "multi_connection": bool(record.get("multi_connection", False)),
         "sessionStatus": record.get("sessionStatus"),
         "SessionID_status": record.get("SessionID_status", record.get("sessionStatus")),
+        "Session_settings": record.get("Session_settings") or {},
+        "Host_log": record.get("Host_log"),
+        "Viewer_log": record.get("Viewer_log"),
         "validated_at": utc_now(),
+    }
+
+
+_SESSION_SETTING_KEYS: tuple[str, ...] = (
+    "mouse",
+    "keyboard",
+    "audio",
+    "video",
+    "screen",
+    "usb",
+    "transfer",
+    "transfer_paths",
+)
+
+
+@with_mongo
+def store_session_settings(
+    *,
+    session_id: str,
+    user_id: str,
+    id_token: str,
+    settings: dict[str, Any],
+    client: Any,
+) -> dict[str, Any]:
+    """Freeze Host_UserID settings.js onto Session_settings. One write only."""
+    if not validate_session_id(session_id):
+        raise ValueError("A valid sessionID is required")
+    if not user_id.strip() or not id_token.strip():
+        raise ValueError("UserID/TokenID missing")
+    if not verify_user_id_token(user_id=user_id, id_token=id_token, client=client):
+        raise PermissionError("UserID/TokenID authentication failed")
+    if not isinstance(settings, dict) or not settings:
+        raise ValueError("Session_settings missing")
+
+    record = session_records_collection(client).find_one({"sessionID": session_id.strip()})
+    if not record:
+        raise LookupError("Session not found")
+    if user_id != record.get("hostUserID"):
+        raise PermissionError("only the Host_UserID can set Session_settings")
+
+    existing = record.get("Session_settings") or {}
+    cleaned = {key: settings[key] for key in _SESSION_SETTING_KEYS if key in settings}
+    if isinstance(existing, dict) and existing:
+        raise PermissionError("Session_settings are frozen at SessionID creation")
+
+    session_records_collection(client).update_one(
+        {"sessionID": session_id.strip()},
+        {"$set": {"Session_settings": cleaned, "updated_at": utc_now()}},
+    )
+    return {
+        "sessionID": session_id.strip(),
+        "hostUserID": user_id,
+        "Session_settings": cleaned,
+        "controls": cleaned,
+        "frozen": True,
     }
 
 
@@ -729,9 +790,17 @@ def record_session_event(
             "timestamp": utc_now(),
         }
     )
+    log_name = f"{user_id}_{session_id.strip()}.log"
+    log_field = "Host_log" if user_id == record.get("hostUserID") else "Viewer_log"
     session_records_collection(client).update_one(
         {"sessionID": session_id.strip()},
-        {"$set": {"session_records": session_records, "updated_at": utc_now()}},
+        {
+            "$set": {
+                "session_records": session_records,
+                log_field: log_name,
+                "updated_at": utc_now(),
+            }
+        },
     )
     touch_session_id_log(session_id=session_id, client=client)
     return {"sessionID": session_id.strip(), "record_count": len(session_records)}
