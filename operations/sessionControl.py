@@ -71,40 +71,88 @@ def _freeze_settings(settings: dict[str, bool]) -> dict[str, bool]:
     return copy.deepcopy(settings)
 
 
+def _transfer_paths(raw: Any) -> list[str]:
+    if isinstance(raw, str):
+        return [line.strip() for line in raw.splitlines() if line.strip()]
+    if isinstance(raw, list):
+        return [str(item).strip() for item in raw if str(item).strip()]
+    return []
+
+
+def _bool_controls(raw: dict[str, Any] | None) -> dict[str, bool]:
+    keys = resolve_session_control_setting_keys()
+    source = raw if isinstance(raw, dict) else {}
+    return {key: bool(source.get(key)) for key in keys}
+
+
+def _control_view(record: dict[str, Any], settings: dict[str, bool]) -> dict[str, Any]:
+    controls: dict[str, Any] = dict(settings)
+    controls["transfer_paths"] = _transfer_paths(record.get("transfer_paths"))
+    return controls
+
+
 @with_mongo
 def load_session_control(
     *,
     session_id: str,
     host_user_id: str,
     client: Any,
+    initial_settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Load immutable session control settings for the host (settings.js schema)."""
+    """Load host settings.js controls. Participants may read. Only the host may set them once."""
     record = get_master_db(client)[SESSION_RECORDS_COLLECTION].find_one(
         {"sessionID": session_id.strip()}
     )
     if not record:
         raise LookupError("Session not found")
-    if record.get("hostUserID") != host_user_id:
-        raise PermissionError("Only the session host may load session control settings")
+    actual_host = str(record.get("hostUserID") or "")
+    participants = list(record.get("userIDs") or [])
+    if host_user_id != actual_host and host_user_id not in participants:
+        raise PermissionError("Only a session participant may read session control settings")
 
-    stored = record.get("session_control_settings")
-    settings = _freeze_settings(stored if isinstance(stored, dict) else default_control_settings())
-    if not stored:
+    locked = bool(record.get("session_control_locked"))
+    if initial_settings is not None:
+        if host_user_id != actual_host:
+            raise PermissionError("Only the session host may set session control settings")
+        if locked:
+            block_modification_attempt(actor=host_user_id, requested_changes=initial_settings)
+        settings = _bool_controls(initial_settings)
+        paths = _transfer_paths(initial_settings.get("transfer_paths"))
         get_master_db(client)[SESSION_RECORDS_COLLECTION].update_one(
             {"sessionID": session_id.strip()},
             {
                 "$set": {
                     "session_control_settings": settings,
+                    "transfer_paths": paths,
+                    "session_control_locked": True,
                     "updated_at": utc_now(),
                 }
             },
         )
+        record = get_master_db(client)[SESSION_RECORDS_COLLECTION].find_one(
+            {"sessionID": session_id.strip()}
+        ) or record
+        locked = True
+    else:
+        stored = record.get("session_control_settings")
+        settings = _freeze_settings(stored if isinstance(stored, dict) else default_control_settings())
+        if not stored:
+            get_master_db(client)[SESSION_RECORDS_COLLECTION].update_one(
+                {"sessionID": session_id.strip()},
+                {
+                    "$set": {
+                        "session_control_settings": settings,
+                        "updated_at": utc_now(),
+                    }
+                },
+            )
+
     return {
         "sessionID": session_id.strip(),
-        "hostUserID": host_user_id,
+        "hostUserID": actual_host,
         "source": resolve_session_control_javascript_source(),
-        "immutable": True,
-        "controls": settings,
+        "immutable": locked,
+        "controls": _control_view(record, settings),
     }
 
 
@@ -126,6 +174,7 @@ def get_session_control_for_route(
     session_id: str,
     host_user_id: str,
     modification_request: dict[str, Any] | None = None,
+    initial_settings: dict[str, Any] | None = None,
     client: Any,
 ) -> dict[str, Any]:
     if modification_request:
@@ -133,5 +182,6 @@ def get_session_control_for_route(
     return load_session_control(
         session_id=session_id,
         host_user_id=host_user_id,
+        initial_settings=initial_settings,
         client=client,
     )

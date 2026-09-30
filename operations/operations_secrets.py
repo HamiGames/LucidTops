@@ -911,8 +911,15 @@ def apply_pull_to_operations_configuration(
         or "sessionID,UserID,TokenID",
         "SESSION_STATUSES": _pick(existing, "SESSION_STATUSES")
         or "pending,active,complete,ended,compressed",
-        "SESSION_CONTROL_SETTING_KEYS": _pick(existing, "SESSION_CONTROL_SETTING_KEYS")
-        or "audio,video,input,clipboard",
+        "SESSION_CONTROL_SETTING_KEYS": (
+            "mouse,keyboard,audio,video,screen,transfer,usb"
+            if (
+                not _pick(existing, "SESSION_CONTROL_SETTING_KEYS")
+                or _pick(existing, "SESSION_CONTROL_SETTING_KEYS")
+                == "audio,video,input,clipboard"
+            )
+            else _pick(existing, "SESSION_CONTROL_SETTING_KEYS")
+        ),
         "PAYMENTS_SECRETS_FILE": payments_secrets,
         "PAYMENTS_WALLET_ADDRESS_KEYS": _pick(existing, "PAYMENTS_WALLET_ADDRESS_KEYS")
         or "WALLET_ADDRESS,TRON_WALLET,XRP_WALLET",

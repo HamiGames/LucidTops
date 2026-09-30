@@ -128,6 +128,7 @@ if BaseModel is not object:
     class SessionControlPayload(SessionScopedPayload):
         host_user_id: str | None = Field(default=None, alias="hostUserID")
         modification_request: dict[str, Any] | None = None
+        session_settings: dict[str, Any] | None = Field(default=None, alias="Session_settings")
 
 
 def _require_operator_and_user(payload: Any, client: Any) -> dict[str, Any]:
@@ -221,11 +222,11 @@ def _dispatch(route: str) -> Any:
                     target=payload.target,
                 )
             elif route == "/session-control":
-                host_id = payload.host_user_id or payload.user_id
                 result = get_session_control_for_route(
                     session_id=payload.session_id,
-                    host_user_id=host_id,
+                    host_user_id=payload.user_id,
                     modification_request=payload.modification_request,
+                    initial_settings=payload.session_settings,
                 )
                 viewer = resolve_viewer(session_id=payload.session_id)
                 result["viewer"] = viewer

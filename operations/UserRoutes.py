@@ -155,6 +155,7 @@ if BaseModel is not object:
             min_length=resolve_session_id_length(),
             max_length=resolve_session_id_length(),
         )
+        session_settings: dict[str, Any] | None = Field(default=None, alias="Session_settings")
 
         model_config = {"populate_by_name": True}
 
@@ -327,6 +328,7 @@ def _user_handler(route: str, payload: Any) -> dict[str, Any]:
             result = get_session_control_for_route(
                 session_id=payload.session_id,
                 host_user_id=payload.user_id,
+                initial_settings=getattr(payload, "session_settings", None),
             )
         else:
             raise ValueError(f"Unsupported user route: {route}")
