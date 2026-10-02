@@ -230,14 +230,46 @@ def _sync_handler(sync_type: str) -> Callable[..., dict[str, Any]]:
     return handler
 
 
+_PUBLIC_AUTH_PATHS = frozenset(
+    {"/register", "/login", "/node-registration", "/node-login"}
+)
+
+
 def _register_routes(router: Any, routes: tuple[str, ...], tag: str) -> None:
+    public_post = tag in {"master-api", "gui"}
     for route in routes:
         path = route if route.startswith("/") else f"/{route}"
         if path.startswith("/server-") and path.endswith("-sync"):
             handler = _sync_handler(path.lstrip("/"))
         else:
             handler = _route_handler(path, tag)
-        router.add_api_route(path, handler, methods=["GET", "POST"], tags=[tag])
+        methods = ["GET"] if public_post and path in _PUBLIC_AUTH_PATHS else ["GET", "POST"]
+        router.add_api_route(path, handler, methods=methods, tags=[tag])
+
+
+def _attach_public_auth(router: Any) -> None:
+    """POST /register and /login create or accept a per-user TokenID. GET stays the stub."""
+    from public_registration import (
+        public_login_endpoint,
+        public_node_login_endpoint,
+        public_node_register_endpoint,
+        public_register_endpoint,
+    )
+
+    router.add_api_route("/register", public_register_endpoint, methods=["POST"], tags=["public-auth"])
+    router.add_api_route("/login", public_login_endpoint, methods=["POST"], tags=["public-auth"])
+    router.add_api_route(
+        "/node-registration",
+        public_node_register_endpoint,
+        methods=["POST"],
+        tags=["public-auth"],
+    )
+    router.add_api_route(
+        "/node-login",
+        public_node_login_endpoint,
+        methods=["POST"],
+        tags=["public-auth"],
+    )
 
 
 def create_master_server_routers() -> dict[str, Any]:
@@ -263,11 +295,13 @@ def create_master_server_routers() -> dict[str, Any]:
 
 def _build_api_router(router: Any) -> Any:
     _register_routes(router, MASTER_API_ROUTES, "master-api")
+    _attach_public_auth(router)
     return router
 
 
 def _build_gui_router(router: Any) -> Any:
     _register_routes(router, GUI_ROUTES, "gui")
+    _attach_public_auth(router)
     return router
 
 

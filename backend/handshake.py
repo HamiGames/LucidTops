@@ -12,9 +12,9 @@ limitations:
   frontend/register.js file, node registration from the frontend/node-registration.js
   file, or user login from the frontend/login.js file, and the frontend/tier-select.js
   file
-- the API key will generate a userID and a nodeID for the user and node respectively
-  consisting of 8 characters each
-- the successful handshake will return an IDToken for the user and node respectively
+- a per-user TokenID is the API key and is looked up in LucidTopsUserDB
+- the bootstrap API key is a server secret and does not derive a public UserID or NodeID
+- the successful handshake returns the UserID and NodeID stored for that TokenID
 - the IDToken will be the proof of authentication for the user and node respectively
 - all IDTokens will be stored on the Master server database
 
@@ -185,28 +185,43 @@ def _load_api_key_from_database(client: Any) -> str | None:
     return None
 
 
-def validate_api_key(api_key: str, *, client: Any | None = None) -> bool:
-    """Validate an API key against configured secrets and the master database."""
-    if not validate_api_key_format(api_key):
+def is_bootstrap_api_key(api_key: str, *, client: Any | None = None) -> bool:
+    """True when the key is the server bootstrap secret. That key is not a user TokenID."""
+    if not api_key:
         return False
-
     expected = _resolve_api_key()
     if expected and secrets.compare_digest(api_key, expected):
         return True
-
     mongo = client if client is not None else _mongo_client()
     if mongo is None:
         return False
-
     try:
         db_key = _load_api_key_from_database(mongo)
     finally:
         if client is None:
             mongo.close()
-
     if not db_key:
         return False
     return secrets.compare_digest(api_key, db_key)
+
+
+def validate_api_key(api_key: str, *, client: Any | None = None) -> bool:
+    """Accept a per-user TokenID from LucidTopsUserDB, or the server bootstrap key."""
+    if not validate_api_key_format(api_key):
+        return False
+
+    mongo = client if client is not None else _mongo_client()
+    owns_client = client is None
+    try:
+        if mongo is not None:
+            from public_registration import find_user_by_token
+
+            if find_user_by_token(mongo, api_key) is not None:
+                return True
+        return is_bootstrap_api_key(api_key, client=mongo)
+    finally:
+        if owns_client and mongo is not None:
+            mongo.close()
 
 
 # --- includes: the process of deriving the userID and nodeID from the API key ---
@@ -308,19 +323,20 @@ def store_id_tokens_in_master_database(
         },
         upsert=True,
     )
-    collection.update_one(
-        {"entity": "node", "NodeUserID": node_id},
-        {
-            "$set": {
-                **base_record,
-                "entity": "node",
-                "NodeUserID": node_id,
-                "IDToken": node_id_token,
+    if str(node_id or "").strip():
+        collection.update_one(
+            {"entity": "node", "NodeUserID": node_id},
+            {
+                "$set": {
+                    **base_record,
+                    "entity": "node",
+                    "NodeUserID": node_id,
+                    "IDToken": node_id_token,
+                },
+                "$setOnInsert": {"created_at": now},
             },
-            "$setOnInsert": {"created_at": now},
-        },
-        upsert=True,
-    )
+            upsert=True,
+        )
 
 
 # --- includes: the process of performing the handshake ---
@@ -350,6 +366,10 @@ def perform_handshake(
         raise RuntimeError("Master server database is unavailable")
 
     try:
+        if is_bootstrap_api_key(api_key, client=mongo):
+            raise PermissionError(
+                "bootstrap API key cannot be used to derive UserID or NodeID"
+            )
         if not validate_api_key(api_key, client=mongo):
             raise PermissionError("API key must be valid")
 
@@ -358,10 +378,18 @@ def perform_handshake(
                 "Handshake source is not permitted for ongoing connections"
             )
 
-        ids = derive_user_and_node_ids(api_key)
-        user_id = ids["userID"]
-        node_id = ids["nodeID"]
-        user_id_token, node_id_token = create_id_tokens()
+        from public_registration import find_node_by_token, find_user_by_token
+
+        user = find_user_by_token(mongo, api_key)
+        if user is None:
+            raise PermissionError("TokenID was not found in LucidTopsUserDB")
+        user_id = str(user.get("UserID") or "").strip()
+        if not user_id:
+            raise PermissionError("TokenID is not bound to a UserID")
+        node = find_node_by_token(mongo, api_key)
+        node_id = str((node or {}).get("NodeID") or "").strip()
+        user_id_token = str(user.get("TokenID") or api_key).strip()
+        node_id_token = str((node or {}).get("TokenID") or user_id_token).strip()
 
         store_id_tokens_in_master_database(
             mongo,

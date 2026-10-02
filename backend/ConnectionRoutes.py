@@ -89,6 +89,7 @@ CONNECTION_ROUTES: tuple[str, ...] = (
     "/connection/ids/connection-status",
     "/connection/ids/connection-configuration",
     "/connection/ids/connection-logs",
+    "/rdp-access",
 )
 
 def master_connection_collection() -> str:
@@ -182,6 +183,19 @@ if BaseModel is not object:
             raise ValueError(
                 "provide api_key, or both userID and nodeID, to resolve entity identity"
             )
+
+    class RdpAccessRequest(BaseModel):  # pyright: ignore[reportGeneralTypeIssues]
+        user_id: Annotated[str, Field(min_length=1, alias="UserID")]
+        id_token: Annotated[str, Field(min_length=1, alias="TokenID")]
+        model_config = ConfigDict(populate_by_name=True)
+
+        @field_validator("user_id", "id_token")
+        @classmethod
+        def _strip_rdp_access(cls, value: str) -> str:
+            cleaned = value.strip()
+            if not cleaned:
+                raise ValueError("UserID and TokenID are required")
+            return cleaned
 
 
 def _connection_error_handler(exc: Exception) -> None:
@@ -643,6 +657,80 @@ def check_user_and_node_connection_logs(
     return _with_master_db(_query)
 
 
+def confirm_rdp_user_access(*, user_id: str, id_token: str) -> dict[str, Any]:
+    """Login, registration, tier, and limitations for the Rdp container. Rdp does not open Mongo."""
+    cleaned_user = user_id.strip()
+    token = id_token.strip()
+    if not cleaned_user or not token:
+        raise ValueError("UserID and TokenID are required")
+
+    mongo = get_mongo_client()
+    if mongo is None:
+        raise RuntimeError("Master server database is unavailable")
+    try:
+        db = get_master_db(mongo)
+        user = db[USERS_COLLECTION].find_one({"UserID": cleaned_user})
+        token_match = db[ID_TOKENS_COLLECTION].find_one(
+            {
+                "entity": "user",
+                "UserID": cleaned_user,
+                "$or": [{"TokenID": token}, {"IDToken": token}],
+            }
+        )
+        registered = user is not None
+        token_ok = token_match is not None
+        if user is not None and token in {
+            str(user.get("TokenID") or ""),
+            str(user.get("IDToken") or ""),
+        }:
+            token_ok = True
+        login_complete = bool(registered and token_ok)
+
+        tier = 0
+        tier_source: dict[str, Any] = {}
+        if user is not None:
+            raw_tier = user.get("Tier_selected", user.get("tier"))
+            try:
+                tier = int(raw_tier) if raw_tier is not None else 0
+            except (TypeError, ValueError):
+                tier = 0
+        try:
+            from Select_tier import load_tier_definition, retrieve_user_tier
+
+            stored = retrieve_user_tier(cleaned_user, client=mongo)
+            if stored and stored.get("Tier_selected") is not None:
+                tier = int(stored["Tier_selected"])
+                tier_source = stored
+        except Exception:
+            stored = None
+
+        limitations: dict[str, Any] = {}
+        if tier > 0:
+            try:
+                from Select_tier import load_tier_definition
+
+                limitations = load_tier_definition(tier)
+            except Exception:
+                limitations = {"tier": tier}
+        if user is not None:
+            limitations = {
+                **limitations,
+                "session-count": user.get("session-count", 0),
+                "max-sessions": user.get("max-sessions"),
+            }
+
+        return {
+            "UserID": cleaned_user,
+            "registered": registered,
+            "login_complete": login_complete,
+            "Tier_selected": tier,
+            "limitations": limitations,
+            "tier_source": "LucidTopsUserDB" if tier_source or user else "",
+        }
+    finally:
+        mongo.close()
+
+
 def create_connection_router(*, api_prefix: str = "") -> Any:
     if APIRouter is None:
         raise RuntimeError("fastapi is required to create connection routes")
@@ -757,6 +845,14 @@ def create_connection_router(*, api_prefix: str = "") -> Any:
                 node_id=payload.nodeID,
                 api_key=payload.api_key,
             )
+        except Exception as exc:
+            _connection_error_handler(exc)
+            raise
+
+    @router.post("/rdp-access")
+    def rdp_access_endpoint(payload: RdpAccessRequest) -> dict[str, Any]:
+        try:
+            return confirm_rdp_user_access(user_id=payload.user_id, id_token=payload.id_token)
         except Exception as exc:
             _connection_error_handler(exc)
             raise
