@@ -1,0 +1,39 @@
+this document outlines the scope of the UserOnly container.
+scope: to create a easy to use access point for a Users and NodeUsers to connect to the frontend container.
+
+content: [
+    1. this is a standalone Gui for connecting to the Frontend
+    2. is modern and easy to use.
+    3. starts the local consoles Tor system as a background process.
+    4. supports the requirements for the use of frontend and initial registration of a UserID/ NodeID.
+    5. has the installer built in for the initial launching of the LucidTops system from any console (window, Mac, linux os systems)
+    6. uses the console that is operating the container for the pull_information function.(not the creator of the container)
+    7. all connection routes required are pulled from the /mnt/myssd/Server/Secrets/proxy.secrets and Master.secrets at the time of container creation.(is configured internally)
+    8. all configurations of this container must not be exposed to Users or NodeUsers.
+    9. the direct handshake with the frontend container must be present.
+    10. Must use TOR
+]
+
+restriction: [
+    1. No GitHub use
+    2. all cross contianer config files / conf criteria must  exist inside this container.
+    3. must be operation from multiple locations at a single time (unrestricted number of Users/ NodeUsers at any given time)
+    4. must include the 2 ways to connect ( as a User or as a NodeUser, this includes register as options)
+    5. anti manipulation protocol must be in place.
+]
+
+Gui styling and formats: [
+    1. created using tkinter libraries.
+    2. uses the same color schema as the the content found in the frontend/ folder.
+    3. is modern in design
+    4. is easy to use.
+]
+
+installer includes: [
+    - the check and install of tor on the console.
+    - the check and install of docker on the console
+    - the check and install of all required libraries on the console
+    - the check and install of javascript and python interpreters as required.
+    - the creation of the driver directory based on install locations for alignment in when operating the LucidTops systems.
+    - all other conf/ config material required by a user is created from realworld pull_information
+]
