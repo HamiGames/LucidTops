@@ -21,8 +21,34 @@ from typing import Any
 
 BACKEND_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BACKEND_DIR.parent
+LUCID_TOPS_ROOT_PATH = Path("/mnt/myssd/LucidTops")
+SECRETS_DIR_PATH = Path("/mnt/myssd/LucidTops/Server/Secrets")
+
+_KNOWN_SECRETS_FILES: tuple[tuple[str, str], ...] = (
+    ("SERVER_SECRETS_FILE", "server.secrets"),
+    ("CONFIG_SECRETS_FILE", "config.secrets"),
+    ("OPERATIONS_SECRETS_FILE", "operations.secrets"),
+    ("MONGODB_SECRETS_FILE", "mongodb.secrets"),
+    ("DATABASES_SECRETS_FILE", "databases.secrets"),
+    ("BLOCKCHAIN_SECRETS_FILE", "blockchain.secrets"),
+    ("PAYMENTS_SECRETS_FILE", "payments.secrets"),
+    ("BACKEND_SECRETS_FILE", "backend.secrets"),
+    ("MASTER_SECRETS_FILE", "Master.secrets"),
+)
 
 _LAST_PULL: dict[str, Any] = {}
+
+
+def _is_dir(path: Path) -> bool:
+    """True when path is a directory. OSError from stat (EACCES, EIO, ESTALE) is not a directory."""
+    try:
+        return path.is_dir()
+    except OSError:
+        return False
+
+
+def _secrets_path_key(key: str) -> bool:
+    return key == "SECRETS_DIR" or key.endswith("_SECRETS_FILE")
 
 
 def utc_now() -> str:
@@ -161,7 +187,7 @@ def _pull_mount_roots() -> list[Path]:
                 if len(parts) < 2:
                     continue
                 mount = Path(parts[1])
-                if mount.is_dir():
+                if _is_dir(mount):
                     roots.append(mount)
         except OSError:
             pass
@@ -183,7 +209,10 @@ def _pull_mount_roots() -> list[Path]:
 
 
 def _pull_lucid_tops_root() -> Path:
-    """Discover LucidTops root on mounted hardware / existing tree at operation time."""
+    """LucidTops root that owns /mnt/myssd/LucidTops/Server/Secrets."""
+    if _is_dir(LUCID_TOPS_ROOT_PATH):
+        return LUCID_TOPS_ROOT_PATH.resolve()
+
     env_root = _env("LUCID_TOPS_ROOT")
     if env_root:
         return Path(env_root).expanduser().resolve()
@@ -195,11 +224,11 @@ def _pull_lucid_tops_root() -> Path:
             mount / "Server" / "LucidTops",
             mount / "LucidTops" / "Server",
         ):
-            if candidate.is_dir():
+            if _is_dir(candidate):
                 return candidate.resolve()
         try:
             for child in mount.iterdir():
-                if child.is_dir() and child.name.lower() == "lucidtops":
+                if _is_dir(child) and child.name.lower() == "lucidtops":
                     return child.resolve()
         except OSError:
             continue
@@ -208,11 +237,11 @@ def _pull_lucid_tops_root() -> Path:
         secrets_probe = parent / "Secrets"
         secrets_probe_alt = parent / "Server" / "Secrets"
         lucid_probe = parent / "LucidTops"
-        if secrets_probe.is_dir() or secrets_probe_alt.is_dir():
+        if _is_dir(secrets_probe) or _is_dir(secrets_probe_alt):
             return parent.resolve()
-        if lucid_probe.is_dir():
+        if _is_dir(lucid_probe):
             return lucid_probe.resolve()
-        if (parent / "proxy").is_dir() and (parent / "backend").is_dir():
+        if _is_dir(parent / "proxy") and _is_dir(parent / "backend"):
             data = parent / "LucidTops"
             data.mkdir(parents=True, exist_ok=True)
             return data.resolve()
@@ -222,21 +251,40 @@ def _pull_lucid_tops_root() -> Path:
     return created.resolve()
 
 
-def _pull_secrets_dir(lucid_root: Path) -> Path:
-    env_secrets = _env("SECRETS_DIR")
-    if env_secrets:
-        return Path(env_secrets).expanduser().resolve()
-    candidates = [
-        lucid_root / "Server" / "Secrets",
-        lucid_root / "secrets",
-        lucid_root / "Secrets",
-    ]
-    for candidate in candidates:
-        if candidate.is_dir():
-            return candidate.resolve()
-    chosen = candidates[0]
-    chosen.mkdir(parents=True, exist_ok=True)
-    return chosen.resolve()
+def _pull_secrets_dir(_lucid_root: Path) -> Path:
+    """Absolute directory for creating and reading every *.secrets file."""
+    if not _is_dir(LUCID_TOPS_ROOT_PATH):
+        raise RuntimeError(
+            f"*.secrets path requires {LUCID_TOPS_ROOT_PATH.as_posix()}"
+        )
+    SECRETS_DIR_PATH.mkdir(parents=True, exist_ok=True)
+    return SECRETS_DIR_PATH.resolve()
+
+
+def _secrets_file_map(secrets_dir: Path) -> dict[str, Path]:
+    """Every *.secrets file is under /mnt/myssd/LucidTops/Server/Secrets."""
+    if secrets_dir.resolve() != SECRETS_DIR_PATH.resolve():
+        raise RuntimeError(
+            f"*.secrets files must be under {SECRETS_DIR_PATH.as_posix()}"
+        )
+    mapping = {key: secrets_dir / name for key, name in _KNOWN_SECRETS_FILES}
+    if not _is_dir(secrets_dir):
+        return mapping
+    try:
+        found_files = sorted(secrets_dir.glob("*.secrets"))
+    except OSError:
+        return mapping
+    present = {path.name.lower(): path for path in found_files}
+    known_names = {name.lower() for _, name in _KNOWN_SECRETS_FILES}
+    for key, name in _KNOWN_SECRETS_FILES:
+        found = present.get(name.lower())
+        if found is not None:
+            mapping[key] = found
+    for path in found_files:
+        if path.name.lower() in known_names:
+            continue
+        mapping.setdefault(f"{path.stem.upper()}_SECRETS_FILE", path)
+    return mapping
 
 
 def _pull_databases_dir(lucid_root: Path) -> Path:
@@ -251,7 +299,7 @@ def _pull_databases_dir(lucid_root: Path) -> Path:
         lucid_root / "data" / "mongodb",
     ]
     for candidate in candidates:
-        if candidate.is_dir():
+        if _is_dir(candidate):
             return candidate.resolve()
     chosen = candidates[0]
     chosen.mkdir(parents=True, exist_ok=True)
@@ -494,6 +542,9 @@ def pull_realworld_information() -> dict[str, Any]:
         "docker_network_name": docker_network_name,
         "lucid_tops_root": lucid_root.as_posix(),
         "secrets_dir": secrets_dir.as_posix(),
+        "secrets_files": {
+            key: path.as_posix() for key, path in _secrets_file_map(secrets_dir).items()
+        },
         "databases_dir": databases_dir.as_posix(),
         "mongodb_host": mongodb_host,
         "mongodb_port": mongodb_port,
@@ -516,7 +567,8 @@ def get_last_pull() -> dict[str, Any]:
 def bind_operation_environ(pull: dict[str, Any] | None = None, *, overwrite: bool = False) -> dict[str, str]:
     """
     Configure os.environ from pulled hardware facts at time of operation.
-    Only fills missing keys unless overwrite=True. Never invents placeholders.
+    SECRETS_DIR and every *_SECRETS_FILE always use /mnt/myssd/LucidTops/Server/Secrets.
+    Other keys fill only when missing unless overwrite=True. Never invents placeholders.
     """
     info = pull if pull is not None else pull_realworld_information()
     bound: dict[str, str] = {}
@@ -551,24 +603,14 @@ def bind_operation_environ(pull: dict[str, Any] | None = None, *, overwrite: boo
         mapping["DNS_BACKEND_SERVICE_NAME"] = str(info["proxy_backend_dns"])
 
     secrets_dir = Path(str(info["secrets_dir"]))
-    file_map = {
-        "SERVER_SECRETS_FILE": secrets_dir / "server.secrets",
-        "CONFIG_SECRETS_FILE": secrets_dir / "config.secrets",
-        "OPERATIONS_SECRETS_FILE": secrets_dir / "operations.secrets",
-        "MONGODB_SECRETS_FILE": secrets_dir / "mongodb.secrets",
-        "DATABASES_SECRETS_FILE": secrets_dir / "databases.secrets",
-        "BLOCKCHAIN_SECRETS_FILE": secrets_dir / "blockchain.secrets",
-        "PAYMENTS_SECRETS_FILE": secrets_dir / "payments.secrets",
-        "BACKEND_SECRETS_FILE": secrets_dir / "backend.secrets",
-        "MASTER_SECRETS_FILE": secrets_dir / "Master.secrets",
-    }
+    file_map = _secrets_file_map(secrets_dir)
     for key, path in file_map.items():
         mapping[key] = path.as_posix()
 
     for key, value in mapping.items():
         if not value or not str(value).strip():
             continue
-        if overwrite or not _env(key):
+        if _secrets_path_key(key) or overwrite or not _env(key):
             os.environ[key] = str(value).strip()
             bound[key] = str(value).strip()
     return bound
@@ -583,7 +625,6 @@ def export_shell_env(pull: dict[str, Any] | None = None) -> str:
 
 def main() -> int:
     info = pull_realworld_information()
-    bind_operation_environ(info)
     print(export_shell_env(info), end="")
     return 0
 
