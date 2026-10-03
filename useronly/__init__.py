@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 __all__ = [
+    "LaunchNodeUser",
     "LaunchUser",
+    "frontend_access",
     "install",
+    "internal_routes",
     "pull_information",
     "user_gui",
     "user_secrets",

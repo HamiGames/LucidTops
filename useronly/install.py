@@ -17,6 +17,7 @@ install protocol:
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import platform
 import shutil
@@ -324,36 +325,236 @@ def allowlist_tor_browser_firewall(browser_bin: str | None = None) -> dict[str, 
     }
 
 
+RDP_OPERATING_IMAGES = ("pickme/lucidtops_rdp:v1.0.0",)
+
+
+def _import_tkinter() -> bool:
+    try:
+        import tkinter  # noqa: F401
+    except Exception:  # noqa: BLE001 — presence check only
+        return False
+    return True
+
+
+def _install_with_manager(info: dict[str, Any], packages: list[str]) -> list[str]:
+    managers: dict[str, str] = dict(info.get("package_managers") or {})
+    system = str(info.get("system") or platform.system()).lower()
+    if system == "windows":
+        if managers.get("winget"):
+            command = [managers["winget"], "install", "-e", "--id", packages[0]]
+        elif managers.get("choco"):
+            command = [managers["choco"], "install", packages[0], "-y"]
+        else:
+            return []
+    elif system == "darwin":
+        if not managers.get("brew"):
+            return []
+        command = [managers["brew"], "install", *packages]
+    else:
+        manager = managers.get("apt-get") or managers.get("apt") or managers.get("dnf")
+        if manager:
+            command = [manager, "install", "-y", *packages]
+        elif managers.get("pacman"):
+            command = [managers["pacman"], "-S", "--noconfirm", *packages]
+        elif managers.get("brew"):
+            command = [managers["brew"], "install", *packages]
+        else:
+            return []
+    _run(command)
+    return command
+
+
+def ensure_docker_installed(info: dict[str, Any]) -> dict[str, Any]:
+    docker = str(info.get("docker_bin") or "") or (
+        shutil.which("docker") or shutil.which("docker.exe") or ""
+    )
+    if docker and Path(docker).exists() or shutil.which("docker") or shutil.which("docker.exe"):
+        found = docker or shutil.which("docker") or shutil.which("docker.exe") or ""
+        return {"status": "present", "docker_bin": found, "checked_at": utc_now()}
+    system = str(info.get("system") or platform.system()).lower()
+    packages = ["Docker.DockerDesktop"] if system == "windows" else ["docker.io"]
+    if system == "darwin":
+        packages = ["--cask", "docker"]
+    command = _install_with_manager(info, packages)
+    found = shutil.which("docker") or shutil.which("docker.exe") or ""
+    if not found:
+        raise RuntimeError(
+            "Docker missing after install attempt — install Docker on this console and re-run Install"
+        )
+    return {
+        "status": "installed",
+        "docker_bin": found,
+        "install_command": command,
+        "checked_at": utc_now(),
+    }
+
+
+def ensure_python_installed(info: dict[str, Any]) -> dict[str, Any]:
+    found = str(info.get("python_bin") or "") or (
+        shutil.which("python3") or shutil.which("python") or shutil.which("python.exe") or ""
+    )
+    if found:
+        return {"status": "present", "python_bin": found, "checked_at": utc_now()}
+    system = str(info.get("system") or platform.system()).lower()
+    packages = ["Python.Python.3.12"] if system == "windows" else ["python3"]
+    command = _install_with_manager(info, packages)
+    found = shutil.which("python3") or shutil.which("python") or shutil.which("python.exe") or ""
+    if not found:
+        raise RuntimeError("Python interpreter missing on this console")
+    return {
+        "status": "installed",
+        "python_bin": found,
+        "install_command": command,
+        "checked_at": utc_now(),
+    }
+
+
+def ensure_node_installed(info: dict[str, Any]) -> dict[str, Any]:
+    found = str(info.get("node_bin") or "") or (
+        shutil.which("node") or shutil.which("node.exe") or ""
+    )
+    if found:
+        return {"status": "present", "node_bin": found, "checked_at": utc_now()}
+    system = str(info.get("system") or platform.system()).lower()
+    packages = ["OpenJS.NodeJS"] if system == "windows" else ["nodejs"]
+    command = _install_with_manager(info, packages)
+    found = shutil.which("node") or shutil.which("node.exe") or ""
+    if not found:
+        raise RuntimeError("JavaScript interpreter (node) missing on this console")
+    return {
+        "status": "installed",
+        "node_bin": found,
+        "install_command": command,
+        "checked_at": utc_now(),
+    }
+
+
+def ensure_tk_installed(info: dict[str, Any]) -> dict[str, Any]:
+    if _import_tkinter():
+        return {"status": "present", "checked_at": utc_now()}
+    system = str(info.get("system") or platform.system()).lower()
+    packages = ["python3-tk"] if system not in {"windows", "darwin"} else ["python-tk"]
+    if system == "windows":
+        raise RuntimeError(
+            "tkinter missing from this Python install — reinstall Python with Tcl/Tk"
+        )
+    command = _install_with_manager(info, packages)
+    if not _import_tkinter():
+        raise RuntimeError("tkinter still missing after install attempt")
+    return {"status": "installed", "install_command": command, "checked_at": utc_now()}
+
+
+def ensure_driver_directory(info: dict[str, Any]) -> dict[str, Any]:
+    raw = str(info.get("driver_dir") or "")
+    if not raw:
+        raise RuntimeError("driver directory path missing from the console pull")
+    path = Path(raw)
+    path.mkdir(parents=True, exist_ok=True)
+    if not path.is_dir():
+        raise RuntimeError(f"driver directory was not created at {path.as_posix()}")
+    return {"status": "ready", "driver_dir": path.as_posix(), "checked_at": utc_now()}
+
+
+def _docker_bin() -> str:
+    found = shutil.which("docker") or shutil.which("docker.exe") or ""
+    if not found:
+        raise RuntimeError("docker binary missing — Install must finish before image checks")
+    return found
+
+
+def ensure_image(tag: str) -> dict[str, Any]:
+    docker = _docker_bin()
+    inspect = _run([docker, "image", "inspect", tag])
+    if inspect.returncode == 0:
+        return {"image": tag, "status": "present", "checked_at": utc_now()}
+    pulled = _run([docker, "pull", tag])
+    if pulled.returncode != 0:
+        raise RuntimeError(
+            f"image {tag} missing and pull failed (exit {pulled.returncode})"
+        )
+    return {"image": tag, "status": "installed", "checked_at": utc_now()}
+
+
+def ensure_operating_images() -> dict[str, Any]:
+    """Pull the RDP image. The Node image is pulled only after a verified NodeID."""
+    reports = [ensure_image(tag) for tag in RDP_OPERATING_IMAGES]
+    return {"images": reports, "checked_at": utc_now()}
+
+
+def install_marker_path(info: dict[str, Any] | None = None) -> Path:
+    raw = ""
+    if info is not None:
+        raw = str(info.get("driver_dir") or "")
+    if not raw:
+        raw = _env("DRIVER_DIR")
+    if not raw:
+        raise RuntimeError("DRIVER_DIR missing — run Install on this console")
+    return Path(raw) / "install.state"
+
+
+def install_is_complete() -> bool:
+    try:
+        path = install_marker_path()
+    except RuntimeError:
+        return False
+    if not path.is_file():
+        return False
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return bool(isinstance(loaded, dict) and loaded.get("status") == "installed")
+
+
 def install_user_environment() -> dict[str, Any]:
+    """Check and install UserDesign prerequisites, then RDP and operations content.
+
+    Runs to completion before the GUI offers User or NodeUser.
+    Does not start the Proxy container and does not open a Frontend window.
+    """
     pull = _pull.pull_realworld_information()
     _pull.bind_operation_environ(pull)
     secrets_built = _pull.build_all_useronly_secrets(pull)
     load_user_secrets(reload=True)
 
+    driver = ensure_driver_directory(pull)
     tor_report = ensure_tor_installed(pull)
-    # Re-pull after possible install so commands/lists match live binaries.
+    docker_report = ensure_docker_installed(pull)
+    python_report = ensure_python_installed(pull)
+    node_report = ensure_node_installed(pull)
+    tk_report = ensure_tk_installed(pull)
+
     pull = _pull.pull_realworld_information()
     _pull.bind_operation_environ(pull, overwrite=True)
     secrets_built = _pull.build_all_useronly_secrets(pull)
     load_user_secrets(reload=True)
-
     firewall = allowlist_tor_browser_firewall(
         tor_report.get("tor_browser_bin") or get_user_secret("USER_TOR_BROWSER_BIN")
     )
-
-    programs = verify_required_programs()
-    files = verify_required_files()
     secrets = ensure_user_secrets_present()
+    hardware = {
+        "HOSTNAME_CONSOLE": str(pull.get("hostname") or ""),
+        "HOST_MACHINE_ID": str(pull.get("machine_id") or ""),
+        "HARDWARE_PRIMARY_MAC": str(pull.get("primary_mac") or ""),
+        "HARDWARE_PRIMARY_IP": str(pull.get("primary_ip") or ""),
+        "HARDWARE_PRIMARY_IFACE": str(pull.get("primary_iface") or ""),
+    }
+    request_posts = {
+        role: _user_secrets.write_request_posts(
+            Path(str(driver["driver_dir"])), role=role, hardware=hardware
+        )
+        for role in ("user", "nodeuser")
+    }
+    images = ensure_operating_images()
 
-    launch_cmd = require_user_secret("USER_BACKGROUND_LAUNCH_COMMAND")
-    background_proc = subprocess.Popen(  # noqa: S602 — command from secrets at operation time
-        launch_cmd, shell=True
+    marker = install_marker_path(pull)
+    marker.write_text(
+        json.dumps({"status": "installed", "installed_at": utc_now()}, indent=2) + "\n",
+        encoding="utf-8",
     )
 
     return {
         "status": "installed",
-        "programs": programs,
-        "files": files,
         "secrets": secrets,
         "secrets_built": {
             "user": secrets_built["user"].get("USER_SECRETS_FILE", ""),
@@ -363,13 +564,14 @@ def install_user_environment() -> dict[str, Any]:
             ),
             "id": id_secrets_path().as_posix(),
         },
+        "driver": driver,
         "tor": tor_report,
         "firewall": firewall,
-        "background_launch": launch_cmd,
-        "background_pid": background_proc.pid,
-        "home_page": require_user_secret("FRONTEND_HOME_PAGE_PATH"),
-        "register_page": require_user_secret("FRONTEND_REGISTER_PATH"),
-        "hardware_ip": require_user_secret("HARDWARE_PRIMARY_IP"),
-        "hardware_mac": require_user_secret("HARDWARE_PRIMARY_MAC"),
+        "request_posts": request_posts,
+        "docker": docker_report,
+        "python": python_report,
+        "javascript": node_report,
+        "tk": tk_report,
+        "images": images,
         "installed_at": utc_now(),
     }

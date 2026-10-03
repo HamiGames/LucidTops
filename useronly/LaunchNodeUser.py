@@ -91,24 +91,16 @@ def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _require_operations_image() -> None:
-    docker = shutil.which("docker") or shutil.which("docker.exe")
-    if not docker:
-        raise RuntimeError("Docker missing — re-run Install")
-    inspect = _run([docker, "image", "inspect", "lucid-operations:v1.0.0"])
-    if inspect.returncode != 0:
-        raise RuntimeError(
-            "operations container image lucid-operations:v1.0.0 is not installed"
-        )
-
-
 def attach_node_container(node_id: str, routes: dict[str, str]) -> dict[str, Any]:
-    """Attach the downloadable Node container only for a registered NodeID."""
+    """Attach the downloadable Node container only after a verified NodeID."""
+    del routes
     if not node_id.strip():
         return {"status": "not_attached", "reason": "NodeID has not been returned by the MasterServer"}
+    _user_secrets.verify_id_secrets()
     image = _routes.node_image_name()
     if not image:
         raise RuntimeError("Node image name missing from the internalized NodeUser route set")
+    _install.ensure_image(image)
     docker = shutil.which("docker") or shutil.which("docker.exe")
     if not docker:
         raise RuntimeError("Docker missing — cannot attach the Node container")
@@ -119,11 +111,7 @@ def attach_node_container(node_id: str, routes: dict[str, str]) -> dict[str, Any
         if started.returncode != 0:
             raise RuntimeError(f"Node container {container_name} did not start")
         return {"status": "started", "container": container_name, "image": image}
-    command = [docker, "run", "-d", "--name", container_name]
-    network = routes.get("DOCKER_NETWORK_NAME", "").strip()
-    if network:
-        command.extend(["--network", network])
-    command.append(image)
+    command = [docker, "run", "-d", "--name", container_name, image]
     created = _run(command)
     if created.returncode != 0:
         raise RuntimeError(
@@ -169,40 +157,72 @@ def _post(
 ) -> dict[str, Any]:
     _require_install()
     ensure_user_secrets_from_pull()
-    _require_operations_image()
     if not email.strip() or not password:
         raise RuntimeError("Email and password are required")
     routes = _access.routes_for(True)
     command = require_user_secret("USER_TOR_START_COMMAND")
     tor = _access.start_tor_background(command)
-    if action == "register":
-        path = _access.registration_path(routes, nodeuser=True)
-        body = _register_body(
-            email=email.strip(),
-            password=password,
-            linked_user_id=linked_user_id,
+    try:
+        if action == "register":
+            path = _access.registration_path(routes, nodeuser=True)
+            body = _register_body(
+                email=email.strip(),
+                password=password,
+                linked_user_id=linked_user_id,
+            )
+        else:
+            _user_secrets.verify_id_secrets()
+            path = _access.login_path(routes, nodeuser=True)
+            body = _login_body(email=email.strip(), password=password)
+        submitted = _access.submit_validation(
+            routes,
+            path=path,
+            body=body,
+            driver_dir=_driver_dir(),
+            file_name=file_name,
         )
-    else:
-        path = _access.login_path(routes, nodeuser=True)
-        body = _login_body(email=email.strip(), password=password)
-    submitted = _access.submit_validation(
-        routes,
-        path=path,
-        body=body,
-        driver_dir=_driver_dir(),
-        file_name=file_name,
-    )
-    stored = _user_secrets.apply_master_identity(submitted["reply"], nodeuser=True)
-    _user_secrets.verify_id_secrets()
-    attached = attach_node_container(stored.get("NODE_ID", ""), routes)
-    state_path = _access.write_session_state(
-        {
-            "status": "connected",
-            "branch": "nodeuser",
-            "tor_pid": tor.get("pid"),
-            "launched_at": _access.utc_now(),
-        }
-    )
+        stored = _user_secrets.apply_master_identity(submitted["reply"], nodeuser=True)
+        token_id = stored.get("TOKEN_ID", "")
+        session_id = str(
+            submitted["reply"].get("SessionID")
+            or submitted["reply"].get("session_id")
+            or ""
+        ).strip()
+        if token_id and session_id:
+            handshake_reply = _access.handshake(
+                routes,
+                branch="nodeuser",
+                hardware=_hardware(),
+                token_id=token_id,
+                session_id=session_id,
+            )
+            _access.validate_selected_files(
+                routes, handshake_reply, [submitted["post_file"]]
+            )
+        page = routes.get("FRONTEND_HOME_PAGE_PATH") or "/home.html"
+        if action == "register":
+            page = routes.get("NODEUSER_REGISTER_PATH") or routes.get("FRONTEND_REGISTER_PATH") or page
+        window = _access.open_foreground_window(
+            routes,
+            page=page,
+            browser_command=require_user_secret("USER_TOR_BROWSER_COMMAND"),
+        )
+        attached: dict[str, Any] = {"status": "not_attached"}
+        if stored.get("NODE_ID"):
+            attached = attach_node_container(stored["NODE_ID"], routes)
+        state_path = _access.write_session_state(
+            {
+                "status": "connected",
+                "branch": "nodeuser",
+                "tor_pid": tor.get("pid"),
+                "browser_pid": window.get("pid"),
+                "launched_at": _access.utc_now(),
+            }
+        )
+    except Exception:
+        if tor.get("pid"):
+            _access.terminate_pid(int(tor["pid"]))
+        raise
     return {
         "status": "registered" if action == "register" else "connected",
         "branch": "nodeuser",
@@ -229,7 +249,6 @@ def connect_nodeuser(*, email: str, password: str) -> dict[str, Any]:
     ensure_user_secrets_from_pull()
     if get_user_secret("NODEUSER").lower() == "false" and get_user_secret("USER_ID"):
         raise RuntimeError("NodeUser route refused — this console identity is a User")
-    _user_secrets.verify_id_secrets()
     if not get_user_secret("TOKEN_ID"):
         raise RuntimeError("Login without a TokenID is rejected")
     if not get_user_secret("NODE_ID"):

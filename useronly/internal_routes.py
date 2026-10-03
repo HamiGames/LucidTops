@@ -17,9 +17,10 @@ USERONLY_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = USERONLY_DIR.parent
 INTERNAL_DIR = USERONLY_DIR / "internal"
 SOURCE_DIR = INTERNAL_DIR / "source"
-ROUTE_DIR = INTERNAL_DIR / "routes"
-USER_ROUTE_FILE = ROUTE_DIR / "user.routes"
-NODEUSER_ROUTE_FILE = ROUTE_DIR / "nodeuser.routes"
+INTERNAL_CONFIG_NAME = "internal.routes"
+RDP_IMAGE = "pickme/lucidtops_rdp:v1.0.0"
+PI_SECRETS_DIR = Path("/mnt/myssd/LucidTops/useronly/secrets")
+SERVER_SECRETS_DIR = Path("/mnt/myssd/Server/Secrets")
 
 _SKIP_PARTS = (
     "CLEARNET",
@@ -102,14 +103,13 @@ def _write_route_file(path: Path, values: dict[str, str], *, label: str) -> None
 
 
 def _candidate_secret_dirs(lucid_root: Path | None) -> list[Path]:
-    dirs: list[Path] = []
-    for key in ("SECRETS_DIR", "SERVER_SECRETS_DIR"):
-        raw = _env(key)
-        if raw:
-            dirs.append(Path(raw).expanduser())
+    """Creation-time route files. The Pi path is first; the image copy is the fallback."""
+    dirs: list[Path] = [SERVER_SECRETS_DIR, SOURCE_DIR]
+    raw = _env("SERVER_SECRETS_DIR")
+    if raw:
+        dirs.append(Path(raw).expanduser())
     dirs.extend(
         [
-            Path("/mnt/myssd/Server/Secrets"),
             Path("/mnt/myssd/LucidTops/Server/Secrets"),
             PROJECT_ROOT / "LucidTops" / "Server" / "Secrets",
             PROJECT_ROOT / "Server" / "Secrets",
@@ -212,40 +212,170 @@ def _copy_source(src: Path, dest: Path) -> None:
     dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
 
 
-def ingest_route_sets(lucid_root: Path | None = None) -> dict[str, str]:
-    """Read creation secrets and write the two internal route files."""
+def _first_path(source: dict[str, str], *keys: str) -> str:
+    for key in keys:
+        value = source.get(key, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def explicit_route_criteria(source: dict[str, str]) -> dict[str, str]:
+    """Copy the cross-container criteria this container is allowed to keep."""
+    criteria: dict[str, str] = {"RDP_IMAGE": RDP_IMAGE}
+    onion = _first_path(source, "FRONTEND_ONION", "ONION_FRONTEND")
+    if onion.endswith(".onion"):
+        criteria["FRONTEND_ONION"] = onion.split("/")[0].lower()
+    api = _first_path(source, "API_BASE_PATH", "PROXY_API_PREFIX")
+    handshake = _first_path(source, "HANDSHAKE_PATH", "FRONTEND_HANDSHAKE_PATH")
+    if not handshake and api.startswith("/"):
+        handshake = api.rstrip("/") + "/connect-handshake"
+    if handshake.startswith("/"):
+        criteria["HANDSHAKE_PATH"] = handshake
+    node_target = _first_path(source, "VALIDATION_NODE_TARGET", "NODE_BASE_PATH")
+    if node_target.startswith("/"):
+        criteria["VALIDATION_NODE_TARGET"] = node_target
+    backend_target = _first_path(
+        source, "VALIDATION_BACKEND_TARGET", "BACKEND_VALIDATION_PATH", "API_BASE_PATH"
+    )
+    if backend_target.startswith("/"):
+        criteria["VALIDATION_BACKEND_TARGET"] = backend_target
+    proxy_route = _first_path(source, "PROXY_FOREGROUND_PATH", "PROXY_API_PREFIX", "API_BASE_PATH")
+    if proxy_route.startswith("/"):
+        criteria["PROXY_FOREGROUND_PATH"] = proxy_route
+    userdb = _first_path(source, "USERDB_VERIFY_PATH")
+    if not userdb and api.startswith("/"):
+        userdb = api.rstrip("/") + "/LucidTops_UserDB"
+    if userdb.startswith("/"):
+        criteria["USERDB_VERIFY_PATH"] = userdb
+    for key in _NODE_IMAGE_KEYS:
+        image = source.get(key, "").strip()
+        if image:
+            criteria["NODE_IMAGE"] = image
+            break
+    return criteria
+
+
+def _config_targets(secrets_dir: Path | None) -> list[Path]:
+    targets: list[Path] = []
+    if secrets_dir is not None:
+        targets.append(secrets_dir / INTERNAL_CONFIG_NAME)
+    env_dir = _env("SECRETS_DIR")
+    if env_dir:
+        targets.append(Path(env_dir).expanduser() / INTERNAL_CONFIG_NAME)
+    if os.name != "nt" or PI_SECRETS_DIR.exists():
+        targets.append(PI_SECRETS_DIR / INTERNAL_CONFIG_NAME)
+    seen: set[str] = set()
+    ordered: list[Path] = []
+    for path in targets:
+        key = path.as_posix()
+        if key not in seen:
+            seen.add(key)
+            ordered.append(path)
+    return ordered
+
+
+def _write_internal_config(path: Path, user: dict[str, str], nodeuser: dict[str, str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "# LucidTops internal.routes",
+        "# Runtime route source for this container. Not shown in the GUI.",
+        "[user]",
+    ]
+    for key in sorted(user):
+        if user[key]:
+            lines.append(f"{key}={user[key]}")
+    lines.append("[nodeuser]")
+    for key in sorted(nodeuser):
+        if nodeuser[key]:
+            lines.append(f"{key}={nodeuser[key]}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def parse_internal_config(path: Path) -> dict[str, dict[str, str]]:
+    sections: dict[str, dict[str, str]] = {"user": {}, "nodeuser": {}}
+    current = ""
+    if not path.is_file():
+        return sections
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("[") and stripped.endswith("]"):
+            name = stripped[1:-1].strip().lower()
+            current = name if name in sections else ""
+            continue
+        if not current or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        key = key.strip().upper()
+        if key:
+            sections[current][key] = value.strip()
+    return sections
+
+
+def locate_internal_config() -> Path | None:
+    for path in _config_targets(None):
+        if path.is_file():
+            return path
+    return None
+
+
+def ingest_route_sets(
+    lucid_root: Path | None = None, secrets_dir: Path | None = None
+) -> dict[str, str]:
+    """Read creation secrets and write internal.routes under the useronly secrets directory."""
     proxy_path, master_path = locate_creation_secrets(lucid_root)
     merged = parse_secrets_file(proxy_path)
     merged.update(parse_secrets_file(master_path))
     user, nodeuser = split_route_sets(merged)
+    criteria = explicit_route_criteria(merged)
+    for key, value in criteria.items():
+        if key == "NODE_IMAGE":
+            nodeuser[key] = value
+            continue
+        user[key] = value
+        nodeuser[key] = value
     _copy_source(proxy_path, SOURCE_DIR / "proxy.secrets")
     _copy_source(master_path, SOURCE_DIR / "Master.secrets")
-    _write_route_file(USER_ROUTE_FILE, user, label="user routes")
-    _write_route_file(NODEUSER_ROUTE_FILE, nodeuser, label="nodeuser routes")
+    written = ""
+    for target in _config_targets(secrets_dir):
+        try:
+            _write_internal_config(target, user, nodeuser)
+        except OSError:
+            continue
+        written = target.as_posix()
+    if not written:
+        raise RuntimeError(
+            "internal.routes could not be written under the useronly secrets directory"
+        )
     return {
         "proxy_secrets": (SOURCE_DIR / "proxy.secrets").as_posix(),
         "master_secrets": (SOURCE_DIR / "Master.secrets").as_posix(),
-        "user_route_file": USER_ROUTE_FILE.as_posix(),
-        "nodeuser_route_file": NODEUSER_ROUTE_FILE.as_posix(),
+        "internal_routes": written,
+        "user_route_file": written,
+        "nodeuser_route_file": written,
     }
 
 
 def load_route_set(branch: str) -> dict[str, str]:
-    """Return one branch's route file. Refuses the other branch's file."""
+    """Return one branch from internal.routes. Refuses the other branch's section."""
     normalized = branch.strip().lower()
     if normalized in {"user", "useronly", "false"}:
-        path = USER_ROUTE_FILE
         label = "user"
     elif normalized in {"node", "nodeuser", "true"}:
-        path = NODEUSER_ROUTE_FILE
         label = "nodeuser"
     else:
         raise RuntimeError(f"unknown route branch '{branch}'")
-    if not path.is_file():
+    path = locate_internal_config()
+    if path is None:
         ingest_route_sets()
-    values = parse_secrets_file(path)
+        path = locate_internal_config()
+    if path is None:
+        raise RuntimeError("internal.routes missing from the useronly secrets directory")
+    values = parse_internal_config(path).get(label) or {}
     if not values:
-        raise RuntimeError(f"{label} route set missing at {path.as_posix()}")
+        raise RuntimeError(f"{label} route set missing in {path.as_posix()}")
     return values
 
 

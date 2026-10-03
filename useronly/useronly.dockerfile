@@ -13,8 +13,10 @@
 #     -t lucid-useronly:v1.0.0 \
 #     /mnt/myssd/LucidTops
 #
-# Secrets mount (§16.1):
-#   /mnt/myssd/LucidTops/useronly/secrets/*.secrets
+# Secrets (User.txt / containers.txt):
+#   Runtime connection file inside the image: /app/secrets/userGui.secrets
+#   Built at image creation from Server/Secrets/proxy.secrets and Master.secrets.
+#   Other user *.secrets and *.json stay in the local LucidTops program folder.
 #
 # RULES:
 # - no hardcoded values; all values created at time of operation via pull_information.
@@ -23,7 +25,7 @@
 # - NO pull from GIT repository.
 #
 # Rebuild rule (§16.7): if image exists, wipe generated content and volumes before rebuild.
-# Networks (§16.4): created/joined at operation via dockercmd.txt using names from secrets.
+# No published ports. No DockerDNS network join.
 # Target host: Raspberry Pi (pi-5) via SSH. Operation originates from cd /mnt/myssd/LucidTops.
 
 FROM python:3.11-slim-bookworm
@@ -48,21 +50,33 @@ RUN test -s /app/useronly/requirements.txt \
 
 COPY useronly /app/useronly
 
-RUN test -f /app/useronly/user_gui.py \
+# Creation-time routes. Both files must be in the build context
+# (Server/Secrets on /mnt/myssd/LucidTops). The build fails when either is missing.
+COPY Server/Secrets/proxy.secrets /app/useronly/internal/source/proxy.secrets
+COPY Server/Secrets/Master.secrets /app/useronly/internal/source/Master.secrets
+
+RUN test -s /app/useronly/internal/source/proxy.secrets \
+ && test -s /app/useronly/internal/source/Master.secrets \
+ && test -f /app/useronly/user_gui.py \
  && test -f /app/useronly/user_secrets.py \
  && test -f /app/useronly/pull_information.py \
+ && test -f /app/useronly/internal_routes.py \
+ && test -f /app/useronly/frontend_access.py \
  && test -f /app/useronly/LaunchUser.py \
+ && test -f /app/useronly/LaunchNodeUser.py \
  && test -f /app/useronly/install.py \
  && test -f /app/useronly/__main__.py \
- && test -s /app/useronly/requirements.txt
+ && test -s /app/useronly/requirements.txt \
+ && mkdir -p /app/secrets \
+ && python -c "import sys; sys.path.insert(0, '/app/useronly'); from pull_information import write_usergui_secrets_at_image_build; write_usergui_secrets_at_image_build()" \
+ && test -s /app/secrets/userGui.secrets
 
 ENV LUCID_TOPS_ROOT=/mnt/myssd/LucidTops
-ENV SECRETS_DIR=/mnt/myssd/LucidTops/useronly/secrets
+ENV SECRETS_DIR=/app/secrets
+ENV USER_SECRETS_FILE=/app/secrets/userGui.secrets
+ENV USER_SECRETS_NAME=userGui.secrets
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
-
-# Secrets directory is expected at runtime (bind-mount); create path for validation.
-RUN mkdir -p /mnt/myssd/LucidTops/useronly/secrets /mnt/myssd/LucidTops
 
 # WORKDIR matches useronly Python package; PYTHONPATH=/app enables python -m useronly (§16.3)
 WORKDIR /app/useronly

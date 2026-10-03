@@ -1,7 +1,7 @@
-"""LucidTops UsersOnly standalone console GUI.
+"""LucidTops UsersOnly selector.
 
-Connect / Disconnect / Install against the Frontend *.onion via TorBrowser.
-All operational values come from pull_information + secrets at time of operation.
+Tkinter only. Colors match frontend/webpage/assets/lucid-theme.css.
+The window chooses User or NodeUser. It does not show routes, onions, or secrets.
 """
 
 from __future__ import annotations
@@ -17,18 +17,22 @@ _DIR = Path(__file__).resolve().parent
 if str(_DIR) not in sys.path:
     sys.path.insert(0, str(_DIR))
 
+BG = "#0a0c0f"
+PANEL = "#12161c"
+BG_2 = "#1a212b"
+TEXT = "#e8eef2"
+MUTED = "#9aa8b5"
+ACCENT = "#3dceb4"
+ACCENT_2 = "#6fd3ff"
+DANGER = "#ff6b7a"
+OK = "#5dde9a"
+WARN = "#f0c35a"
+DISPLAY_FONT = ("Trebuchet MS", 28, "bold")
+BODY_FONT = ("Segoe UI", 12)
 
-# Visual palette — LucidTops UsersOnly
-BG = "#0D0D0D"
-TEXT = "#FFFFFF"
-ACCENT_GREEN = "#00FF08"
-ACCENT_BLUE = "#00E1FF"
-HOVER_PINK = "#F702D7"
 
-
-def _load_local(module_name: str, filename: str | None = None) -> Any:
-    file_name = filename or f"{module_name}.py"
-    path = _DIR / file_name
+def _load_local(module_name: str) -> Any:
+    path = _DIR / f"{module_name}.py"
     registry = f"lucid_useronly_{module_name}"
     if registry in sys.modules:
         return sys.modules[registry]
@@ -43,41 +47,44 @@ def _load_local(module_name: str, filename: str | None = None) -> Any:
 
 
 _install = _load_local("install")
-_launch = _load_local("LaunchUser")
+_launch_user = _load_local("LaunchUser")
+_launch_node = _load_local("LaunchNodeUser")
 _secrets = _load_local("user_secrets")
 
 
-def _neon_button(
+def _button(
     parent: tk.Misc,
     *,
     text: str,
     command: Callable[[], None],
     accent: str,
 ) -> tk.Button:
-    """Flat accent button with vivid pink hover."""
     button = tk.Button(
         parent,
         text=text,
         command=command,
         bg=accent,
         fg=BG,
-        activebackground=HOVER_PINK,
-        activeforeground=TEXT,
-        disabledforeground=BG,
+        activebackground=ACCENT_2,
+        activeforeground=BG,
         relief="flat",
         bd=0,
         highlightthickness=0,
-        padx=14,
-        pady=10,
+        padx=12,
+        pady=8,
         cursor="hand2",
-        font=("Segoe UI", 16, "bold"),
+        font=("Segoe UI", 12, "bold"),
     )
 
     def on_enter(_: tk.Event[Any]) -> None:
-        button.configure(bg=HOVER_PINK, fg=TEXT)
+        if str(button.cget("state")) == "disabled":
+            return
+        button.configure(bg=ACCENT_2)
 
     def on_leave(_: tk.Event[Any]) -> None:
-        button.configure(bg=accent, fg=BG)
+        if str(button.cget("state")) == "disabled":
+            return
+        button.configure(bg=accent)
 
     button.bind("<Enter>", on_enter)
     button.bind("<Leave>", on_leave)
@@ -87,167 +94,209 @@ def _neon_button(
 class UsersOnlyApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("LucidTops Remote Desktop")
-        self.minsize(520, 340)
+        self.title("LucidTops")
+        self.minsize(560, 460)
         self.configure(bg=BG)
-        try:
-            self.option_add("*Background", BG)
-            self.option_add("*Foreground", TEXT)
-        except tk.TclError:
-            pass
+        self._node_connect: tk.Button | None = None
+        self._node_register: tk.Button | None = None
         self._build()
         self.after(100, self.refresh_status)
 
     def _build(self) -> None:
-        outer = tk.Frame(self, bg=BG, padx=20, pady=20)
+        outer = tk.Frame(self, bg=BG, padx=24, pady=24)
         outer.grid(row=0, column=0, sticky="nsew")
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
         outer.columnconfigure(0, weight=1)
 
-        brand = tk.Label(
+        tk.Label(
             outer,
-            text="LucidTops Remote Desktop",
-            font=("Segoe UI", 35, "bold"),
+            text="LucidTops",
+            font=DISPLAY_FONT,
             bg=BG,
-            fg=ACCENT_GREEN,
-        )
-        brand.grid(row=0, column=0, sticky="w")
-
-        subtitle = tk.Label(
+            fg=ACCENT,
+        ).grid(row=0, column=0, sticky="w")
+        tk.Label(
             outer,
-            text="Welcome to Lucidtops remote desktop application",
-            font=("Segoe UI", 16),
+            text="Install, then connect or register as a User or a NodeUser.",
+            font=BODY_FONT,
             bg=BG,
-            fg=ACCENT_BLUE,
-        )
-        subtitle.grid(row=1, column=0, sticky="w", pady=(6, 14))
+            fg=ACCENT_2,
+        ).grid(row=1, column=0, sticky="w", pady=(4, 16))
 
-        self.status_var = tk.StringVar(value="Pulling console hardware status…")
-        status = tk.Label(
+        form = tk.Frame(outer, bg=PANEL, padx=16, pady=16)
+        form.grid(row=2, column=0, sticky="ew")
+        form.columnconfigure(1, weight=1)
+
+        self.email_var = tk.StringVar()
+        self.password_var = tk.StringVar()
+        self.linked_var = tk.StringVar()
+        fields = (
+            ("Email", self.email_var, False),
+            ("Password", self.password_var, True),
+            ("Linked UserID", self.linked_var, False),
+        )
+        for index, (label, variable, secret) in enumerate(fields):
+            tk.Label(
+                form, text=label, bg=PANEL, fg=MUTED, font=BODY_FONT
+            ).grid(row=index, column=0, sticky="w", padx=(0, 12), pady=4)
+            tk.Entry(
+                form,
+                textvariable=variable,
+                show="*" if secret else "",
+                bg=BG_2,
+                fg=TEXT,
+                insertbackground=TEXT,
+                relief="flat",
+                font=BODY_FONT,
+            ).grid(row=index, column=1, sticky="ew", pady=4)
+
+        self.status_var = tk.StringVar(value="Not installed.")
+        self.status_label = tk.Label(
             outer,
             textvariable=self.status_var,
-            wraplength=480,
+            wraplength=500,
             justify="left",
-            font=("Segoe UI", 12),
+            font=BODY_FONT,
             bg=BG,
-            fg=TEXT,
+            fg=WARN,
         )
-        status.grid(row=2, column=0, sticky="ew", pady=(0, 16))
-
-        detail = tk.Frame(outer, bg=BG)
-        detail.grid(row=3, column=0, sticky="ew")
-        detail.columnconfigure(1, weight=1)
-
-        self.ip_var = tk.StringVar(value="—")
-        self.mac_var = tk.StringVar(value="—")
-        self.onion_var = tk.StringVar(value="—")
-        self.role_var = tk.StringVar(value="—")
-        self.conn_var = tk.StringVar(value="disconnected")
-
-        rows = (
-            ("Hardware IP", self.ip_var),
-            ("Hardware MAC", self.mac_var),
-            ("Frontend Address", self.onion_var),
-            ("Role", self.role_var),
-            ("Connection", self.conn_var),
-        )
-        self._value_labels: dict[str, tk.Label] = {}
-        for index, (label, variable) in enumerate(rows):
-            tk.Label(
-                detail,
-                text=f"{label}:",
-                font=("Segoe UI", 12),
-                bg=BG,
-                fg=ACCENT_BLUE,
-            ).grid(row=index, column=0, sticky="w", padx=(0, 12), pady=3)
-            value_label = tk.Label(
-                detail,
-                textvariable=variable,
-                font=("Segoe UI", 12),
-                bg=BG,
-                fg=TEXT,
-            )
-            value_label.grid(row=index, column=1, sticky="w", pady=3)
-            self._value_labels[label] = value_label
-
-        accent_bar = tk.Frame(outer, bg=ACCENT_GREEN, height=2)
-        accent_bar.grid(row=4, column=0, sticky="ew", pady=(18, 0))
+        self.status_label.grid(row=3, column=0, sticky="ew", pady=(16, 8))
 
         actions = tk.Frame(outer, bg=BG)
-        actions.grid(row=5, column=0, sticky="ew", pady=(16, 0))
+        actions.grid(row=4, column=0, sticky="ew")
         for col in range(3):
             actions.columnconfigure(col, weight=1)
+        _button(actions, text="Install", command=self.on_install, accent=ACCENT_2).grid(
+            row=0, column=0, columnspan=3, sticky="ew", pady=(0, 8)
+        )
+        _button(
+            actions, text="Connect as User", command=self.on_connect_user, accent=ACCENT
+        ).grid(row=1, column=0, sticky="ew", padx=(0, 6), pady=4)
+        _button(
+            actions, text="Register as User", command=self.on_register_user, accent=ACCENT
+        ).grid(row=1, column=1, sticky="ew", padx=6, pady=4)
+        _button(
+            actions, text="Disconnect", command=self.on_disconnect, accent=DANGER
+        ).grid(row=1, column=2, sticky="ew", padx=(6, 0), pady=4)
+        self._node_connect = _button(
+            actions,
+            text="Connect as NodeUser",
+            command=self.on_connect_node,
+            accent=ACCENT_2,
+        )
+        self._node_connect.grid(row=2, column=0, sticky="ew", padx=(0, 6), pady=4)
+        self._node_register = _button(
+            actions,
+            text="Register as NodeUser",
+            command=self.on_register_node,
+            accent=ACCENT_2,
+        )
+        self._node_register.grid(row=2, column=1, columnspan=2, sticky="ew", padx=(6, 0), pady=4)
 
-        _neon_button(
-            actions, text="Install", command=self.on_install, accent=ACCENT_BLUE
-        ).grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        _neon_button(
-            actions, text="Connect", command=self.on_connect, accent=ACCENT_GREEN
-        ).grid(row=0, column=1, sticky="ew", padx=6)
-        _neon_button(
-            actions, text="Disconnect", command=self.on_disconnect, accent=ACCENT_BLUE
-        ).grid(row=0, column=2, sticky="ew", padx=(6, 0))
+    def _credentials(self) -> tuple[str, str]:
+        return self.email_var.get().strip(), self.password_var.get()
+
+    def _run(self, pending: str, action: Callable[[], dict[str, Any]], done: str) -> None:
+        self.status_var.set(pending)
+        self.update_idletasks()
+        try:
+            action()
+        except Exception as exc:  # noqa: BLE001 — show the failure in the window
+            self.status_var.set(f"Failed. {exc}")
+            messagebox.showerror("LucidTops", str(exc))
+            return
+        self.status_var.set(done)
+        self.refresh_status()
 
     def refresh_status(self) -> None:
+        installed = False
+        connected = False
+        branch = ""
         try:
-            _secrets.ensure_user_secrets_from_pull()
-            status = _launch.connection_status()
-            self.ip_var.set(status.get("hardware_ip") or "—")
-            self.mac_var.set(status.get("hardware_mac") or "—")
-            onion_ok = bool(status.get("frontend_onion_configured"))
-            onion_value = _secrets.get_user_secret("FRONTEND_ONION") if onion_ok else ""
-            self.onion_var.set(onion_value or "not configured")
-            role = status.get("user_role") or "—"
-            active = status.get("node_id") or status.get("user_id") or ""
-            self.role_var.set(f"{role}" + (f" ({active})" if active else ""))
-            connected = bool(status.get("connected"))
-            self.conn_var.set("connected" if connected else "disconnected")
-            conn_label = self._value_labels.get("Connection")
-            if conn_label is not None:
-                conn_label.configure(fg=ACCENT_GREEN if connected else TEXT)
-            self.status_var.set("Ready.")
-        except Exception as exc:  # noqa: BLE001 — surface any pull/secrets failure in UI
-            self.status_var.set(f"Status error: {exc}")
+            installed = bool(_install.install_is_complete())
+        except Exception:  # noqa: BLE001 — status stays user-facing
+            installed = False
+        if installed:
+            try:
+                status = _launch_user.connection_status()
+                connected = bool(status.get("connected"))
+                session = status.get("session") if isinstance(status.get("session"), dict) else {}
+                branch = str(session.get("branch") or "")
+            except Exception:  # noqa: BLE001
+                connected = False
+        if connected and branch == "nodeuser":
+            text = "Connected as NodeUser."
+            color = OK
+        elif connected:
+            text = "Connected as User."
+            color = OK
+        elif installed:
+            text = "Ready. Disconnected."
+            color = TEXT
+        else:
+            text = "Not installed."
+            color = WARN
+        self.status_var.set(text)
+        self.status_label.configure(fg=color)
+        allowed = False
+        if installed:
+            try:
+                allowed = bool(_secrets.node_branch_allowed())
+            except Exception:  # noqa: BLE001
+                allowed = False
+        state = "normal" if allowed else "disabled"
+        if self._node_connect is not None:
+            self._node_connect.configure(state=state)
+        if self._node_register is not None:
+            self._node_register.configure(state=state)
 
     def on_install(self) -> None:
-        self.status_var.set("Installing Tor / writing secrets / firewall allowlist…")
-        self.update_idletasks()
-        try:
-            report = _install.install_user_environment()
-            self.status_var.set(
-                f"Installed at {report.get('installed_at')} — "
-                f"Tor={report.get('tor', {}).get('status')} "
-                f"firewall={report.get('firewall', {}).get('status')}"
-            )
-            self.refresh_status()
-        except Exception as exc:  # noqa: BLE001
-            self.status_var.set(f"Install failed: {exc}")
-            messagebox.showerror("Install failed", str(exc))
+        def _install_now() -> dict[str, Any]:
+            return _install.install_user_environment()
 
-    def on_connect(self) -> None:
-        self.status_var.set("Starting Tor and opening Tor Browser…")
-        self.update_idletasks()
-        try:
-            report = _launch.launch_user_session()
-            self.status_var.set(
-                f"Connected — role={report.get('role') or 'n/a'} url={report.get('url')}"
+        self._run("Installing.", _install_now, "Install finished.")
+
+    def on_connect_user(self) -> None:
+        email, password = self._credentials()
+
+        def _connect() -> dict[str, Any]:
+            return _launch_user.connect_user(email=email, password=password)
+
+        self._run("Connecting as User.", _connect, "Connected as User.")
+
+    def on_register_user(self) -> None:
+        email, password = self._credentials()
+
+        def _register() -> dict[str, Any]:
+            return _launch_user.register_user(email=email, password=password)
+
+        self._run("Registering as User.", _register, "Registered as User.")
+
+    def on_connect_node(self) -> None:
+        email, password = self._credentials()
+
+        def _connect() -> dict[str, Any]:
+            return _launch_node.connect_nodeuser(email=email, password=password)
+
+        self._run("Connecting as NodeUser.", _connect, "Connected as NodeUser.")
+
+    def on_register_node(self) -> None:
+        email, password = self._credentials()
+        linked = self.linked_var.get().strip()
+
+        def _register() -> dict[str, Any]:
+            return _launch_node.register_nodeuser(
+                email=email, password=password, linked_user_id=linked
             )
-            self.refresh_status()
-        except Exception as exc:  # noqa: BLE001
-            self.status_var.set(f"Connect failed: {exc}")
-            messagebox.showerror("Connect failed", str(exc))
+
+        self._run("Registering as NodeUser.", _register, "Registered as NodeUser.")
 
     def on_disconnect(self) -> None:
-        self.status_var.set("Disconnecting Tor Browser…")
-        self.update_idletasks()
-        try:
-            report = _launch.disconnect_user_session()
-            self.status_var.set(f"Disconnected at {report.get('disconnected_at')}")
-            self.refresh_status()
-        except Exception as exc:  # noqa: BLE001
-            self.status_var.set(f"Disconnect failed: {exc}")
-            messagebox.showerror("Disconnect failed", str(exc))
+        def _disconnect() -> dict[str, Any]:
+            return _launch_user.disconnect_user_session()
+
+        self._run("Disconnecting.", _disconnect, "Disconnected.")
 
 
 def run_gui() -> int:

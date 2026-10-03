@@ -269,19 +269,13 @@ def _pull_lucid_tops_root() -> Path:
 
 
 def _pull_secrets_dir(lucid_root: Path) -> Path:
-    """UserOnly secrets live under /mnt/myssd/LucidTops/useronly/secrets (§16.1)."""
+    """Connection secrets for this image live at /app/secrets."""
     env_dir = _env("SECRETS_DIR")
     if env_dir:
         return Path(env_dir).expanduser().resolve()
-    for candidate in (
-        Path("/mnt/myssd/LucidTops/useronly/secrets"),
-        lucid_root / "useronly" / "secrets",
-        lucid_root / "secrets",
-        lucid_root / "Secrets",
-        lucid_root / "Server" / "Secrets",
-    ):
-        if candidate.is_dir():
-            return candidate.resolve()
+    in_image = Path("/app/secrets")
+    if in_image.is_dir():
+        return in_image.resolve()
     target = lucid_root / "useronly" / "secrets"
     target.mkdir(parents=True, exist_ok=True)
     return target.resolve()
@@ -590,6 +584,10 @@ def pull_realworld_information() -> dict[str, Any]:
     login_page = page_secrets["login"] or page_files.get("login") or ""
     scheme = page_secrets["scheme"] or ""
 
+    from internal_routes import ingest_route_sets
+
+    ingested = ingest_route_sets(lucid_root, secrets_dir)
+    driver_dir = lucid_root / "driver"
     session_state_path = secrets_dir / "useronly_session.state"
     registration_name = _env("REGISTRATION_SECRETS_NAME") or "registration.secrets"
     id_name = _env("ID_SECRETS_NAME") or "ID.secrets"
@@ -620,6 +618,12 @@ def pull_realworld_information() -> dict[str, Any]:
         "user_secrets_name": user_name,
         "platform": platform.platform(),
         "system": platform.system(),
+        "driver_dir": driver_dir.as_posix(),
+        "docker_bin": _which("docker") or _which("docker.exe"),
+        "python_bin": _which("python3") or _which("python") or _which("python.exe"),
+        "node_bin": _which("node") or _which("node.exe"),
+        "user_route_file": ingested["user_route_file"],
+        "nodeuser_route_file": ingested["nodeuser_route_file"],
     }
     global _LAST_PULL
     _LAST_PULL = pulled
@@ -657,6 +661,9 @@ def bind_operation_environ(
         "ID_SECRETS_FILE": (secrets_dir / str(info["id_secrets_name"])).as_posix(),
         "USER_SECRETS_FILE": (secrets_dir / str(info["user_secrets_name"])).as_posix(),
         "USERONLY_SESSION_STATE_FILE": str(info["session_state_path"]),
+        "DRIVER_DIR": str(info.get("driver_dir") or ""),
+        "USER_ROUTE_FILE": str(info.get("user_route_file") or ""),
+        "NODEUSER_ROUTE_FILE": str(info.get("nodeuser_route_file") or ""),
     }
     onions = info.get("onions") or {}
     if onions.get("frontend"):
@@ -845,6 +852,7 @@ def build_user_secrets(pull: dict[str, Any] | None = None) -> dict[str, str]:
         ).as_posix(),
         "USER_SECRETS_FILE": secrets_path.as_posix(),
         "USERONLY_SESSION_STATE_FILE": str(info["session_state_path"]),
+        "DRIVER_DIR": str(info.get("driver_dir") or ""),
         "FRONTEND_ONION": frontend_onion,
         "USER_FRONTEND_SCHEME": scheme,
         "FRONTEND_HOME_PAGE_PATH": home_page,
@@ -947,20 +955,17 @@ def build_id_secrets(pull: dict[str, Any] | None = None) -> dict[str, str]:
         "TOKEN_ID",
         "ADMIN_ID",
         "MASTER_USER_ID",
+        "MASTER_SERVER_ID",
+        "USER_ROLE",
+        "NODEUSER",
+        "SESSION_ID",
+        "ID_SECRETS_STAMP",
+        "ID_SECRETS_DIGEST",
         "TIER_SELECTED",
     ):
-        value = _env(key) or prior.get(key, "")
+        value = prior.get(key, "")
         if value:
             built[key] = value
-    role = ""
-    if built.get("NODE_ID"):
-        role = "node"
-    elif built.get("USER_ID"):
-        role = "user"
-    elif prior.get("USER_ROLE"):
-        role = prior["USER_ROLE"]
-    if role:
-        built["USER_ROLE"] = role
     for key, value in prior.items():
         if key not in built:
             built[key] = value
@@ -978,6 +983,45 @@ def build_all_useronly_secrets(pull: dict[str, Any] | None = None) -> dict[str, 
     }
 
 
+def write_usergui_secrets_at_image_build(destination: Path | None = None) -> Path:
+    """Write /app/secrets/userGui.secrets from Server/Secrets proxy and Master files."""
+    from internal_routes import locate_creation_secrets, parse_secrets_file
+
+    proxy_path, master_path = locate_creation_secrets()
+    merged = parse_secrets_file(proxy_path)
+    for key, value in parse_secrets_file(master_path).items():
+        if value:
+            merged[key] = value
+    dest = destination or Path("/app/secrets/userGui.secrets")
+    keys = (
+        "FRONTEND_ONION",
+        "NODEUSER_ONION",
+        "MASTER_SERVER_ONION",
+        "PROXY_SELF_DNS",
+        "DOCKER_NETWORK_NAME",
+        "RDP_ONION",
+        "ADMIN_ONION",
+        "BLOCKCHAIN_ONION",
+    )
+    selected = {key: merged[key] for key in keys if merged.get(key, "").strip()}
+    if not selected.get("FRONTEND_ONION"):
+        raise RuntimeError(
+            "FRONTEND_ONION missing from proxy.secrets and Master.secrets"
+        )
+    if not selected.get("NODEUSER_ONION"):
+        raise RuntimeError(
+            "NODEUSER_ONION missing from proxy.secrets and Master.secrets"
+        )
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "# userGui.secrets — connection values from proxy.secrets and Master.secrets"
+    ]
+    for key in sorted(selected):
+        lines.append(f"{key}={selected[key]}")
+    dest.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return dest
+
+
 def main() -> int:
     info = pull_realworld_information()
     built = build_all_useronly_secrets(info)
@@ -988,9 +1032,8 @@ def main() -> int:
                 "primary_ip": info["primary_ip"],
                 "primary_mac": info["primary_mac"],
                 "secrets_dir": info["secrets_dir"],
-                "frontend_onion": built["user"].get("FRONTEND_ONION", ""),
-                "tor_bin": built["user"].get("USER_TOR_BIN", ""),
-                "tor_browser_bin": built["user"].get("USER_TOR_BROWSER_BIN", ""),
+                "routes_written": bool(info.get("user_route_file")),
+                "tor_present": bool(built["user"].get("USER_TOR_BIN")),
             },
             indent=2,
         )

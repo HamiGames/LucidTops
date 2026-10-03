@@ -58,6 +58,7 @@ user_status = _user_secrets.user_status
 ensure_user_secrets_from_pull = _user_secrets.ensure_user_secrets_from_pull
 
 _install = _load_local("install")
+_access = _load_local("frontend_access")
 
 
 def utc_now() -> str:
@@ -135,11 +136,50 @@ def frontend_onion_url() -> str:
     return f"{scheme}://{onion}/{home.lstrip('/')}"
 
 
+def _refuse_nodeuser() -> None:
+    if get_user_secret("NODEUSER").lower() == "true":
+        raise RuntimeError("User route refused — NodeUser uses LaunchNodeUser")
+
+
+def _hardware() -> dict[str, str]:
+    ensure_user_secrets_from_pull()
+    return {
+        "hostname": get_user_secret("HOSTNAME_CONSOLE"),
+        "machine_id": get_user_secret("HOST_MACHINE_ID"),
+        "primary_mac": get_user_secret("HARDWARE_PRIMARY_MAC"),
+        "primary_ip": get_user_secret("HARDWARE_PRIMARY_IP"),
+        "primary_iface": get_user_secret("HARDWARE_PRIMARY_IFACE"),
+    }
+
+
+def _hardware_fields(hardware: dict[str, str]) -> dict[str, str]:
+    return {
+        "HOSTNAME_CONSOLE": hardware.get("hostname", ""),
+        "HOST_MACHINE_ID": hardware.get("machine_id", ""),
+        "HARDWARE_PRIMARY_MAC": hardware.get("primary_mac", ""),
+        "HARDWARE_PRIMARY_IP": hardware.get("primary_ip", ""),
+        "HARDWARE_PRIMARY_IFACE": hardware.get("primary_iface", ""),
+    }
+
+
+def _driver_dir() -> Path:
+    raw = get_user_secret("DRIVER_DIR")
+    if not raw:
+        raise RuntimeError("DRIVER_DIR missing — run Install before choosing User or NodeUser")
+    return Path(raw)
+
+
+def _require_install() -> None:
+    if not _install.install_is_complete():
+        raise RuntimeError("Install has not finished on this console")
+
+
 def start_tor_background() -> dict[str, Any]:
     ensure_user_secrets_from_pull()
     cmd = require_user_secret("USER_TOR_START_COMMAND")
-    proc = subprocess.Popen(cmd, shell=True)  # noqa: S602 — command from secrets
-    return {"status": "started", "command": cmd, "pid": proc.pid, "started_at": utc_now()}
+    from frontend_access import start_tor_background as _start
+
+    return _start(cmd)
 
 
 def _terminate_pid(pid: int) -> dict[str, Any]:
@@ -168,87 +208,185 @@ def _terminate_pid(pid: int) -> dict[str, Any]:
         return {"pid": pid, "status": "error", "error": str(exc)}
 
 
+def _register_body(*, email: str, password: str, hardware: dict[str, str]) -> dict[str, Any]:
+    return {
+        "action": "register",
+        "account_type": "user",
+        "Email": email,
+        "Password": password,
+        **_hardware_fields(hardware),
+    }
+
+
+def _login_body(*, email: str, password: str) -> dict[str, Any]:
+    identity = _identity_from_secrets()
+    token_id = identity.get("token_id") or ""
+    return {
+        "action": "login",
+        "account_type": "user",
+        "Email": email,
+        "Password": password,
+        "UserID": identity.get("user_id") or "",
+        "TokenID": token_id,
+        "api_key": token_id,
+    }
+
+
+def _frontend_page(routes: dict[str, str], *keys: str, fallback: str) -> str:
+    for key in keys:
+        value = str(routes.get(key) or "").strip()
+        if value.startswith("/") or value.endswith(".html"):
+            return value
+    return fallback
+
+
+def _finish_frontend(
+    routes: dict[str, str],
+    *,
+    branch: str,
+    reply: dict[str, Any],
+    post_file: str,
+    page: str,
+    tor: dict[str, Any],
+) -> Path:
+    """Handshake, then validation, then the Proxy foreground onion window."""
+    token_id = get_user_secret("TOKEN_ID")
+    session_id = str(
+        reply.get("SessionID") or reply.get("session_id") or get_user_secret("SESSION_ID") or ""
+    ).strip()
+    if token_id and session_id:
+        handshake_reply = _access.handshake(
+            routes,
+            branch=branch,
+            hardware=_hardware(),
+            token_id=token_id,
+            session_id=session_id,
+        )
+        _access.validate_selected_files(routes, handshake_reply, [post_file])
+    window = _access.open_foreground_window(
+        routes,
+        page=page,
+        browser_command=require_user_secret("USER_TOR_BROWSER_COMMAND"),
+    )
+    return _access.write_session_state(
+        {
+            "status": "connected",
+            "branch": branch,
+            "tor_pid": tor.get("pid"),
+            "browser_pid": window.get("pid"),
+            "launched_at": utc_now(),
+        }
+    )
+
+
+def register_user(*, email: str, password: str) -> dict[str, Any]:
+    """User branch: Tor background, registration post, then the Frontend onion window."""
+    _require_install()
+    ensure_user_secrets_from_pull()
+    if not email.strip() or not password:
+        raise RuntimeError("Email and password are required to register as a User")
+    routes = _access.routes_for(False)
+    tor = start_tor_background()
+    try:
+        hardware = _hardware()
+        submitted = _access.submit_validation(
+            routes,
+            path=_access.registration_path(routes, nodeuser=False),
+            body=_register_body(email=email.strip(), password=password, hardware=hardware),
+            driver_dir=_driver_dir(),
+            file_name="registration_user.post.json",
+        )
+        stored = _user_secrets.apply_master_identity(submitted["reply"], nodeuser=False)
+        state_path = _finish_frontend(
+            routes,
+            branch="user",
+            reply=submitted["reply"],
+            post_file=submitted["post_file"],
+            page=_frontend_page(
+                routes, "FRONTEND_REGISTER_PATH", "FRONTEND_HOME_PAGE_PATH", fallback="/register.html"
+            ),
+            tor=tor,
+        )
+    except Exception:
+        if tor.get("pid"):
+            _access.terminate_pid(int(tor["pid"]))
+        raise
+    return {
+        "status": "registered",
+        "branch": "user",
+        "user_id_returned": bool(stored.get("USER_ID")),
+        "token_id_returned": bool(stored.get("TOKEN_ID")),
+        "session_state": state_path.as_posix(),
+        "launched_at": utc_now(),
+    }
+
+
+def connect_user(*, email: str, password: str) -> dict[str, Any]:
+    """User branch login over Tor, then handshake and Frontend validation."""
+    _require_install()
+    ensure_user_secrets_from_pull()
+    _refuse_nodeuser()
+    if not get_user_secret("TOKEN_ID"):
+        raise RuntimeError("Login without a TokenID is rejected")
+    if not get_user_secret("USER_ID"):
+        raise RuntimeError("Register as a User before connecting")
+    if not password:
+        raise RuntimeError("Password is required to connect as a User")
+    routes = _access.routes_for(False)
+    tor = start_tor_background()
+    try:
+        _user_secrets.verify_id_secrets()
+        submitted = _access.submit_validation(
+            routes,
+            path=_access.login_path(routes, nodeuser=False),
+            body=_login_body(email=email.strip(), password=password),
+            driver_dir=_driver_dir(),
+            file_name="login_user.post.json",
+        )
+        stored = _user_secrets.apply_master_identity(submitted["reply"], nodeuser=False)
+        _user_secrets.verify_id_secrets()
+        state_path = _finish_frontend(
+            routes,
+            branch="user",
+            reply=submitted["reply"],
+            post_file=submitted["post_file"],
+            page=_frontend_page(routes, "FRONTEND_HOME_PAGE_PATH", fallback="/home.html"),
+            tor=tor,
+        )
+    except Exception:
+        if tor.get("pid"):
+            _access.terminate_pid(int(tor["pid"]))
+        raise
+    return {
+        "status": "connected",
+        "branch": "user",
+        "user_id_returned": bool(stored.get("USER_ID")),
+        "session_state": state_path.as_posix(),
+        "launched_at": utc_now(),
+    }
+
+
 def launch_user_session(
     *, user_id: str | None = None, id_token: str | None = None
 ) -> dict[str, Any]:
-    ensure_user_secrets_from_pull()
-    _install.ensure_user_secrets_present()
-    identity = _identity_from_secrets()
-    resolved_user = user_id or identity.get("active_id") or None
-    resolved_token = id_token or identity.get("token_id") or None
-
-    tor = start_tor_background()
-    url = frontend_onion_url()
-    browser_cmd_template = require_user_secret("USER_TOR_BROWSER_COMMAND")
-    if "{url}" not in browser_cmd_template:
-        raise RuntimeError(
-            "USER_TOR_BROWSER_COMMAND missing {url} token — recreate secrets at time of operation"
-        )
-    browser_cmd = browser_cmd_template.replace("{url}", url)
-    proc = subprocess.Popen(browser_cmd, shell=True)  # noqa: S602 — command from secrets
-
-    state = {
-        "status": "connected",
-        "url": url,
-        "tor_pid": tor.get("pid"),
-        "browser_pid": proc.pid,
-        "user_id": resolved_user,
-        "node_id": identity.get("node_id") or "",
-        "token_id": resolved_token or "",
-        "role": identity.get("role") or "",
-        "launched_at": utc_now(),
-    }
-    state_path = _write_session_state(state)
-
-    return {
-        "status": "launched",
-        "url": url,
-        "tor": tor,
-        "browser_pid": proc.pid,
-        "user_id": resolved_user,
-        "node_id": identity.get("node_id") or "",
-        "token_id": resolved_token or "",
-        "role": identity.get("role") or "",
-        "authenticated": bool(resolved_user and resolved_token),
-        "session_state": state_path.as_posix(),
-        **user_status(),
-        "launched_at": utc_now(),
-    }
+    """Connect as User. Password is read from USER_PASSWORD when the GUI is not used."""
+    del user_id, id_token
+    return connect_user(email=get_user_secret("USER_EMAIL"), password=get_user_secret("USER_PASSWORD"))
 
 
 def disconnect_user_session() -> dict[str, Any]:
-    """Exit Frontend TorBrowser window and stop Tor subprocesses started by Connect."""
+    """Stop the Tor process started by Connect or Register."""
     ensure_user_secrets_from_pull()
-    state = _read_session_state()
-    results: list[dict[str, Any]] = []
-
-    browser_pid = int(state.get("browser_pid") or 0)
-    tor_pid = int(state.get("tor_pid") or 0)
-    if browser_pid:
-        results.append({"target": "tor_browser", **_terminate_pid(browser_pid)})
-    if tor_pid and tor_pid != browser_pid:
-        results.append({"target": "tor", **_terminate_pid(tor_pid)})
-
-    _clear_session_state()
-    return {
-        "status": "disconnected",
-        "terminated": results,
-        "previous": {
-            "url": state.get("url", ""),
-            "user_id": state.get("user_id", ""),
-            "node_id": state.get("node_id", ""),
-            "role": state.get("role", ""),
-        },
-        "disconnected_at": utc_now(),
-        **user_status(),
-    }
+    report = _access.disconnect_session()
+    report.update(user_status())
+    return report
 
 
 def connection_status() -> dict[str, Any]:
     ensure_user_secrets_from_pull()
     state = _read_session_state()
     return {
-        "connected": bool(state.get("browser_pid")),
+        "connected": state.get("status") == "connected" and bool(state.get("tor_pid")),
         "session": state,
         **user_status(),
         "checked_at": utc_now(),

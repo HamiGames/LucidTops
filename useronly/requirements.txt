@@ -1,9 +1,13 @@
 # UserOnly runtime dependencies (explicit — do not assume OS packages are present).
-# OS-native (must be installed on the console / image):
+# Console programs the installer checks, and installs when missing:
+#   - tor
+#   - docker
 #   - python3 (3.11+)
-#   - python3-tk / tkinter (Windows: included with python.org installer; Linux: python3-tk)
-#   - tk, libx11-6, libxext6, libxrender1, libxtst6, libxi6 (Linux Tk GUI)
-#   - tor / Tor Browser (discovered at time of operation via pull_information)
+#   - node (JavaScript interpreter)
+#   - python3-tk / tkinter
+# Image pulled on install:
+#   - pickme/lucidtops_rdp:v1.0.0
+# Node image name is read from internal.routes and pulled only for a verified NodeID.
 #
 # Pip packages used by useronly modules:
-# (stdlib only — no third-party pip packages required)
+# (stdlib only — Tor SOCKS and Frontend HTTP use the socket library)

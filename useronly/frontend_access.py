@@ -318,6 +318,102 @@ def submit_validation(
     return {"post_file": post_path.as_posix(), "reply": reply, "path": path}
 
 
+def refuse_dockerdns(value: str) -> None:
+    """UserOnly reaches other containers only through a Frontend path or onion."""
+    text = value.strip()
+    if not text or text.startswith("/"):
+        return
+    host = text
+    if "://" in text:
+        host = urlsplit(text).hostname or ""
+    host = host.lower().split("%")[0]
+    if host.endswith(".onion") or host in {"127.0.0.1", "localhost", "::1"}:
+        return
+    raise RuntimeError(
+        "DockerDNS connection refused — this container reaches other containers only through the Frontend"
+    )
+
+
+def open_foreground_window(
+    routes: dict[str, str], *, page: str, browser_command: str
+) -> dict[str, Any]:
+    """Open the Frontend onion in the foreground after Tor is already running."""
+    onion = frontend_onion(routes)
+    scheme = _route_value(routes, "USER_FRONTEND_SCHEME", "FRONTEND_SCHEME") or "http"
+    if scheme not in {"http", "https"}:
+        raise RuntimeError("frontend scheme in the route set must be http or https")
+    suffix = page if page.startswith("/") else f"/{page}" if page else "/"
+    url = f"{scheme}://{onion}{suffix}"
+    refuse_dockerdns(url)
+    proxy_path = _route_value(routes, "PROXY_FOREGROUND_PATH")
+    if proxy_path:
+        refuse_dockerdns(proxy_path)
+    if "{url}" not in browser_command:
+        raise RuntimeError(
+            "USER_TOR_BROWSER_COMMAND missing {url} token — recreate secrets at time of operation"
+        )
+    proc = subprocess.Popen(  # noqa: S602 — command from the operating console secrets
+        browser_command.replace("{url}", url),
+        shell=True,
+    )
+    return {"status": "opened", "pid": proc.pid, "proxy_path_present": bool(proxy_path)}
+
+
+def validate_selected_files(
+    routes: dict[str, str],
+    handshake_reply: dict[str, Any],
+    files: list[str],
+) -> dict[str, Any]:
+    """Send selected files through the Frontend to the Node, or to the backend when no NodeID is online."""
+    if node_online(handshake_reply):
+        target = _route_value(routes, "VALIDATION_NODE_TARGET")
+        destination = "node"
+    else:
+        target = _route_value(routes, "VALIDATION_BACKEND_TARGET")
+        destination = "backend"
+    if not target:
+        raise RuntimeError(f"{destination} validation target missing from internal routes")
+    refuse_dockerdns(target)
+    if not target.startswith("/"):
+        raise RuntimeError("validation target must be a Frontend path")
+    reply = http_over_tor(
+        routes,
+        target,
+        {"destination": destination, "files": files, "database": "LucidTops_UserDB"},
+    )
+    return {"destination": destination, "reply": reply}
+
+
+def verify_userdb(routes: dict[str, str], identity: dict[str, str]) -> None:
+    """Compare ID.secrets with LucidTops_UserDB through the Frontend."""
+    path = _route_value(routes, "USERDB_VERIFY_PATH")
+    if not path.startswith("/"):
+        raise RuntimeError("LucidTops_UserDB path missing from internal routes")
+    refuse_dockerdns(path)
+    reply = http_over_tor(
+        routes,
+        path,
+        {
+            "database": "LucidTops_UserDB",
+            "USER_ID": identity.get("USER_ID", ""),
+            "TOKEN_ID": identity.get("TOKEN_ID", ""),
+            "NODE_ID": identity.get("NODE_ID", ""),
+            "ID_SECRETS_STAMP": identity.get("ID_SECRETS_STAMP", ""),
+        },
+    )
+    status = str(reply.get("status") or "").strip().lower()
+    matched = (
+        reply.get("verified") is True
+        or reply.get("match") is True
+        or status in {"ok", "matched", "verified"}
+    )
+    remote_user = str(reply.get("UserID") or reply.get("USER_ID") or "").strip()
+    if remote_user and remote_user != identity.get("USER_ID", ""):
+        matched = False
+    if not matched:
+        raise RuntimeError("ID.secrets does not match LucidTops_UserDB")
+
+
 def node_online(handshake_reply: dict[str, Any]) -> bool:
     for key in ("node_online", "NodeOnline", "nodeid_online"):
         value = handshake_reply.get(key)
@@ -358,8 +454,11 @@ def terminate_pid(pid: int) -> dict[str, Any]:
 def disconnect_session() -> dict[str, Any]:
     state = read_session_state()
     results: list[dict[str, Any]] = []
+    browser_pid = int(state.get("browser_pid") or 0)
     tor_pid = int(state.get("tor_pid") or 0)
-    if tor_pid:
+    if browser_pid:
+        results.append({"target": "foreground", **terminate_pid(browser_pid)})
+    if tor_pid and tor_pid != browser_pid:
         results.append({"target": "tor", **terminate_pid(tor_pid)})
     clear_session_state()
     return {
