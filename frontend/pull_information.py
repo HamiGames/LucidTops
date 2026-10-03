@@ -205,18 +205,11 @@ def _pull_lucid_tops_root() -> Path:
 
 
 def _pull_secrets_dir(lucid_root: Path) -> Path:
+    """Frontend reads Server/Secrets on the Pi console. No in-image secrets."""
     env_dir = _env("SECRETS_DIR")
     if env_dir:
         return Path(env_dir).expanduser().resolve()
-    for candidate in (
-        lucid_root / "secrets",
-        lucid_root / "Secrets",
-        lucid_root / "Server" / "Secrets",
-        Path("/mnt/myssd/LucidTops/secrets"),
-    ):
-        if candidate.is_dir():
-            return candidate.resolve()
-    target = lucid_root / "secrets"
+    target = lucid_root / "Server" / "Secrets"
     target.mkdir(parents=True, exist_ok=True)
     return target.resolve()
 
@@ -488,6 +481,9 @@ def bind_operation_environ(
         "FRONTEND_NGINX_PORT": str(info["nginx_port"]),
         "FRONTEND_SECRETS_FILE": (secrets_dir / "frontend.secrets").as_posix(),
         "BACKEND_SECRETS_FILE": (secrets_dir / "backend.secrets").as_posix(),
+        "MASTER_SECRETS_FILE": (secrets_dir / "Master.secrets").as_posix(),
+        "PROXY_SECRETS_FILE": (secrets_dir / "proxy.secrets").as_posix(),
+        "HOST_TOR_CONFIG_TORRC": str(Path(str(info["lucid_tops_root"])) / "torrc"),
     }
     if info.get("docker_network_name"):
         mapping["DOCKER_NETWORK_NAME"] = str(info["docker_network_name"])

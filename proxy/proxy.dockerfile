@@ -110,6 +110,7 @@ COPY proxy/ /app/proxy/
 
 RUN set -eu; \
     test -f /app/proxy/Bootstrap.py; \
+    test -f /app/proxy/pull_information.py; \
     test -f /app/proxy/RunProxy.py; \
     test -f /app/proxy/ProxyRoutes.py; \
     test -f /app/proxy/ProxyGate.py; \
@@ -123,7 +124,7 @@ RUN set -eu; \
     test -d /app/proxy/logs; \
     test -L "${PROXY_SECRETS_LINK}"; \
     test -d "${SECRETS_DIR}"; \
-    chmod +x /app/proxy/Bootstrap.py /app/proxy/RunProxy.py
+    chmod +x /app/proxy/Bootstrap.py /app/proxy/RunProxy.py /app/proxy/pull_information.py
 
 # -----------------------------------------------------------------------------
 # Runtime environment
@@ -142,7 +143,7 @@ ENV CONTAINER_ONION_DIR=${CONTAINER_ONION_DIR}
 # Optional bootstrap at build (default false — secrets on host / first start)
 RUN set -eu; \
     if [ "${RUN_BOOTSTRAP_ON_BUILD}" = "true" ]; then \
-      python3 /app/proxy/Bootstrap.py; \
+      python3 /app/proxy/pull_information.py; \
       test -f "${PROXY_SECRETS_FILE}"; \
     fi
 

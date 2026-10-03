@@ -202,7 +202,7 @@ def require_tor_peer() -> dict[str, Any]:
     if not host or not port_raw or not onion:
         raise RuntimeError(
             "Tor SOCKS endpoint missing — peer media requires TOR_SOCKS_HOST, "
-            "TOR_SOCKS_PORT, and RDP_ONION from the hardware pull"
+            "TOR_SOCKS_PORT, and RDP_ONION from /app/Secrets/rdp.secrets"
         )
     if not port_raw.isdigit() or int(port_raw) < 1:
         raise RuntimeError("TOR_SOCKS_PORT is not a pulled Tor SOCKS port")

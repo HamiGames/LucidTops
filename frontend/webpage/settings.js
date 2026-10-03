@@ -10,6 +10,7 @@
     audio: true,
     video: true,
     screen: true,
+    usb: false,
     transfer: false,
     transfer_paths: "",
   };
@@ -52,6 +53,7 @@
     const audio = toggle("audio", "Audio", current.audio);
     const video = toggle("video", "Video", current.video);
     const screen = toggle("screen", "Screen share", current.screen);
+    const usb = toggle("usb", "USB access", current.usb);
     const transfer = toggle("transfer", "File transfer", current.transfer);
     const paths = el("textarea", {
       id: "transfer_paths",
@@ -72,6 +74,7 @@
       audio.node,
       video.node,
       screen.node,
+      usb.node,
       transfer.node,
       el("div", { className: "noe-field" }, [
         el("label", { for: "transfer_paths", text: "Transfer access locations (one per line)" }),
@@ -94,6 +97,7 @@
         audio: audio.input.checked,
         video: video.input.checked,
         screen: screen.input.checked,
+        usb: usb.input.checked,
         transfer: transfer.input.checked,
         transfer_paths: paths.value
           .split("\n")

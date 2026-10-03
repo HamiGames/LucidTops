@@ -15,21 +15,24 @@
 #     -t lucid-operations:v1.0.0 \
 #     /mnt/myssd/LucidTops
 #
-# Secrets (§16.1) — created at time of operation (not baked into the image):
-#   SECRETS_DIR=/mnt/myssd/LucidTops/operations/secrets
-#   Entrypoint: ops_pull_information → write_operations_secrets → uvicorn
-#   If empty: write operations.secrets from live hardware pull.
-#   If Master already wrote Server/Secrets/operations.secrets, those values are seeded in.
-#   Host mount required: -v /mnt/myssd/LucidTops:/mnt/myssd/LucidTops
+# Secrets (Operations.txt / dockerfile-structure.txt §9) — created at image build (RUN), not at container start:
+#   Internal file: /app/secrets/operations.secrets
+#   Source file copied from the build context:
+#     Server/Secrets/operations.secrets
+#   Also required at image creation (seed of that source file):
+#     Server/Secrets/Master.secrets
+#     Server/Secrets/proxy.secrets
+#     torrc
+#   Node / Admin / MasterUser devices read that in-image file. They do not rebuild it.
 #
 # RULES:
-# - no hardcoded values; all values created at time of operation via ops_pull_information.
-# - no placeholder values; hardware IP/MAC come from pull → operations.secrets / ID.secrets.
-# - no sensitive data in this image; data lives in the secrets file on the SSD mount.
+# - connection values are sourced from Master.secrets, proxy.secrets, and torrc at image creation.
+# - no placeholder fill; a missing required connection key fails the image build.
+# - no sensitive data written at container start.
 # - NO pull from GIT repository.
 #
 # Rebuild rule (§16.7): wipe image/volumes before rebuild.
-# Networks (§16.4): created/joined at operation via dockercmd.txt using names from secrets.
+# Networks (§16.4): created/joined at operation via dockercmd.txt using names from the in-image secrets.
 # Operators: NodeID | AdminID | MasterUserID | MasterServerID in LucidTopsNodeDB.
 # Runtime deps copied into image: backend (config/pull/load_module) + sessions (chunk/session APIs).
 
@@ -44,10 +47,9 @@ ARG APT_PACKAGES=""
 ARG PIP_PACKAGES=""
 ARG PIP_WHEEL_PACKAGES="pip setuptools wheel"
 ARG LUCID_TOPS_ROOT=/mnt/myssd/LucidTops
-ARG SECRETS_DIR=/mnt/myssd/LucidTops/operations/secrets
-ARG OPERATIONS_SECRETS_FILE=/mnt/myssd/LucidTops/operations/secrets/operations.secrets
-ARG OPERATIONS_CONFIGS_DIR=/mnt/myssd/LucidTops/operations/configs
-ARG RUN_OPS_PULL_ON_BUILD=false
+ARG SECRETS_DIR=/app/secrets
+ARG OPERATIONS_SECRETS_FILE=/app/secrets/operations.secrets
+ARG OPERATIONS_CONFIGS_DIR=/app/operations/configs
 
 # -----------------------------------------------------------------------------
 # Container skeleton (fixes.txt §16.5)
@@ -60,19 +62,17 @@ RUN set -eu; \
       /app/operations/run \
       /app/operations/configs \
       /app/operations/logs \
+      /app/secrets \
       /app/backend \
       /app/sessions \
       "${LUCID_TOPS_ROOT}" \
-      "${SECRETS_DIR}" \
-      "${OPERATIONS_CONFIGS_DIR}" \
-      "${LUCID_TOPS_ROOT}/operations" \
       "${LUCID_TOPS_ROOT}/logs/operations" \
       "${LUCID_TOPS_ROOT}/run/operations"; \
     test -d /app/operations; \
     test -d /app/operations/run; \
     test -d /app/operations/configs; \
     test -d /app/operations/logs; \
-    test -d "${SECRETS_DIR}"; \
+    test -d /app/secrets; \
     test -d "${LUCID_TOPS_ROOT}"
 
 # -----------------------------------------------------------------------------
@@ -102,7 +102,7 @@ RUN set -eu; \
     "${PY}" -c "import fastapi, uvicorn, pydantic, pymongo, socks, httpx, dotenv"
 
 # -----------------------------------------------------------------------------
-# Copy operations package + runtime siblings, then validate (§16.2 / §16.3)
+# Copy package + validate (§16.2 / §16.3)
 # -----------------------------------------------------------------------------
 COPY operations/ /app/operations/
 COPY backend/ /app/backend/
@@ -122,6 +122,7 @@ RUN set -eu; \
     test -d /app/operations/run; \
     test -d /app/operations/configs; \
     test -d /app/operations/logs; \
+    test -d /app/secrets; \
     test -d /app/backend; \
     test -f /app/backend/config.py; \
     test -f /app/backend/WebPageLink.py; \
@@ -133,7 +134,6 @@ RUN set -eu; \
     test -f /app/sessions/compress.py; \
     test -f /app/sessions/SessionCore.py; \
     test -f /app/sessions/sessionID.py; \
-    test -d "${SECRETS_DIR}"; \
     chmod +x /app/operations/ops_entrypoint.sh /app/operations/ops_pull_information.py
 
 # -----------------------------------------------------------------------------
@@ -143,16 +143,27 @@ ENV PYTHONPATH=/app:/app/backend:/app/operations:/app/sessions
 ENV PYTHONUNBUFFERED=1
 ENV LUCID_PROJECT_ROOT=/app
 ENV LUCID_TOPS_ROOT=${LUCID_TOPS_ROOT}
-ENV SECRETS_DIR=${SECRETS_DIR}
-ENV OPERATIONS_SECRETS_FILE=${OPERATIONS_SECRETS_FILE}
-ENV OPERATIONS_CONFIGS_DIR=${OPERATIONS_CONFIGS_DIR}
+ENV SECRETS_DIR=/app/secrets
+ENV OPERATIONS_SECRETS_FILE=/app/secrets/operations.secrets
+ENV OPERATIONS_CONFIGS_DIR=/app/operations/configs
 
-# Optional ops pull + secrets write at build (default false — SSD/hardware at first start)
+# -----------------------------------------------------------------------------
+# Bootstrap at image build (dockerfile-structure.txt §9) — not container start
+# Literal COPY paths; build context is /mnt/myssd/LucidTops
+# -----------------------------------------------------------------------------
+COPY Server/Secrets/Master.secrets /tmp/ops-secrets-src/Master.secrets
+COPY Server/Secrets/proxy.secrets /tmp/ops-secrets-src/proxy.secrets
+COPY Server/Secrets/operations.secrets /tmp/ops-secrets-src/operations.secrets
+COPY torrc /tmp/ops-secrets-src/torrc
+
 RUN set -eu; \
-    if [ "${RUN_OPS_PULL_ON_BUILD}" = "true" ]; then \
-      python3 /app/operations/ops_pull_information.py >/dev/null; \
-      python3 -c "from operations_secrets import write_operations_secrets; write_operations_secrets(force=False)"; \
-    fi
+    test -f /app/operations/pull_information.py; \
+    test -s /tmp/ops-secrets-src/Master.secrets; \
+    test -s /tmp/ops-secrets-src/proxy.secrets; \
+    test -s /tmp/ops-secrets-src/operations.secrets; \
+    test -s /tmp/ops-secrets-src/torrc; \
+    python3 /app/operations/pull_information.py --write-image; \
+    test -s /app/secrets/operations.secrets
 
 WORKDIR /app/operations
 ENTRYPOINT ["/app/operations/ops_entrypoint.sh"]

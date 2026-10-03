@@ -19,8 +19,9 @@
 #   -v /mnt/myssd/LucidTops:/mnt/myssd/LucidTops
 #   -v /var/run/docker.sock:/var/run/docker.sock
 #
-# Secrets (§16.1) — created at time of operation (not baked into the image):
-#   SECRETS_DIR=/mnt/myssd/LucidTops/Databases/secrets
+# Secrets — created at time of operation (not baked into the image):
+#   DATABASES_SECRETS_FILE=/mnt/myssd/LucidTops/Server/Secrets/databases.secrets
+#   MONGODB_SECRETS_FILE=/mnt/myssd/LucidTops/Server/Secrets/mongodb.secrets
 #   Seed: Server/Secrets/Master.secrets + proxy.secrets (Proxy Bootstrap)
 #   Entrypoint: pull_information → BootstrapDatabases → LaunchDatabases
 #
@@ -46,9 +47,9 @@ ARG APT_PACKAGES="iproute2 ca-certificates curl gnupg"
 ARG PIP_PACKAGES=""
 ARG PIP_WHEEL_PACKAGES="pip setuptools wheel"
 ARG LUCID_TOPS_ROOT=/mnt/myssd/LucidTops
-ARG SECRETS_DIR=/mnt/myssd/LucidTops/Databases/secrets
-ARG DATABASES_SECRETS_FILE=/mnt/myssd/LucidTops/Databases/secrets/databases.secrets
-ARG MONGODB_SECRETS_FILE=/mnt/myssd/LucidTops/Databases/secrets/mongodb.secrets
+ARG SECRETS_DIR=/mnt/myssd/LucidTops/Server/Secrets
+ARG DATABASES_SECRETS_FILE=/mnt/myssd/LucidTops/Server/Secrets/databases.secrets
+ARG MONGODB_SECRETS_FILE=/mnt/myssd/LucidTops/Server/Secrets/mongodb.secrets
 ARG DATABASES_CONFIGS_DIR=/mnt/myssd/LucidTops/Databases/configs
 ARG MONGODB_DATA_MOUNT=/mnt/myssd/LucidTops/Server/Databases
 ARG RUN_DATABASES_BOOTSTRAP_ON_BUILD=false
@@ -167,7 +168,14 @@ ENV MONGODB_DATA_MOUNT=${MONGODB_DATA_MOUNT}
 ENV RUN_DATABASES_BOOTSTRAP_ON_START=true
 ENV DOCKER_HOST=unix:///var/run/docker.sock
 
-# Optional bootstrap at build (default false — SSD/hardware at first start)
+# Image creation writes databases.secrets and mongodb.secrets onto the console
+# bind of Server/Secrets, seeded from Master.secrets and proxy.secrets.
+RUN --mount=type=bind,source=/mnt/myssd/LucidTops/Server/Secrets,target=/mnt/myssd/LucidTops/Server/Secrets \
+    python3 -c "import sys; sys.path.insert(0, '/app/Databases'); from pull_information import seed_console_secrets_at_image_creation; seed_console_secrets_at_image_creation()" \
+ && test -s /mnt/myssd/LucidTops/Server/Secrets/databases.secrets \
+ && test -s /mnt/myssd/LucidTops/Server/Secrets/mongodb.secrets
+
+# Optional full bootstrap at build (default false — Mongo siblings start with the container)
 RUN set -eu; \
     if [ "${RUN_DATABASES_BOOTSTRAP_ON_BUILD}" = "true" ]; then \
       python3 /app/Databases/BootstrapDatabases.py; \

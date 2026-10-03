@@ -87,7 +87,7 @@ def utc_now() -> str:
 
 
 def ensure_rdp_secrets(*, overwrite: bool = False) -> dict[str, Any]:
-    """Ensure rdp.secrets exists from hardware pull (createRDP)."""
+    """Write user-console state. /app/Secrets/rdp.secrets is not rewritten."""
     return _createRDP.build_and_write_rdp_secrets(overwrite_keys=overwrite)
 
 

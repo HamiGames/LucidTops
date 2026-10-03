@@ -24,6 +24,7 @@ for path in (PROJECT_ROOT, OPERATIONS_DIR, BACKEND_DIR):
         sys.path.insert(0, str(path))
 
 from pull_information import (  # noqa: E402
+    SECRETS_DIR_PATH,
     _allocate_ephemeral_port,
     _match_container,
     bind_operation_environ,
@@ -148,9 +149,19 @@ def enrich_operations_pull(info: dict[str, Any]) -> dict[str, Any]:
 def bind_operations_environ(
     pull: dict[str, Any] | None = None, *, overwrite: bool = False
 ) -> dict[str, str]:
-    """Bind os.environ from pulled hardware for the operations container."""
+    """Bind hardware env. Never relocates OPERATIONS_SECRETS_FILE off the in-image path."""
     info = pull if pull is not None else pull_operations_hardware(bind_environ=False)
-    bound = bind_operation_environ(info, overwrite=overwrite)
+    preserved_dir = _env("SECRETS_DIR")
+    preserved_file = _env("OPERATIONS_SECRETS_FILE")
+    parent_info = dict(info)
+    parent_info["secrets_dir"] = SECRETS_DIR_PATH.as_posix()
+    bound = bind_operation_environ(parent_info, overwrite=overwrite)
+    if preserved_dir:
+        os.environ["SECRETS_DIR"] = preserved_dir
+        bound["SECRETS_DIR"] = preserved_dir
+    if preserved_file:
+        os.environ["OPERATIONS_SECRETS_FILE"] = preserved_file
+        bound["OPERATIONS_SECRETS_FILE"] = preserved_file
 
     mapping: dict[str, str] = {
         "HOST_PRIMARY_IP": str(info["primary_ip"]),
@@ -163,9 +174,6 @@ def bind_operations_environ(
         ),
         "OPERATIONS_BIND_PORT": str(info.get("operations_bind_port") or ""),
         "OPERATIONS_DOCKER_DNS_NAME": str(info.get("operations_docker_dns_name") or ""),
-        "SECRETS_DIR": str(info.get("secrets_dir") or ""),
-        "OPERATIONS_SECRETS_FILE": str(info.get("operations_secrets_file") or ""),
-        "OPERATIONS_SECRETS_NAME": str(info.get("operations_secrets_name") or ""),
         "MASTER_SERVER_INTERNAL_HOST": str(
             info.get("master_server_internal_host") or ""
         ),
@@ -176,6 +184,8 @@ def bind_operations_environ(
 
     for key, value in mapping.items():
         if not value or not str(value).strip():
+            continue
+        if key in {"SECRETS_DIR", "OPERATIONS_SECRETS_FILE"}:
             continue
         if overwrite or not _env(key):
             os.environ[key] = str(value).strip()

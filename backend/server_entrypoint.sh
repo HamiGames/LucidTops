@@ -20,11 +20,25 @@ rm -f "${PULL_ENV}"
 : "${LUCID_TOPS_ROOT:?entrypoint: LUCID_TOPS_ROOT missing after hardware pull}"
 : "${SECRETS_DIR:?entrypoint: SECRETS_DIR missing after hardware pull}"
 
-SERVER_SECRETS="${SERVER_SECRETS_FILE:-}"
-CONFIG_SECRETS="${CONFIG_SECRETS_FILE:-}"
-OPERATIONS_SECRETS="${OPERATIONS_SECRETS_FILE:-}"
+case "${SECRETS_DIR}" in
+  /mnt/myssd/LucidTops/Server/Secrets) ;;
+  *)
+    echo "entrypoint: SECRETS_DIR must be /mnt/myssd/LucidTops/Server/Secrets" >&2
+    exit 2
+    ;;
+esac
+
+SERVER_SECRETS="${SERVER_SECRETS_FILE:-${SECRETS_DIR}/server.secrets}"
+CONFIG_SECRETS="${CONFIG_SECRETS_FILE:-${SECRETS_DIR}/config.secrets}"
+BACKEND_SECRETS="${BACKEND_SECRETS_FILE:-${SECRETS_DIR}/backend.secrets}"
+OPERATIONS_SECRETS="${OPERATIONS_SECRETS_FILE:-${SECRETS_DIR}/operations.secrets}"
 SECRETS_ENV="${SECRETS_ENV_FILE:-}"
-MASTER_SECRETS="${MASTER_SECRETS_FILE:-}"
+MASTER_SECRETS="${MASTER_SECRETS_FILE:-${SECRETS_DIR}/Master.secrets}"
+PROXY_SECRETS="${PROXY_SECRETS_FILE:-${SECRETS_DIR}/proxy.secrets}"
+export HOST_TOR_CONFIG_TORRC="${HOST_TOR_CONFIG_TORRC:-${LUCID_TOPS_ROOT}/torrc}"
+export CONFIG_SECRETS_FILE="${CONFIG_SECRETS}"
+export BACKEND_SECRETS_FILE="${BACKEND_SECRETS}"
+export PROXY_SECRETS_FILE="${PROXY_SECRETS}"
 RUN_BUILDER_ON_START="${RUN_BUILDER_ON_START:-true}"
 
 mkdir -p "${LUCID_TOPS_ROOT}" \
@@ -42,8 +56,9 @@ _source_secrets_if_present() {
   fi
 }
 
-# Proxy-synced Master.secrets first (Tor/SOCKS/onion/ProxyGate tokens)
+# Console secrets only. MASTER_SERVER_ONION is taken from proxy.secrets.
 _source_secrets_if_present "${MASTER_SECRETS}"
+_source_secrets_if_present "${PROXY_SECRETS}"
 
 if [ "${RUN_BUILDER_ON_START}" = "true" ] || [ ! -f "${SERVER_SECRETS}" ]; then
   echo "entrypoint: running builderMasterServer.py (operation-time secrets generation)"
@@ -54,18 +69,29 @@ _source_secrets_if_present "${SECRETS_ENV}"
 _source_secrets_if_present "${MASTER_SECRETS}"
 _source_secrets_if_present "${SERVER_SECRETS}"
 _source_secrets_if_present "${CONFIG_SECRETS}"
+_source_secrets_if_present "${BACKEND_SECRETS}"
 _source_secrets_if_present "${OPERATIONS_SECRETS}"
 
-MONGODB_SECRETS="${MONGODB_SECRETS_FILE:-}"
-DATABASES_SECRETS="${DATABASES_SECRETS_FILE:-}"
-BLOCKCHAIN_SECRETS="${BLOCKCHAIN_SECRETS_FILE:-}"
-PAYMENTS_SECRETS="${PAYMENTS_SECRETS_FILE:-}"
-BACKEND_SECRETS="${BACKEND_SECRETS_FILE:-}"
+MONGODB_SECRETS="${MONGODB_SECRETS_FILE:-${SECRETS_DIR}/mongodb.secrets}"
+DATABASES_SECRETS="${DATABASES_SECRETS_FILE:-${SECRETS_DIR}/databases.secrets}"
+BLOCKCHAIN_SECRETS="${BLOCKCHAIN_SECRETS_FILE:-${SECRETS_DIR}/blockchain.secrets}"
+PAYMENTS_SECRETS="${PAYMENTS_SECRETS_FILE:-${SECRETS_DIR}/payments.secrets}"
 _source_secrets_if_present "${MONGODB_SECRETS}"
 _source_secrets_if_present "${DATABASES_SECRETS}"
 _source_secrets_if_present "${BLOCKCHAIN_SECRETS}"
 _source_secrets_if_present "${PAYMENTS_SECRETS}"
-_source_secrets_if_present "${BACKEND_SECRETS}"
+_source_secrets_if_present "${PROXY_SECRETS}"
+
+if [ ! -f "${PROXY_SECRETS}" ]; then
+  echo "entrypoint: proxy.secrets missing — ${PROXY_SECRETS}" >&2
+  exit 2
+fi
+MASTER_SERVER_ONION="$(grep -E '^MASTER_SERVER_ONION=' "${PROXY_SECRETS}" | head -1 | cut -d= -f2-)"
+export MASTER_SERVER_ONION
+if [ -z "${MASTER_SERVER_ONION}" ]; then
+  echo "entrypoint: MASTER_SERVER_ONION missing from ${PROXY_SECRETS}" >&2
+  exit 2
+fi
 
 if [ -z "${SERVER_SECRETS}" ] || [ ! -f "${SERVER_SECRETS}" ]; then
   echo "entrypoint: error — server.secrets was not produced" >&2

@@ -21,6 +21,67 @@ OPERATIONS_SECRETS_FILE: Path
 
 OPERATIONS_SECRETS_FILE_ENV = "OPERATIONS_SECRETS_FILE"
 
+# In-image path (Operations.txt). Written by Ops.dockerfile RUN, not at container start.
+IN_IMAGE_SECRETS_DIR = Path("/app/secrets")
+IN_IMAGE_OPERATIONS_SECRETS = IN_IMAGE_SECRETS_DIR / "operations.secrets"
+
+# Connection keys that must already exist in Master.secrets / proxy.secrets / torrc.
+BUILD_REQUIRED_CONNECTION_KEYS: tuple[str, ...] = (
+    "OPERATIONS_BIND_HOST",
+    "OPERATIONS_BIND_PORT",
+    "OPERATIONS_DOCKER_DNS_NAME",
+    "OPERATIONS_NETWORK_NAME",
+    "BLOCKCHAIN_DOCKER_DNS_NAME",
+    "BLOCKCHAIN_BIND_PORT",
+    "BLOCKCHAIN_API_PREFIX",
+    "BLOCKCHAIN_SECRET",
+    "BLOCKCHAIN_SECRET_KEY",
+)
+
+_CONNECTION_KEY_ALIASES: dict[str, tuple[str, ...]] = {
+    "OPERATIONS_BIND_HOST": (
+        "OPERATIONS_BIND_HOST",
+        "MASTER_SERVER_BIND_HOST",
+        "MASTER_SERVER_HOST",
+        "PROXY_BIND_HOST",
+        "HOST_PRIMARY_IP",
+    ),
+    "OPERATIONS_BIND_PORT": (
+        "OPERATIONS_BIND_PORT",
+        "OPERATIONS_PORT",
+        "MASTER_SERVER_PORT",
+        "PROXY_BIND_PORT",
+    ),
+    "OPERATIONS_DOCKER_DNS_NAME": (
+        "OPERATIONS_DOCKER_DNS_NAME",
+        "OPERATIONS_CONTAINER_NAME",
+        "DNS_OPERATIONS_SERVICE_NAME",
+    ),
+    "OPERATIONS_NETWORK_NAME": (
+        "OPERATIONS_NETWORK_NAME",
+        "DOCKER_NETWORK_NAME",
+    ),
+    "BLOCKCHAIN_DOCKER_DNS_NAME": (
+        "BLOCKCHAIN_DOCKER_DNS_NAME",
+        "BLOCKCHAIN_CONTAINER_NAME",
+    ),
+    "BLOCKCHAIN_BIND_PORT": ("BLOCKCHAIN_BIND_PORT",),
+    "BLOCKCHAIN_API_PREFIX": ("BLOCKCHAIN_API_PREFIX",),
+    "BLOCKCHAIN_SECRET": ("BLOCKCHAIN_SECRET",),
+    "BLOCKCHAIN_SECRET_KEY": ("BLOCKCHAIN_SECRET_KEY",),
+    "MASTER_SERVER_ONION": ("MASTER_SERVER_ONION",),
+    "FRONTEND_ONION": ("FRONTEND_ONION",),
+    "NODEUSER_ONION": ("NODEUSER_ONION",),
+    "BLOCKCHAIN_ONION": ("BLOCKCHAIN_ONION",),
+}
+
+_TORRC_ONION_KEYS: tuple[str, ...] = (
+    "MASTER_SERVER_ONION",
+    "FRONTEND_ONION",
+    "NODEUSER_ONION",
+    "BLOCKCHAIN_ONION",
+)
+
 OPERATIONS_SECRETS_KEYS: tuple[str, ...] = (
     "OPERATIONS_API_PREFIX",
     "OPERATIONS_TOR_ONLY",
@@ -983,71 +1044,120 @@ def build_operations_secret_values(
     return apply_pull_to_operations_configuration(prior=existing)
 
 
+def _onion_hosts_from_torrc(text: str) -> list[str]:
+    """Collect *.onion hostnames written in torrc. Does not invent addresses."""
+    hosts: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        for token in stripped.replace(",", " ").split():
+            host = token.strip().lower().split("://")[-1].split("/")[0].split(":")[0]
+            if host.endswith(".onion") and host not in hosts:
+                hosts.append(host)
+    return hosts
+
+
+def _merged_build_sources(
+    master_secrets: Path, proxy_secrets: Path
+) -> dict[str, str]:
+    if not master_secrets.is_file():
+        raise RuntimeError(
+            f"Master.secrets missing at image build: {master_secrets.as_posix()}"
+        )
+    if not proxy_secrets.is_file():
+        raise RuntimeError(
+            f"proxy.secrets missing at image build: {proxy_secrets.as_posix()}"
+        )
+    merged = parse_secrets_file(master_secrets)
+    for key, value in parse_secrets_file(proxy_secrets).items():
+        if value:
+            merged[key] = value
+    return merged
+
+
+def _alias_value(merged: dict[str, str], canonical: str) -> str:
+    for alias in _CONNECTION_KEY_ALIASES.get(canonical, (canonical,)):
+        value = merged.get(alias, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def write_operations_secrets_at_build(
+    *,
+    master_secrets: Path,
+    proxy_secrets: Path,
+    torrc: Path,
+    destination: Path | None = None,
+) -> Path:
+    """
+    Create /app/secrets/operations.secrets during image build (Dockerfile RUN).
+    Values come only from Master.secrets, proxy.secrets, and torrc.
+    """
+    merged = _merged_build_sources(master_secrets, proxy_secrets)
+    if not torrc.is_file():
+        raise RuntimeError(f"torrc missing at image build: {torrc.as_posix()}")
+
+    onions = _onion_hosts_from_torrc(torrc.read_text(encoding="utf-8"))
+    values: dict[str, str] = {
+        "GENERATED_AT": utc_now(),
+        "SECRETS_DIR": IN_IMAGE_SECRETS_DIR.as_posix(),
+        "OPERATIONS_SECRETS_FILE": IN_IMAGE_OPERATIONS_SECRETS.as_posix(),
+        "OPERATIONS_SECRETS_NAME": "operations.secrets",
+    }
+    if onions:
+        values["TORRC_ONION_HOSTS"] = ",".join(onions)
+
+    for key in OPERATIONS_SECRETS_KEYS:
+        sourced = merged.get(key, "").strip() or _alias_value(merged, key)
+        if sourced:
+            values[key] = sourced
+
+    onion_index = 0
+    for key in _TORRC_ONION_KEYS:
+        if values.get(key, "").strip():
+            continue
+        if onion_index >= len(onions):
+            break
+        values[key] = onions[onion_index]
+        onion_index += 1
+
+    missing = [key for key in BUILD_REQUIRED_CONNECTION_KEYS if not values.get(key, "").strip()]
+    if missing:
+        raise RuntimeError(
+            "operations.secrets image build failed — required connection keys absent "
+            "from Master.secrets, proxy.secrets, and torrc: " + ", ".join(missing)
+        )
+
+    target = destination if destination is not None else IN_IMAGE_OPERATIONS_SECRETS
+    write_secrets_file(target, values)
+    if not target.is_file() or target.stat().st_size == 0:
+        raise RuntimeError(f"operations.secrets was not written: {target.as_posix()}")
+    return target
+
+
 def write_operations_secrets(
     *,
     secrets_dir: Path | None = None,
     force: bool = False,
     pull: dict[str, Any] | None = None,
 ) -> Path:
-    """Write operations.secrets on the host from operation-time pull (sessions pattern)."""
-    from ops_pull_information import pull_operations_hardware
-
-    info = pull if pull is not None else pull_operations_hardware(bind_environ=True)
-    name = (
-        _env("OPERATIONS_SECRETS_NAME")
-        or str(info.get("operations_secrets_name") or "").strip()
-        or "operations.secrets"
+    """
+    Runtime must not create or relocate operations.secrets.
+    The file is written at image build to /app/secrets/operations.secrets.
+    """
+    del secrets_dir, force, pull
+    existing = _env(OPERATIONS_SECRETS_FILE_ENV)
+    path = Path(existing).expanduser() if existing else IN_IMAGE_OPERATIONS_SECRETS
+    if path.is_file() and path.stat().st_size > 0:
+        os.environ[OPERATIONS_SECRETS_FILE_ENV] = path.as_posix()
+        os.environ["SECRETS_DIR"] = path.parent.as_posix()
+        return path
+    raise RuntimeError(
+        "operations.secrets is created at image build as "
+        f"{IN_IMAGE_OPERATIONS_SECRETS.as_posix()} — runtime write is not allowed"
     )
-    if secrets_dir is not None:
-        path = Path(secrets_dir).expanduser() / name
-    else:
-        override = _env("OPERATIONS_SECRETS_FILE") or str(
-            info.get("operations_secrets_file") or ""
-        ).strip()
-        if override:
-            path = Path(override).expanduser()
-        else:
-            target = Path(
-                str(info.get("secrets_dir") or _env("SECRETS_DIR") or "")
-            ).expanduser()
-            if not str(target):
-                raise RuntimeError(
-                    "SECRETS_DIR missing — must be set at time of operation"
-                )
-            path = target / name
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    prior = parse_secrets_file(path) if path.exists() else {}
-    resolved = apply_pull_to_operations_configuration(pull=info, prior=prior)
-
-    if path.exists() and not force:
-        existing_keys = set(prior.keys())
-        needs_fill = any(
-            (k not in existing_keys) or (not prior.get(k)) for k in resolved if resolved[k]
-        )
-        if not needs_fill:
-            os.environ["OPERATIONS_SECRETS_FILE"] = path.as_posix()
-            os.environ["SECRETS_DIR"] = path.parent.as_posix()
-            for key in (
-                "OPERATIONS_BIND_HOST",
-                "OPERATIONS_BIND_PORT",
-                "OPERATIONS_DOCKER_DNS_NAME",
-                "OPERATIONS_NETWORK_NAME",
-            ):
-                if resolved.get(key) and not _env(key):
-                    os.environ[key] = resolved[key]
-            return path
-
-    write_secrets_file(path, resolved)
-    os.environ["OPERATIONS_SECRETS_FILE"] = path.as_posix()
-    os.environ["SECRETS_DIR"] = path.parent.as_posix()
-    os.environ["OPERATIONS_SECRETS_NAME"] = name
-    for key, value in resolved.items():
-        if value and not _env(key):
-            os.environ[key] = value
-    load_operations_secrets(reload=True)
-    _bind_paths_from_operation()
-    return path
 
 
 def write_operations_secrets_template(

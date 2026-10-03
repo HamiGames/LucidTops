@@ -73,20 +73,20 @@ def _devices_from_secrets() -> list[dict[str, str]]:
 
 
 def refresh_usb_from_hardware() -> list[dict[str, str]]:
-    """Re-pull USB inventory from hardware and update rdp.secrets."""
+    """Re-pull USB inventory from the user console into the program-folder state."""
     create_rdp = _load_local("createRDP", "createRDP.py")
     info = create_rdp.pull_information()
     devices = list(info.get("usb_devices") or [])
-    path = _rdp_secrets.rdp_secrets_path()
-    current = _rdp_secrets.parse_secrets_file(path) if path.exists() else {}
-    current["RDP_USB_DEVICES_JSON"] = json.dumps(devices, separators=(",", ":"))
-    current["PULLED_AT"] = str(info.get("pulled_at") or utc_now())
+    updates = {
+        "RDP_USB_DEVICES_JSON": json.dumps(devices, separators=(",", ":")),
+        "PULLED_AT": str(info.get("pulled_at") or utc_now()),
+    }
     if info.get("primary_ip"):
-        current["HARDWARE_PRIMARY_IP"] = str(info["primary_ip"])
+        updates["HARDWARE_PRIMARY_IP"] = str(info["primary_ip"])
     if info.get("primary_mac"):
-        current["HARDWARE_PRIMARY_MAC"] = str(info["primary_mac"])
-    _rdp_secrets.write_secrets_file(path, current)
-    load_rdp_secrets(reload=True)
+        updates["HARDWARE_PRIMARY_MAC"] = str(info["primary_mac"])
+    _rdp_secrets.update_console_state(updates)
+    _rdp_secrets.load_console_state(reload=True)
     return devices
 
 

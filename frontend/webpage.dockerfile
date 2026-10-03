@@ -11,8 +11,9 @@
 #     -t lucid-frontend:v1.0.0 \
 #     /mnt/myssd/LucidTops
 #
-# Secrets mount (§16.1):
-#   /mnt/myssd/LucidTops/frontend/secrets/*.secrets
+# Secrets (containers.txt — Pi console, not inside the image):
+#   /mnt/myssd/LucidTops/Server/Secrets/*.secrets
+#   /mnt/myssd/LucidTops/torrc
 #
 # RULES:
 # - No hardcoded operational IPs/ports/onions/tokens in the image.
@@ -71,11 +72,15 @@ RUN test -f /opt/lucid/frontend/pull_information.py \
  && test -s /opt/lucid/frontend/requirements.txt \
  && chmod +x /docker-entrypoint-frontend.sh \
  && mkdir -p /opt/lucid/frontend/nginx /var/log/nginx \
- && mkdir -p /mnt/myssd/LucidTops/frontend/secrets /mnt/myssd/LucidTops
+ && mkdir -p /mnt/myssd/LucidTops/Server/Secrets /mnt/myssd/LucidTops
 
 ENV FRONTEND_WEBPAGE_ROOT=/opt/lucid/frontend/webpage \
     LUCID_TOPS_ROOT=/mnt/myssd/LucidTops \
-    SECRETS_DIR=/mnt/myssd/LucidTops/frontend/secrets \
+    SECRETS_DIR=/mnt/myssd/LucidTops/Server/Secrets \
+    FRONTEND_SECRETS_FILE=/mnt/myssd/LucidTops/Server/Secrets/frontend.secrets \
+    MASTER_SECRETS_FILE=/mnt/myssd/LucidTops/Server/Secrets/Master.secrets \
+    PROXY_SECRETS_FILE=/mnt/myssd/LucidTops/Server/Secrets/proxy.secrets \
+    HOST_TOR_CONFIG_TORRC=/mnt/myssd/LucidTops/torrc \
     PYTHONUNBUFFERED=1
 
 ENTRYPOINT ["/docker-entrypoint-frontend.sh"]

@@ -1,9 +1,9 @@
-"""createRDP — pull hardware at time of operation and produce rdp.secrets.
+"""createRDP — pull hardware at time of operation and write the user-console state.
 
 purpose:
-1. pull_information(): IP, MAC, iface, machine-id, DockerDNS, listeners, mounts from hardware.
-2. build_and_write_rdp_secrets(): write pulled/created values into rdp.secrets.
-3. apply_pull_to_rdp_configuration(): bind host/port/DNS from pull into secrets.
+1. pull_information(): IP, MAC, iface, machine-id, listeners, mounts from the user console.
+2. build_and_write_rdp_secrets(): write hardware, settings.js, logs, and USB into the program folder.
+3. apply_pull_to_rdp_configuration(): local paths from the pull. Connection DNS stays in /app/Secrets/rdp.secrets.
 
 RULES:
 - No hardcoded values, all values are created at time of operation.
@@ -33,7 +33,6 @@ from pathlib import Path
 from typing import Any
 
 _DIR = Path(__file__).resolve().parent
-_PROJECT_ROOT = _DIR.parent
 if str(_DIR) not in sys.path:
     sys.path.insert(0, str(_DIR))
 
@@ -60,9 +59,11 @@ _rdp_secrets = _load_local("rdp_secrets")
 write_secrets_file = _rdp_secrets.write_secrets_file
 parse_secrets_file = _rdp_secrets.parse_secrets_file
 rdp_secrets_path = _rdp_secrets.rdp_secrets_path
-apply_secrets_file = _rdp_secrets.apply_secrets_file
-load_rdp_secrets = _rdp_secrets.load_rdp_secrets
+load_console_state = _rdp_secrets.load_console_state
 get_rdp_secret = _rdp_secrets.get_rdp_secret
+program_folder = _rdp_secrets.program_folder
+console_state_path = _rdp_secrets.console_state_path
+is_connection_key = _rdp_secrets.is_connection_key
 
 
 def utc_now() -> str:
@@ -210,82 +211,13 @@ def _pull_boot_id() -> str:
     return ""
 
 
-def _pull_mount_roots() -> list[Path]:
-    roots: list[Path] = []
-    if Path("/proc/mounts").exists():
-        try:
-            for line in Path("/proc/mounts").read_text(encoding="utf-8").splitlines():
-                parts = line.split()
-                if len(parts) < 2:
-                    continue
-                mount = Path(parts[1])
-                if mount.is_dir():
-                    roots.append(mount)
-        except OSError:
-            pass
-    if platform.system().lower() == "windows":
-        for letter in "CDEFGHIJKLMNOPQRSTUVWXYZ":
-            drive = Path(f"{letter}:/")
-            if drive.exists():
-                roots.append(drive)
-    roots.append(Path.home())
-    roots.append(_PROJECT_ROOT)
-    seen: set[str] = set()
-    ordered: list[Path] = []
-    for root in roots:
-        key = root.as_posix()
-        if key not in seen:
-            seen.add(key)
-            ordered.append(root)
-    return ordered
-
-
 def _pull_lucid_tops_root() -> Path:
-    env_root = _env("LUCID_TOPS_ROOT")
-    if env_root:
-        return Path(env_root).expanduser().resolve()
-
-    for mount in _pull_mount_roots():
-        for candidate in (
-            mount / "LucidTops",
-            mount / "myssd" / "LucidTops",
-            mount / "Server" / "LucidTops",
-            mount / "LucidTops" / "Server",
-        ):
-            if candidate.is_dir():
-                return candidate.resolve()
-        try:
-            for child in mount.iterdir():
-                if child.is_dir() and child.name.lower() == "lucidtops":
-                    return child.resolve()
-        except OSError:
-            continue
-
-    for parent in [_DIR, *_DIR.parents]:
-        secrets_probe = parent / "Secrets"
-        secrets_probe_alt = parent / "Server" / "Secrets"
-        lucid_probe = parent / "LucidTops"
-        if secrets_probe.is_dir() or secrets_probe_alt.is_dir():
-            return parent.resolve()
-        if lucid_probe.is_dir():
-            return lucid_probe.resolve()
-        if (parent / "proxy").is_dir() and (parent / "Rdp").is_dir():
-            data = parent / "LucidTops"
-            data.mkdir(parents=True, exist_ok=True)
-            return data.resolve()
-
-    created = Path.home() / "LucidTops"
-    created.mkdir(parents=True, exist_ok=True)
-    return created.resolve()
+    return program_folder()
 
 
 def _pull_secrets_dir(lucid_root: Path) -> Path:
-    env_secrets = _env("SECRETS_DIR")
-    if env_secrets:
-        return Path(env_secrets).expanduser().resolve()
-    chosen = lucid_root / "Rdp" / "secrets"
-    chosen.mkdir(parents=True, exist_ok=True)
-    return chosen.resolve()
+    del lucid_root
+    return program_folder()
 
 
 def _pull_listening_by_process() -> dict[str, list[tuple[str, int]]]:
@@ -556,9 +488,7 @@ def pull_information() -> dict[str, Any]:
         "lucid-proxy",
     )
 
-    library_path = lucid_root / "Rdp"
-    if not library_path.is_dir():
-        library_path.mkdir(parents=True, exist_ok=True)
+    library_path = program_folder()
 
     pulled: dict[str, Any] = {
         "pulled_at": utc_now(),
@@ -603,62 +533,13 @@ def get_last_pull() -> dict[str, Any]:
     return dict(_LAST_PULL) if _LAST_PULL else pull_information()
 
 
-_INHERIT_KEY_PREFIXES: tuple[str, ...] = (
-    "RDP_",
-    "HARDWARE_",
-    "TOR_SOCKS_",
-    "PROXY_SESSIONS_DNS",
-    "PROXY_USER_DNS",
-    "PROXY_OPERATIONS_DNS",
-    "PROXY_BACKEND_DNS",
-    "PROXY_RDP_DNS",
-    "API_BASE_PATH",
-    "SESSIONS_",
-    "SESSION_",
-    "OPERATIONS_",
-    "MASTER_SERVER",
-    "DOCKER_NETWORK",
-    "DOCKERDNS_INVENTORY",
-    "LUCID_TOPS_ROOT",
-    "SECRETS_DIR",
-    "DOCKER_BIN",
-    "RDP_ONION",
-)
-
-
-def _should_inherit_key(key: str) -> bool:
-    upper = key.upper()
-    for prefix in _INHERIT_KEY_PREFIXES:
-        if upper == prefix or upper.startswith(prefix):
-            return True
-    return False
-
-
 def _merge_prior_secrets(secrets_dir: Path) -> dict[str, str]:
-    """Load prior values from host secrets — inherit only Rdp-relevant keys."""
+    """Load the user-console state file. Do not read Pi secrets or the image connection file."""
+    del secrets_dir
     merged: dict[str, str] = {}
-    ordered_paths: list[Path] = []
-    for name in ("rdp.secrets", "sessions.secrets", "proxy.secrets"):
-        candidate = secrets_dir / name
-        if candidate.exists():
-            ordered_paths.append(candidate)
-    for path in sorted(secrets_dir.glob("rdp*.secrets")):
-        if path not in ordered_paths:
-            ordered_paths.insert(0, path)
-
-    for path in ordered_paths:
-        for key, value in parse_secrets_file(path).items():
-            if not key or not value:
-                continue
-            if path.name.lower().startswith("rdp") or _should_inherit_key(key):
-                if key not in merged:
-                    merged[key] = value
-
-    env_file = _env("RDP_SECRETS_FILE")
-    if env_file:
-        for key, value in parse_secrets_file(Path(env_file).expanduser()).items():
-            if key and value and _should_inherit_key(key):
-                merged[key] = value
+    for key, value in parse_secrets_file(console_state_path()).items():
+        if key and value and not is_connection_key(key):
+            merged[key] = value
     return merged
 
 
@@ -1181,28 +1062,28 @@ def _pull_display_geometry() -> tuple[str, str]:
 
 
 def build_and_write_rdp_secrets(*, overwrite_keys: bool = False) -> dict[str, Any]:
-    """Pull hardware and write rdp.secrets at time of operation."""
+    """Pull hardware and write user-console state. Do not rewrite /app/Secrets/rdp.secrets."""
     info = pull_information()
-    secrets_dir = Path(str(info["secrets_dir"]))
-    secrets_dir.mkdir(parents=True, exist_ok=True)
-    prior = _merge_prior_secrets(secrets_dir)
+    folder = Path(str(info["library_path"]))
+    folder.mkdir(parents=True, exist_ok=True)
+    prior = _merge_prior_secrets(folder)
     created = apply_pull_to_rdp_configuration(pull=info, prior=prior)
 
-    path = secrets_dir / created.get("RDP_SECRETS_NAME", "rdp.secrets")
-    env_override = _env("RDP_SECRETS_FILE")
-    if env_override:
-        path = Path(env_override).expanduser()
+    path = console_state_path()
 
-    # Write only Rdp keys (+ selective inherited DNS/Tor), not full proxy dump
     merged: dict[str, str] = {}
     for key, value in prior.items():
-        if _should_inherit_key(key) and value:
+        if value and not is_connection_key(key):
             merged[key] = value
 
     if overwrite_keys:
-        merged.update(created)
+        for key, value in created.items():
+            if value and not is_connection_key(key):
+                merged[key] = value
     else:
         for key, value in created.items():
+            if not value or is_connection_key(key):
+                continue
             if key not in merged or not merged[key]:
                 merged[key] = value
             elif key.startswith("HARDWARE_") or key in {
@@ -1210,30 +1091,11 @@ def build_and_write_rdp_secrets(*, overwrite_keys: bool = False) -> dict[str, An
                 "RDP_USB_DEVICES_JSON",
                 "LUCID_TOPS_ROOT",
                 "SECRETS_DIR",
-                "RDP_SESSIONS_DNS",
-                "RDP_SESSIONS_PORT",
-                "RDP_OPERATIONS_DNS",
-                "RDP_OPERATIONS_PORT",
-                "RDP_SELF_DNS",
-                "RDP_BACKEND_DNS",
-                "RDP_BACKEND_PORT",
-                "RDP_BACKEND_API_PREFIX",
-                "RDP_BACKEND_ACCESS_PATH",
-                "RDP_SESSION_SETTINGS_PATH",
-                "RDP_DOCKER_NETWORK_NAME",
-                "RDP_SESSIONS_API_PREFIX",
-                "RDP_OPERATIONS_API_PREFIX",
-                "RDP_SESSION_VALIDATE_PATH",
-                "RDP_SESSION_FIND_PATH",
-                "RDP_SESSION_CREATE_PATH",
-                "RDP_SESSION_CONNECT_PATH",
-                "RDP_SESSION_AGREE_PATH",
-                "RDP_SESSION_DISCONNECT_PATH",
-                "RDP_SESSION_END_PATH",
-                "RDP_SESSION_RECORD_PATH",
-                "RDP_SESSION_RECONNECT_PATH",
-                "RDP_OPERATIONS_SESSION_CONTROL_PATH",
-                "RDP_OPERATIONS_SESSION_RECORD_PATH",
+                "RDP_SETTINGS_JS_PATH",
+                "RDP_LOG_DIR",
+                "RDP_PID_FILE",
+                "RDP_FILE_SHARE_ROOT",
+                "RDP_GOV_BACKUP_PATH",
                 "RDP_VIEWER_WINDOW_TARGET",
                 "RDP_GOV_PERMISSIONS",
             }:
@@ -1248,36 +1110,235 @@ def build_and_write_rdp_secrets(*, overwrite_keys: bool = False) -> dict[str, An
         "RDP_USB_DEVICES_JSON",
         "PULLED_AT",
     ):
-        if key in created:
+        if key in created and not is_connection_key(key):
             merged[key] = created[key]
 
     write_secrets_file(path, merged)
-    os.environ["RDP_SECRETS_FILE"] = path.as_posix()
-    os.environ["SECRETS_DIR"] = secrets_dir.as_posix()
-    os.environ["LUCID_TOPS_ROOT"] = str(info["lucid_tops_root"])
-    apply_secrets_file(path, overwrite=True)
-    try:
-        load_rdp_secrets(reload=True)
-    except RuntimeError:
-        pass
+    load_console_state(reload=True)
 
     return {
         "status": "written",
-        "rdp_secrets_file": path.as_posix(),
+        "rdp_secrets_file": rdp_secrets_path().as_posix(),
+        "console_state_file": path.as_posix(),
         "keys": sorted(merged.keys()),
         "hardware_ip": merged.get("HARDWARE_PRIMARY_IP", ""),
         "hardware_mac": merged.get("HARDWARE_PRIMARY_MAC", ""),
         "rdp_port": merged.get("RDP_PORT", ""),
-        "sessions_dns": merged.get("RDP_SESSIONS_DNS", ""),
-        "backend_dns": merged.get("RDP_BACKEND_DNS", ""),
-        "secrets_dir": secrets_dir.as_posix(),
+        "sessions_dns": get_rdp_secret("RDP_SESSIONS_DNS"),
+        "backend_dns": get_rdp_secret("RDP_BACKEND_DNS"),
+        "secrets_dir": folder.as_posix(),
         "library_path": str(info.get("library_path") or ""),
-        "docker_network": merged.get("RDP_DOCKER_NETWORK_NAME", ""),
+        "docker_network": get_rdp_secret("RDP_DOCKER_NETWORK_NAME"),
         "pulled_at": merged.get("PULLED_AT", ""),
     }
 
 
+SERVER_SECRETS_DIR = Path("/mnt/myssd/LucidTops/Server/Secrets")
+IMAGE_RDP_SECRETS = Path("/app/Secrets/rdp.secrets")
+
+_IMAGE_BUILD_REQUIRED: tuple[str, ...] = (
+    "RDP_SESSIONS_DNS",
+    "RDP_SESSIONS_PORT",
+    "RDP_BACKEND_DNS",
+    "RDP_BACKEND_PORT",
+    "RDP_OPERATIONS_DNS",
+    "RDP_OPERATIONS_PORT",
+    "RDP_SELF_DNS",
+    "RDP_DOCKER_NETWORK_NAME",
+    "TOR_SOCKS_HOST",
+    "TOR_SOCKS_PORT",
+)
+
+
+def _image_build_requested() -> bool:
+    return _env("RDP_SECRETS_AT_IMAGE_BUILD").lower() in {"1", "true", "yes"}
+
+
+def _load_image_build_seed() -> dict[str, str]:
+    """Master fills non-empty keys. Proxy fills keys Master left empty."""
+    master_path = SERVER_SECRETS_DIR / "Master.secrets"
+    proxy_path = SERVER_SECRETS_DIR / "proxy.secrets"
+    if not proxy_path.is_file():
+        proxy_path = SERVER_SECRETS_DIR / "Proxy.secrets"
+    if not master_path.is_file() and not proxy_path.is_file():
+        raise RuntimeError(
+            "Master.secrets and proxy.secrets missing under "
+            f"{SERVER_SECRETS_DIR.as_posix()} — required at image creation"
+        )
+    seed: dict[str, str] = {}
+    if proxy_path.is_file():
+        for key, value in parse_secrets_file(proxy_path).items():
+            if key and value:
+                seed[key] = value
+    if master_path.is_file():
+        for key, value in parse_secrets_file(master_path).items():
+            if key and value:
+                seed[key] = value
+    return seed
+
+
+def _seed_value(seed: dict[str, str], *keys: str) -> str:
+    for key in keys:
+        value = seed.get(key, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _connection_values_from_seed(seed: dict[str, str]) -> dict[str, str]:
+    """Map Server/Secrets seed keys onto Rdp linking-container connection fields."""
+    values: dict[str, str] = {
+        "RDP_SESSIONS_DNS": _seed_value(
+            seed,
+            "RDP_SESSIONS_DNS",
+            "SESSIONS_DOCKER_DNS_NAME",
+            "PROXY_SESSIONS_DNS",
+            "SESSIONS_DNS",
+            "SESSIONS_SERVICE_NAME",
+        ),
+        "RDP_SESSIONS_PORT": _seed_value(
+            seed,
+            "RDP_SESSIONS_PORT",
+            "SESSIONS_BIND_PORT",
+            "SESSIONS_PORT",
+            "SESSION_API_PORT",
+            "PROXY_SESSIONS_PORT",
+        ),
+        "RDP_BACKEND_DNS": _seed_value(
+            seed,
+            "RDP_BACKEND_DNS",
+            "PROXY_BACKEND_DNS",
+            "BACKEND_DNS",
+            "MASTER_SERVER_DNS",
+            "MASTER_SERVER_INTERNAL_HOST",
+        ),
+        "RDP_BACKEND_PORT": _seed_value(
+            seed,
+            "RDP_BACKEND_PORT",
+            "MASTER_SERVER_PORT",
+            "BACKEND_PORT",
+            "PROXY_BACKEND_PORT",
+            "MASTER_SERVER_INTERNAL_PORT",
+        ),
+        "RDP_OPERATIONS_DNS": _seed_value(
+            seed,
+            "RDP_OPERATIONS_DNS",
+            "OPERATIONS_DOCKER_DNS_NAME",
+            "PROXY_OPERATIONS_DNS",
+            "OPERATIONS_DNS",
+            "OPERATIONS_SERVICE_NAME",
+        ),
+        "RDP_OPERATIONS_PORT": _seed_value(
+            seed,
+            "RDP_OPERATIONS_PORT",
+            "OPERATIONS_BIND_PORT",
+            "OPERATIONS_PORT",
+            "PROXY_OPERATIONS_PORT",
+        ),
+        "RDP_SELF_DNS": _seed_value(
+            seed,
+            "RDP_SELF_DNS",
+            "RDP_DOCKER_DNS_NAME",
+            "PROXY_RDP_DNS",
+        ),
+        "RDP_DOCKER_NETWORK_NAME": _seed_value(
+            seed,
+            "RDP_DOCKER_NETWORK_NAME",
+            "DOCKER_NETWORK_NAME",
+            "SESSIONS_NETWORK_NAME",
+            "OPERATIONS_NETWORK_NAME",
+        ),
+        "TOR_SOCKS_HOST": _seed_value(seed, "TOR_SOCKS_HOST"),
+        "TOR_SOCKS_PORT": _seed_value(seed, "TOR_SOCKS_PORT"),
+    }
+    optional_aliases: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ("RDP_SESSIONS_SCHEME", ("RDP_SESSIONS_SCHEME", "SESSIONS_URL_SCHEME")),
+        ("RDP_SESSIONS_API_PREFIX", ("RDP_SESSIONS_API_PREFIX", "SESSION_API_PREFIX")),
+        ("RDP_BACKEND_SCHEME", ("RDP_BACKEND_SCHEME",)),
+        ("RDP_BACKEND_API_PREFIX", ("RDP_BACKEND_API_PREFIX", "API_BASE_PATH")),
+        ("RDP_OPERATIONS_SCHEME", ("RDP_OPERATIONS_SCHEME", "OPERATIONS_URL_SCHEME")),
+        ("RDP_OPERATIONS_API_PREFIX", ("RDP_OPERATIONS_API_PREFIX", "OPERATIONS_API_PREFIX")),
+        ("RDP_USER_DNS", ("RDP_USER_DNS", "PROXY_USER_DNS")),
+        ("RDP_BIND_HOST", ("RDP_BIND_HOST", "MASTER_SERVER_BIND_HOST")),
+        ("RDP_PORT", ("RDP_PORT",)),
+        ("RDP_HTTP_TIMEOUT", ("RDP_HTTP_TIMEOUT",)),
+        ("RDP_ONION", ("RDP_ONION",)),
+        (
+            "RDP_OPERATIONS_MASTER_SERVER_ID",
+            ("RDP_OPERATIONS_MASTER_SERVER_ID", "MASTER_SERVER_ID"),
+        ),
+    )
+    for target, aliases in optional_aliases:
+        picked = _seed_value(seed, *aliases)
+        if picked:
+            values[target] = picked
+    for key in (
+        "PROXY_SESSIONS_DNS",
+        "PROXY_USER_DNS",
+        "PROXY_OPERATIONS_DNS",
+        "PROXY_BACKEND_DNS",
+        "PROXY_RDP_DNS",
+    ):
+        picked = seed.get(key, "").strip()
+        if picked:
+            values[key] = picked
+    hardware_aliases: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ("HARDWARE_PRIMARY_IP", ("HARDWARE_PRIMARY_IP", "HOST_PRIMARY_IP")),
+        ("HARDWARE_PRIMARY_MAC", ("HARDWARE_PRIMARY_MAC", "HOST_PRIMARY_MAC")),
+        ("HARDWARE_MACHINE_ID", ("HARDWARE_MACHINE_ID", "HOST_MACHINE_ID")),
+        ("HARDWARE_HOSTNAME", ("HARDWARE_HOSTNAME", "HOST_HOSTNAME", "HOSTNAME_CONSOLE")),
+    )
+    for target, aliases in hardware_aliases:
+        picked = _seed_value(seed, *aliases)
+        if picked:
+            values[target] = picked
+    missing = [key for key in _IMAGE_BUILD_REQUIRED if not values.get(key, "").strip()]
+    if missing:
+        raise RuntimeError(
+            "rdp.secrets image build missing connection keys from Master.secrets/proxy.secrets: "
+            + ", ".join(missing)
+        )
+    return {key: value for key, value in values.items() if value.strip()}
+
+
+def write_rdp_secrets_at_image_build() -> dict[str, Any]:
+    """Write /app/Secrets/rdp.secrets from Server/Secrets seeds. No hardware pull."""
+    seed = _load_image_build_seed()
+    values = _connection_values_from_seed(seed)
+    path = Path(_env("RDP_SECRETS_FILE") or IMAGE_RDP_SECRETS.as_posix())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "# LucidTops rdp.secrets — connection keys from Server/Secrets at image creation",
+        f"# Generated: {utc_now()}",
+        f"# Seeds: {SERVER_SECRETS_DIR.as_posix()}/Master.secrets",
+        f"# Seeds: {SERVER_SECRETS_DIR.as_posix()}/proxy.secrets",
+        "",
+    ]
+    for key in sorted(values):
+        lines.append(f"{key}={values[key]}")
+    lines.append("")
+    path.write_text("\n".join(lines), encoding="utf-8")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    if not path.is_file() or path.stat().st_size == 0:
+        raise RuntimeError(f"rdp.secrets was not written at {path.as_posix()}")
+    return {
+        "status": "written",
+        "rdp_secrets_file": path.as_posix(),
+        "keys": sorted(values.keys()),
+        "sessions_dns": values.get("RDP_SESSIONS_DNS", ""),
+        "backend_dns": values.get("RDP_BACKEND_DNS", ""),
+        "docker_network": values.get("RDP_DOCKER_NETWORK_NAME", ""),
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
+    if _image_build_requested():
+        report = write_rdp_secrets_at_image_build()
+        print(json.dumps(report, indent=2))
+        return 0
     args = list(argv if argv is not None else sys.argv[1:])
     overwrite = "--overwrite" in args
     report = build_and_write_rdp_secrets(overwrite_keys=overwrite)

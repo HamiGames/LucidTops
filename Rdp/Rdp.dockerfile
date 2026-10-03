@@ -3,22 +3,26 @@
 # COPY context (mandatory — no other context allowed):
 #   /mnt/myssd/LucidTops
 #
-# Build (on Pi, from mounted SSD — BASE_IMAGE and APT_PACKAGES from hardware pull at operation):
+# Build (on Pi, DOCKER_BUILDKIT=1, after Master.secrets and proxy.secrets exist):
 #   cd /mnt/myssd/LucidTops
-#   docker build --no-cache --platform linux/arm64 \
+#   DOCKER_BUILDKIT=1 docker build --no-cache --platform linux/arm64 \
 #     -f /mnt/myssd/LucidTops/Rdp/Rdp.dockerfile \
 #     --build-arg BASE_IMAGE="${BASE_IMAGE}" \
 #     --build-arg APT_PACKAGES="${APT_PACKAGES}" \
 #     -t lucid-rdp:v1.0.0 \
 #     /mnt/myssd/LucidTops
 #
-# Secrets mount (§16.1):
-#   /mnt/myssd/LucidTops/Rdp/secrets/*.secrets
+# Connection file (documentation/RDP.txt):
+#   At image creation, createRDP.py reads
+#   /mnt/myssd/LucidTops/Server/Secrets/Master.secrets and proxy.secrets
+#   (BuildKit bind, not a copied layer) and writes /app/Secrets/rdp.secrets.
+#   DockerDns reads that in-container file. It is not taken from /mnt/myssd at runtime.
 #
 # RULES:
 # - no hardcoded values; BASE_IMAGE / APT_PACKAGES / PIP_PACKAGES supplied at time of operation.
 # - no placeholder defaults for BASE_IMAGE; must be set from pull/output before build.
-# - At container start, RunRdp → createRDP.pull_information writes rdp.secrets.
+# - User-console files (settings.js, hardware, logs, USB) are written at container start
+#   under the LucidTops program folder (DRIVER_DIR). They are not written into rdp.secrets.
 # - no sensitive data; no GIT pull.
 #
 # Rebuild rule (§16.7): if image exists, wipe generated content and volumes before rebuild.
@@ -30,7 +34,6 @@ FROM ${BASE_IMAGE}
 ARG RDP_DIRECTORY=Rdp
 ARG PIP_PACKAGES=
 ARG APT_PACKAGES=
-ARG RUN_CREATE_ON_BUILD=false
 
 WORKDIR /app
 
@@ -54,19 +57,17 @@ RUN test -f /app/Rdp/createRDP.py \
  && test -f /app/Rdp/DockerDns.py \
  && test -f /app/Rdp/ViewerWindow.py \
  && test -s /app/Rdp/requirements.txt \
- && chmod +x /app/Rdp/createRDP.py /app/Rdp/RunRdp.py
+ && test -f /app/Rdp/pull_information.py \
+ && chmod +x /app/Rdp/createRDP.py /app/Rdp/RunRdp.py /app/Rdp/pull_information.py \
+ && mkdir -p /app/Secrets
 
 ENV PYTHONPATH=/app/Rdp
 ENV PYTHONUNBUFFERED=1
-ENV LUCID_TOPS_ROOT=/mnt/myssd/LucidTops
-ENV SECRETS_DIR=/mnt/myssd/LucidTops/Rdp/secrets
+ENV SECRETS_DIR=/app/Secrets
+ENV RDP_SECRETS_FILE=/app/Secrets/rdp.secrets
 
-RUN mkdir -p /app/Rdp/run /app/Rdp/logs /app/Rdp/share /app/Rdp/backup \
- && mkdir -p /mnt/myssd/LucidTops/Rdp/secrets /mnt/myssd/LucidTops
-
-RUN if [ "${RUN_CREATE_ON_BUILD}" = "true" ]; then \
-      python /app/Rdp/createRDP.py; \
-    fi
+RUN --mount=type=bind,source=/mnt/myssd/LucidTops/Server/Secrets,target=/mnt/myssd/LucidTops/Server/Secrets,readonly \
+    sh -c "RDP_SECRETS_AT_IMAGE_BUILD=true python /app/Rdp/pull_information.py && test -s /app/Secrets/rdp.secrets"
 
 WORKDIR /app/Rdp
 ENTRYPOINT ["python", "RunRdp.py"]

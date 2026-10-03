@@ -9,8 +9,8 @@ Seed sources (Proxy Bootstrap → Server/Secrets, read-only for Databases):
 - /mnt/myssd/LucidTops/Server/Secrets/proxy.secrets (also Proxy.secrets)
 
 Write target (Databases container secrets):
-- /mnt/myssd/LucidTops/Databases/secrets/databases.secrets
-- /mnt/myssd/LucidTops/Databases/secrets/mongodb.secrets
+- /mnt/myssd/LucidTops/Server/Secrets/databases.secrets
+- /mnt/myssd/LucidTops/Server/Secrets/mongodb.secrets
 
 RULES of CODE CREATION:
 - No hardcoded values, all values are created at time of operation.
@@ -123,16 +123,9 @@ def proxy_secrets_path(lucid_root: Path | None = None) -> Path:
 
 
 def databases_write_secrets_dir(lucid_root: Path | None = None) -> Path:
-    """Databases write target — never Server/Secrets."""
+    """databases.secrets and mongodb.secrets are written under Server/Secrets."""
     root = lucid_root if lucid_root is not None else resolve_lucid_tops_root()
-    override = _env("SECRETS_DIR")
-    if override:
-        path = Path(override).expanduser().resolve()
-        parts_lower = {part.lower() for part in path.parts}
-        if "server" in parts_lower and path.name.lower() == "secrets":
-            return (root / "Databases" / "secrets").resolve()
-        return path
-    return (root / "Databases" / "secrets").resolve()
+    return (root / "Server" / "Secrets").resolve()
 
 
 def load_master_and_proxy_seed(lucid_root: Path | None = None) -> dict[str, str]:
@@ -260,6 +253,264 @@ def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
 def _which(name: str) -> str:
     found = shutil.which(name)
     return found or ""
+
+
+def _env_list_to_map(env_list: list[str] | None) -> dict[str, str]:
+    mapped: dict[str, str] = {}
+    for item in env_list or []:
+        if "=" not in item:
+            continue
+        key, _, value = item.partition("=")
+        key = key.strip()
+        if key:
+            mapped[key] = value.strip()
+    return mapped
+
+
+def _parse_mongod_conf(text: str) -> dict[str, str]:
+    """Flatten a running mongod.conf into section.key values that are actually set."""
+    parsed: dict[str, str] = {}
+    section = ""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indented = line.startswith(" ") or line.startswith("\t")
+        key, _, value = stripped.partition(":")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if not key:
+            continue
+        if not indented:
+            section = key
+            if value:
+                parsed[key] = value
+            continue
+        if section and value:
+            parsed[f"{section}.{key}"] = value
+    return parsed
+
+
+def _split_linux_bind(bind: str) -> tuple[str, str]:
+    parts = bind.split(":")
+    if len(parts) < 2 or not parts[0].startswith("/") or not parts[1].startswith("/"):
+        raise RuntimeError(f"container bind is not a host:container path — {bind}")
+    return parts[0], parts[1]
+
+
+def _container_cmdline(docker_bin: str, name: str) -> list[str]:
+    result = _run([docker_bin, "exec", name, "cat", "/proc/1/cmdline"])
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise RuntimeError(f"{name} process command unreadable — {detail}")
+    raw = result.stdout
+    if "\x00" in raw:
+        return [part for part in raw.split("\x00") if part]
+    fallback = _run(
+        [docker_bin, "exec", name, "sh", "-c", "tr '\\0' '\\n' < /proc/1/cmdline"]
+    )
+    if fallback.returncode != 0 or not fallback.stdout.strip():
+        raise RuntimeError(f"{name} process command unreadable")
+    return [part for part in fallback.stdout.splitlines() if part]
+
+
+def _mongod_config_path(argv: list[str]) -> str:
+    for flag in ("--config", "-f"):
+        if flag not in argv:
+            continue
+        index = argv.index(flag)
+        if index + 1 >= len(argv) or not argv[index + 1].strip():
+            raise RuntimeError(f"mongod {flag} has no config path")
+        return argv[index + 1].strip()
+    return ""
+
+
+def _published_host_port(port_bindings: dict[str, Any], container_port: str) -> str:
+    binding = port_bindings.get(f"{container_port}/tcp") or []
+    if not binding or not isinstance(binding, list):
+        raise RuntimeError(
+            f"container port {container_port}/tcp has no host publish in the running container"
+        )
+    host_port = str((binding[0] or {}).get("HostPort") or "").strip()
+    if not host_port:
+        raise RuntimeError(
+            f"container port {container_port}/tcp host publish is empty"
+        )
+    return host_port
+
+
+def pull_active_mongodb_containers(docker_bin: str = "") -> dict[str, Any]:
+    """
+    Read the six named Mongo containers that are running now.
+
+    Image, port, dbPath, binds, networks, and admin credentials come only from
+    docker inspect and, when mongod was started with --config, that file.
+    """
+    from Dns_databases import ALL_NAMED_DB_CONTAINERS, DB_ZONE
+
+    binary = docker_bin.strip() or _which("docker")
+    if not binary:
+        raise RuntimeError("docker missing — cannot read active Mongo container config")
+
+    inspected: dict[str, dict[str, str]] = {}
+    for name in ALL_NAMED_DB_CONTAINERS:
+        result = _run([binary, "inspect", name])
+        if result.returncode != 0 or not result.stdout.strip():
+            detail = (result.stderr or "").strip()
+            raise RuntimeError(
+                f"{name} is not running — databases secrets require the active container"
+                + (f" ({detail})" if detail else "")
+            )
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"{name} inspect output is not JSON") from exc
+        row = payload[0] if isinstance(payload, list) else payload
+        if not isinstance(row, dict):
+            raise RuntimeError(f"{name} inspect payload is empty")
+        status = str((row.get("State") or {}).get("Status") or "").strip()
+        if status != "running":
+            raise RuntimeError(
+                f"{name} status is {status or 'missing'} — container must be running"
+            )
+
+        config = row.get("Config") or {}
+        host_config = row.get("HostConfig") or {}
+        env_map = _env_list_to_map(config.get("Env"))
+        argv = _container_cmdline(binary, name)
+        config_path = _mongod_config_path(argv)
+        mongod_conf: dict[str, str] = {}
+        if config_path:
+            conf_read = _run([binary, "exec", name, "cat", config_path])
+            if conf_read.returncode != 0:
+                detail = (conf_read.stderr or "").strip()
+                raise RuntimeError(
+                    f"{name} mongod config {config_path} unreadable"
+                    + (f" — {detail}" if detail else "")
+                )
+            mongod_conf = _parse_mongod_conf(conf_read.stdout)
+
+        port_bindings = host_config.get("PortBindings") or {}
+        if not isinstance(port_bindings, dict):
+            port_bindings = {}
+        container_port = mongod_conf.get("net.port", "").strip()
+        if not container_port:
+            published = [
+                key.split("/")[0]
+                for key in port_bindings
+                if str(key).endswith("/tcp") and port_bindings.get(key)
+            ]
+            if len(published) != 1:
+                raise RuntimeError(
+                    f"{name} container port missing — mongod --config net.port "
+                    "or a single published tcp port is required"
+                )
+            container_port = published[0]
+        host_port = _published_host_port(port_bindings, container_port)
+
+        binds = host_config.get("Binds") or []
+        if not isinstance(binds, list):
+            binds = []
+        parsed_binds = [_split_linux_bind(str(item)) for item in binds if str(item).strip()]
+        db_path = mongod_conf.get("storage.dbPath", "").strip()
+        data_mount = ""
+        data_path = db_path
+        if db_path:
+            for host_path, container_path in parsed_binds:
+                if container_path == db_path:
+                    data_mount = host_path
+                    data_path = container_path
+                    break
+            if not data_mount:
+                raise RuntimeError(
+                    f"{name} storage.dbPath {db_path} is not a bind on the running container"
+                )
+        else:
+            data_binds = [
+                (host_path, container_path)
+                for host_path, container_path in parsed_binds
+                if "docker.sock" not in host_path and "docker.sock" not in container_path
+            ]
+            if len(data_binds) != 1:
+                raise RuntimeError(
+                    f"{name} data path missing — mongod --config storage.dbPath "
+                    "or a single data bind is required"
+                )
+            data_mount, data_path = data_binds[0]
+
+        networks = list(((row.get("NetworkSettings") or {}).get("Networks") or {}).keys())
+        if len(networks) != 1 or not networks[0].strip():
+            raise RuntimeError(
+                f"{name} must be attached to exactly one Docker network — got {networks}"
+            )
+        admin_user = env_map.get("MONGO_INITDB_ROOT_USERNAME", "").strip()
+        admin_password = env_map.get("MONGO_INITDB_ROOT_PASSWORD", "").strip()
+        if not admin_user or not admin_password:
+            raise RuntimeError(
+                f"{name} MONGO_INITDB_ROOT_USERNAME / MONGO_INITDB_ROOT_PASSWORD "
+                "missing from the running container"
+            )
+        image = str(config.get("Image") or "").strip()
+        if not image:
+            raise RuntimeError(f"{name} image missing from the running container")
+        zone = DB_ZONE.get(name, "")
+        if not zone:
+            raise RuntimeError(f"{name} has no Tor/non-Tor zone")
+
+        inspected[name] = {
+            "status": status,
+            "image": image,
+            "container_port": container_port,
+            "host_port": host_port,
+            "data_mount": data_mount,
+            "data_path_in_container": data_path,
+            "network": networks[0].strip(),
+            "zone": zone,
+            "admin_user": admin_user,
+            "admin_password": admin_password,
+            "mongodb_password": env_map.get("MONGODB_PASSWORD", "").strip(),
+            "init_database": env_map.get("MONGO_INITDB_DATABASE", "").strip(),
+            "bind_ip": mongod_conf.get("net.bindIp", "").strip(),
+            "security_authorization": mongod_conf.get("security.authorization", "").strip(),
+            "replication": mongod_conf.get("replication.replSetName", "").strip(),
+            "mongod_config": config_path,
+        }
+
+    def _same(field: str) -> str:
+        values = {row[field] for row in inspected.values()}
+        if len(values) != 1 or not next(iter(values)):
+            raise RuntimeError(
+                f"{field} differs across named Mongo containers — {sorted(values)}"
+            )
+        return next(iter(values))
+
+    image = _same("image")
+    container_port = _same("container_port")
+    data_path = _same("data_path_in_container")
+    admin_user = _same("admin_user")
+    admin_password = _same("admin_password")
+    password_values = {row["mongodb_password"] for row in inspected.values() if row["mongodb_password"]}
+    if len(password_values) > 1:
+        raise RuntimeError("MONGODB_PASSWORD differs across named Mongo containers")
+    mongodb_password = next(iter(password_values)) if password_values else admin_password
+
+    def _zone_network(zone: str) -> str:
+        names = {row["network"] for row in inspected.values() if row["zone"] == zone}
+        if len(names) != 1:
+            raise RuntimeError(f"{zone} Mongo containers are not on one network — {sorted(names)}")
+        return next(iter(names))
+
+    return {
+        "image": image,
+        "container_port": container_port,
+        "data_path_in_container": data_path,
+        "admin_user": admin_user,
+        "admin_password": admin_password,
+        "mongodb_password": mongodb_password,
+        "docker_network_tor_db": _zone_network("tor"),
+        "docker_network_nontor_db": _zone_network("nontor"),
+        "containers": inspected,
+    }
 
 
 def allocate_ephemeral_port() -> int:
@@ -880,6 +1131,58 @@ def export_shell_env(
     bound = bind_operation_environ(pull, overwrite=overwrite)
     lines = [f'export {key}="{value}"' for key, value in sorted(bound.items())]
     return "\n".join(lines) + ("\n" if lines else "")
+
+
+_CONNECTION_SEED_KEYS = (
+    "DOCKER_NETWORK_NAME",
+    "PROXY_SELF_DNS",
+    "MASTER_SERVER_ONION",
+    "FRONTEND_ONION",
+    "NODEUSER_ONION",
+    "BLOCKCHAIN_ONION",
+    "RDP_ONION",
+    "ADMIN_ONION",
+    "TOR_SOCKS_HOST",
+    "TOR_SOCKS_PORT",
+)
+
+
+def seed_console_secrets_at_image_creation() -> None:
+    """Write databases.secrets and mongodb.secrets on the console at image creation."""
+    root = resolve_lucid_tops_root()
+    directory = server_secrets_dir(root)
+    directory.mkdir(parents=True, exist_ok=True)
+    master = _parse_secrets_file(master_secrets_path(root))
+    proxy = _parse_secrets_file(proxy_secrets_path(root))
+    merged: dict[str, str] = dict(proxy)
+    for key, value in master.items():
+        if value:
+            merged[key] = value
+    if not merged.get("DOCKER_NETWORK_NAME", "").strip():
+        raise RuntimeError(
+            "DOCKER_NETWORK_NAME missing from Master.secrets and proxy.secrets"
+        )
+    torrc = root / "torrc"
+    for name in ("databases.secrets", "mongodb.secrets"):
+        path = directory / name
+        values = _parse_secrets_file(path)
+        for key in _CONNECTION_SEED_KEYS:
+            sourced = merged.get(key, "").strip()
+            if sourced:
+                values[key] = sourced
+        values["SECRETS_DIR"] = directory.as_posix()
+        values["LUCID_TOPS_ROOT"] = root.as_posix()
+        values["MASTER_SECRETS_FILE"] = master_secrets_path(root).as_posix()
+        values["PROXY_SECRETS_FILE"] = proxy_secrets_path(root).as_posix()
+        if torrc.is_file():
+            values["HOST_TOR_CONFIG_TORRC"] = torrc.as_posix()
+        lines = [
+            f"# LucidTops {name} — seeded at image creation from Master.secrets and proxy.secrets"
+        ]
+        for key in sorted(values):
+            if values[key]:
+                lines.append(f"{key}={values[key]}")
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def main() -> int:

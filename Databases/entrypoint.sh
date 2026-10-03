@@ -4,7 +4,7 @@
 #   1) verify Docker CLI + host docker.sock (sibling-container orchestration)
 #   2) bind Server/Secrets seed paths (Master.secrets + proxy.secrets)
 #   3) pull hardware + seed DockerDNS/network into env
-#   4) BootstrapDatabases → write Databases/secrets/*.secrets + compose up
+#   4) BootstrapDatabases → write Server/Secrets databases.secrets + mongodb.secrets + compose up
 #   5) status / optional command
 # DO NOT EDIT THE COMMENTS, THEY ARE FOR DOCUMENTATION ONLY.
 
@@ -51,8 +51,8 @@ if [ -z "${PROXY_SECRETS_FILE:-}" ]; then
 fi
 export PROXY_SECRETS_FILE
 
-# Databases write target (never Server/Secrets)
-export SECRETS_DIR="${SECRETS_DIR:-${LUCID_TOPS_ROOT}/Databases/secrets}"
+# databases.secrets and mongodb.secrets live with the other operational secrets.
+export SECRETS_DIR="${LUCID_TOPS_ROOT}/Server/Secrets"
 export DATABASES_SECRETS_FILE="${DATABASES_SECRETS_FILE:-${SECRETS_DIR}/databases.secrets}"
 export MONGODB_SECRETS_FILE="${MONGODB_SECRETS_FILE:-${SECRETS_DIR}/mongodb.secrets}"
 mkdir -p "${SECRETS_DIR}"

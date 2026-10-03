@@ -578,6 +578,8 @@ def bind_operation_environ(pull: dict[str, Any] | None = None, *, overwrite: boo
         "SECRETS_DIR": str(info["secrets_dir"]),
         "SERVER_ENV_FILE": str(Path(str(info["lucid_tops_root"])) / "server.env"),
         "SECRETS_ENV_FILE": str(Path(str(info["lucid_tops_root"])) / "secrets.env"),
+        "HOST_TOR_CONFIG_TORRC": str(Path(str(info["lucid_tops_root"])) / "torrc"),
+        "PROXY_SECRETS_FILE": str(Path(str(info["secrets_dir"])) / "proxy.secrets"),
         "MONGODB_DATA_MOUNT": str(info["databases_dir"]),
         "LUCID_DATABASES_DIR": str(info["databases_dir"]),
         "HOST_PRIMARY_IP": str(info["primary_ip"]),

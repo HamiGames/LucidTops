@@ -1,4 +1,7 @@
-"""Load Rdp runtime configuration from rdp.secrets (env at time of operation).
+"""Load Rdp connection configuration from /app/Secrets/rdp.secrets.
+
+The connection file is copied into the image at build. DockerDns reads that file
+only. User-console material is stored in the LucidTops program folder.
 
 
 RULES of CODE CREATION:
@@ -17,10 +20,32 @@ from pathlib import Path
 from typing import Any
 
 
-RDP_SECRETS_FILE_ENV = "RDP_SECRETS_FILE"
-RDP_SECRETS_NAME_ENV = "RDP_SECRETS_NAME"
-SECRETS_DIR_ENV = "SECRETS_DIR"
-LUCID_TOPS_ROOT_ENV = "LUCID_TOPS_ROOT"
+DRIVER_DIR_ENV = "DRIVER_DIR"
+CONNECTION_SECRETS_FILE = Path("/app/Secrets/rdp.secrets")
+CONSOLE_STATE_NAME = "rdp.console"
+_PI_ROOT = "/mnt/myssd"
+
+_CONNECTION_KEYS = {
+    "RDP_HTTP_TIMEOUT",
+    "RDP_ONION",
+    "RDP_SELF_DNS",
+    "RDP_USER_DNS",
+    "RDP_DOCKER_NETWORK_NAME",
+    "TOR_SOCKS_HOST",
+    "TOR_SOCKS_PORT",
+    "PROXY_USER_DNS",
+    "PROXY_SESSIONS_DNS",
+    "PROXY_OPERATIONS_DNS",
+    "PROXY_BACKEND_DNS",
+    "PROXY_RDP_DNS",
+}
+_CONNECTION_PREFIXES = (
+    "RDP_SESSIONS_",
+    "RDP_BACKEND_",
+    "RDP_SESSION_",
+    "RDP_OPERATIONS_",
+    "PROXY_",
+)
 
 
 def _env(key: str) -> str:
@@ -31,21 +56,43 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _under_pi(path: Path) -> bool:
+    posix = path.expanduser().as_posix().rstrip("/")
+    return posix == _PI_ROOT or posix.startswith(_PI_ROOT + "/")
+
+
+def is_connection_key(key: str) -> bool:
+    upper = key.upper()
+    if upper in _CONNECTION_KEYS:
+        return True
+    return any(upper.startswith(prefix) for prefix in _CONNECTION_PREFIXES)
+
+
+def program_folder() -> Path:
+    """LucidTops program folder on the console that started this container."""
+    raw = _env(DRIVER_DIR_ENV)
+    if raw:
+        chosen = Path(raw).expanduser()
+        if not _under_pi(chosen):
+            chosen.mkdir(parents=True, exist_ok=True)
+            return chosen.resolve()
+    folder = Path.home() / "LucidTops"
+    if _under_pi(folder):
+        raise RuntimeError(
+            "LucidTops program folder resolved under /mnt/myssd — "
+            "set DRIVER_DIR to the user console program folder"
+        )
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder.resolve()
+
+
+def console_state_path() -> Path:
+    return program_folder() / CONSOLE_STATE_NAME
+
+
 def secrets_dir() -> Path:
-    configured = _env(SECRETS_DIR_ENV)
-    if configured:
-        return Path(configured).expanduser()
-    root = _env(LUCID_TOPS_ROOT_ENV)
-    if not root:
-        raise RuntimeError(
-            f"{SECRETS_DIR_ENV} or {LUCID_TOPS_ROOT_ENV} missing — must be set at time of operation"
-        )
-    name = _env("SECRETS_DIR_NAME")
-    if not name:
-        raise RuntimeError(
-            "SECRETS_DIR_NAME missing — must be set at time of operation when SECRETS_DIR is unset"
-        )
-    return Path(root).expanduser() / name
+    """User-console program folder. Not the Pi secrets directory."""
+    return program_folder()
 
 
 def parse_secrets_file(path: Path) -> dict[str, str]:
@@ -67,10 +114,14 @@ def parse_secrets_file(path: Path) -> dict[str, str]:
 
 def write_secrets_file(path: Path, values: dict[str, str]) -> Path:
     """Write key=value secrets created at time of operation (no placeholders)."""
+    if path.expanduser().as_posix().rstrip("/") == CONNECTION_SECRETS_FILE.as_posix():
+        raise RuntimeError(
+            "/app/Secrets/rdp.secrets is the image connection file and is not rewritten"
+        )
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
-        f"# LucidTops rdp.secrets generated at {utc_now()}",
-        "# key=value — values pulled/created at time of operation",
+        f"# LucidTops user-console state generated at {utc_now()}",
+        "# key=value — hardware and local paths from the user console",
     ]
     for key in sorted(values):
         lines.append(f"{key}={values[key]}")
@@ -82,47 +133,21 @@ def write_secrets_file(path: Path, values: dict[str, str]) -> Path:
     return path
 
 
-def apply_secrets_file(path: Path, *, overwrite: bool = False) -> dict[str, str]:
-    loaded = parse_secrets_file(path)
-    for key, value in loaded.items():
-        if overwrite or not _env(key):
-            os.environ[key] = value
-    return loaded
-
-
 def rdp_secrets_path() -> Path:
-    override = _env(RDP_SECRETS_FILE_ENV)
-    if override:
-        return Path(override).expanduser()
-    name = _env(RDP_SECRETS_NAME_ENV)
-    if name:
-        return secrets_dir() / name
-    # Prefer existing rdp*.secrets on hardware secrets dir when name env unset
-    try:
-        sdir = secrets_dir()
-    except RuntimeError:
-        raise RuntimeError(
-            f"{RDP_SECRETS_FILE_ENV} or {RDP_SECRETS_NAME_ENV} missing — "
-            "must be set at time of operation"
-        ) from None
-    for existing in sorted(sdir.glob("*.secrets")):
-        if existing.name.lower().startswith("rdp"):
-            return existing
-    return sdir / "rdp.secrets"
+    """In-container connection file. Not SECRETS_DIR and not a Pi path."""
+    return CONNECTION_SECRETS_FILE
 
 
 @lru_cache(maxsize=1)
 def _load_rdp_secrets_cached() -> dict[str, str]:
     path = rdp_secrets_path()
-    if not path.exists():
+    if not path.is_file():
         raise RuntimeError(
-            f"rdp secrets file missing at {path.as_posix()} — create at time of operation"
+            f"rdp secrets file missing at {path.as_posix()} — "
+            "image build must read /mnt/myssd/LucidTops/Server/Secrets/Master.secrets "
+            "and proxy.secrets"
         )
-    values = parse_secrets_file(path)
-    for key, value in values.items():
-        if not _env(key):
-            os.environ[key] = value
-    return values
+    return parse_secrets_file(path)
 
 
 def load_rdp_secrets(*, reload: bool = False) -> dict[str, str]:
@@ -131,14 +156,43 @@ def load_rdp_secrets(*, reload: bool = False) -> dict[str, str]:
     return _load_rdp_secrets_cached()
 
 
+@lru_cache(maxsize=1)
+def _load_console_state_cached() -> dict[str, str]:
+    path = console_state_path()
+    if not path.is_file():
+        return {}
+    values = parse_secrets_file(path)
+    return {key: value for key, value in values.items() if not is_connection_key(key)}
+
+
+def load_console_state(*, reload: bool = False) -> dict[str, str]:
+    if reload:
+        _load_console_state_cached.cache_clear()
+    return _load_console_state_cached()
+
+
+def update_console_state(values: dict[str, str]) -> Path:
+    """Merge user-console keys into the program-folder state file."""
+    path = console_state_path()
+    current = parse_secrets_file(path) if path.is_file() else {}
+    for key, value in values.items():
+        upper = key.upper()
+        if not upper or not value or is_connection_key(upper):
+            continue
+        current[upper] = value
+    write_secrets_file(path, current)
+    _load_console_state_cached.cache_clear()
+    return path
+
+
 def get_rdp_secret(key: str) -> str:
-    env_value = _env(key)
-    if env_value:
-        return env_value
-    try:
-        return load_rdp_secrets().get(key.upper(), "").strip()
-    except RuntimeError:
-        return ""
+    upper = key.upper()
+    if is_connection_key(upper):
+        try:
+            return load_rdp_secrets().get(upper, "").strip()
+        except RuntimeError:
+            return ""
+    return load_console_state().get(upper, "").strip()
 
 
 def require_rdp_secret(key: str) -> str:

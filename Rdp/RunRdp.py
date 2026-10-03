@@ -1,10 +1,10 @@
 """RunRdp — start the Rdp container at time of operation.
 
 Flow:
-1. createRDP.pull_information / build_and_write_rdp_secrets (hardware → rdp.secrets)
-2. load secrets
+1. createRDP.pull_information / build_and_write_rdp_secrets (hardware → program folder)
+2. load /app/Secrets/rdp.secrets for connection values
 3. create FastAPI app (RdpRoutes)
-4. uvicorn bind host/port from secrets
+4. uvicorn bind host/port from the user-console state
 
 RULES:
 - No hardcoded values, all values are created at time of operation.
@@ -45,8 +45,22 @@ def _load_local(module_name: str, filename: str | None = None) -> Any:
 
 
 def bootstrap_secrets(*, overwrite: bool = False) -> dict[str, Any]:
-    create_rdp = _load_local("createRDP", "createRDP.py")
-    return create_rdp.build_and_write_rdp_secrets(overwrite_keys=overwrite)
+    """Load the image-build connection file. Do not rewrite rdp.secrets."""
+    del overwrite
+    rdp_secrets = _load_local("rdp_secrets")
+    path = rdp_secrets.rdp_secrets_path()
+    if not path.is_file() or path.stat().st_size == 0:
+        raise RuntimeError(
+            "rdp.secrets missing at /app/Secrets/rdp.secrets — "
+            "image build must read /mnt/myssd/LucidTops/Server/Secrets/Master.secrets "
+            "and proxy.secrets"
+        )
+    loaded = rdp_secrets.load_rdp_secrets(reload=True)
+    return {
+        "status": "loaded",
+        "rdp_secrets_file": path.as_posix(),
+        "keys": sorted(loaded.keys()),
+    }
 
 
 def run_server(*, overwrite_secrets: bool = False) -> None:
@@ -92,12 +106,12 @@ def main(argv: list[str] | None = None) -> int:
         nargs="?",
         default="run",
         choices=("run", "pull", "secrets"),
-        help="run=bootstrap+uvicorn; pull/secrets=write rdp.secrets only",
+        help="run=load rdp.secrets+uvicorn; pull/secrets=load the image connection file",
     )
     parser.add_argument(
         "--overwrite",
         action="store_true",
-        help="overwrite existing non-hardware keys in rdp.secrets",
+        help="overwrite existing non-hardware keys in the user-console state",
     )
     args = parser.parse_args(list(argv if argv is not None else sys.argv[1:]))
 
