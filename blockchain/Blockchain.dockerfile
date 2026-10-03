@@ -17,7 +17,7 @@
 #     /mnt/myssd/LucidTops
 #
 # Secrets (§16.1) — created at time of operation (not baked into the image):
-#   SECRETS_DIR=/mnt/myssd/LucidTops/blockchain/secrets
+#   SECRETS_DIR=/mnt/myssd/LucidTops/Server/Secrets
 #   Seed (onion + DOCKER_NETWORK_NAME only — fixes.txt §19):
 #     /mnt/myssd/LucidTops/Server/Secrets/Master.secrets
 #     /mnt/myssd/LucidTops/Server/Secrets/proxy.secrets
@@ -47,8 +47,8 @@ ARG APT_PACKAGES="ca-certificates curl iproute2"
 ARG PIP_PACKAGES=""
 ARG PIP_WHEEL_PACKAGES="pip setuptools wheel"
 ARG LUCID_TOPS_ROOT=/mnt/myssd/LucidTops
-ARG SECRETS_DIR=/mnt/myssd/LucidTops/blockchain/secrets
-ARG BLOCKCHAIN_SECRETS_FILE=/mnt/myssd/LucidTops/blockchain/secrets/blockchain.secrets
+ARG SECRETS_DIR=/mnt/myssd/LucidTops/Server/Secrets
+ARG BLOCKCHAIN_SECRETS_FILE=/mnt/myssd/LucidTops/Server/Secrets/blockchain.secrets
 ARG BLOCKCHAIN_CONFIGS_DIR=/mnt/myssd/LucidTops/blockchain/configs
 ARG LEDGER_REPLICA_DIR=/mnt/myssd/LucidTops/Databases/LucidTopsBlockchain_Ledger
 ARG RUN_BLOCKCHAIN_PULL_ON_BUILD=false

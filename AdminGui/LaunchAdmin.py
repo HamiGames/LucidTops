@@ -109,12 +109,12 @@ def _identity_from_secrets() -> dict[str, str]:
 def frontend_admin_url() -> str:
     ensure_admin_secrets_from_pull()
     load_admin_secrets(reload=True)
-    onion = require_admin_secret("FRONTEND_ONION")
+    onion = require_admin_secret("ADMIN_ONION")
     home = require_admin_secret("FRONTEND_ADMIN_HOME_PATH")
     scheme = require_admin_secret("ADMIN_FRONTEND_SCHEME")
     if not onion.endswith(".onion"):
         raise RuntimeError(
-            "FRONTEND_ONION is not a valid onion address — must be pulled from console secrets"
+            "ADMIN_ONION is not a valid onion address — must be pulled from proxy.secrets"
         )
     return f"{scheme}://{onion}/{home.lstrip('/')}"
 

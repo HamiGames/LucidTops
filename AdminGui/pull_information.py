@@ -225,31 +225,18 @@ def _pull_lucid_tops_root() -> Path:
 
 
 def _pull_admingui_secrets_dir(lucid_root: Path) -> Path:
-    """AdminGui secrets live under /mnt/myssd/LucidTops/AdminGui/secrets (§16.1)."""
+    """Master console reads Server/Secrets. Other consoles read LucidTops/Secrets."""
+    server = Path("/mnt/myssd/LucidTops/Server/Secrets")
+    if (server / "Master.secrets").is_file() or (server / "proxy.secrets").is_file():
+        return server.resolve()
+    program = lucid_root / "Secrets"
+    if program.is_dir():
+        return program.resolve()
     env_dir = _env("SECRETS_DIR")
     if env_dir:
         return Path(env_dir).expanduser().resolve()
-    for candidate in (
-        Path("/mnt/myssd/LucidTops/AdminGui/secrets"),
-        lucid_root / "AdminGui" / "secrets",
-        ADMINGUI_DIR / "secrets",
-        lucid_root / "secrets" / "AdminGui",
-    ):
-        if candidate.is_dir():
-            return candidate.resolve()
-    for candidate in (
-        Path("/mnt/myssd/LucidTops/AdminGui/secrets"),
-        lucid_root / "AdminGui" / "secrets",
-        ADMINGUI_DIR / "secrets",
-    ):
-        try:
-            candidate.mkdir(parents=True, exist_ok=True)
-            return candidate.resolve()
-        except OSError:
-            continue
-    target = lucid_root / "AdminGui" / "secrets"
-    target.mkdir(parents=True, exist_ok=True)
-    return target.resolve()
+    program.mkdir(parents=True, exist_ok=True)
+    return program.resolve()
 
 
 def _pull_lucid_secrets_dir(lucid_root: Path) -> Path:
@@ -257,15 +244,13 @@ def _pull_lucid_secrets_dir(lucid_root: Path) -> Path:
     if env_dir:
         return Path(env_dir).expanduser().resolve()
     for candidate in (
-        lucid_root / "secrets",
-        lucid_root / "Secrets",
-        lucid_root / "Server" / "Secrets",
-        Path("/mnt/myssd/LucidTops/secrets"),
         Path("/mnt/myssd/LucidTops/Server/Secrets"),
+        lucid_root / "Server" / "Secrets",
+        lucid_root / "Secrets",
     ):
         if candidate.is_dir():
             return candidate.resolve()
-    target = lucid_root / "secrets"
+    target = lucid_root / "Secrets"
     target.mkdir(parents=True, exist_ok=True)
     return target.resolve()
 
@@ -300,7 +285,7 @@ def _read_onion_file(path: Path) -> str:
 
 
 def _pull_onion_from_secrets(secrets_dirs: list[Path]) -> dict[str, str]:
-    onions = {"frontend": "", "master_server": "", "node_user": ""}
+    onions = {"frontend": "", "master_server": "", "node_user": "", "admin": ""}
     for secrets_dir in secrets_dirs:
         for name in (
             "frontend.secrets",
@@ -315,6 +300,7 @@ def _pull_onion_from_secrets(secrets_dirs: list[Path]) -> dict[str, str]:
                 ("FRONTEND_ONION", "frontend"),
                 ("MASTER_SERVER_ONION", "master_server"),
                 ("NODEUSER_ONION", "node_user"),
+                ("ADMIN_ONION", "admin"),
             ):
                 raw = parsed.get(key, "")
                 if raw.endswith(".onion") and not onions[map_key]:
@@ -339,6 +325,7 @@ def _pull_onion_addresses(
             "frontend": ("frontend", "frontend_onion", "hs_frontend"),
             "master_server": ("master", "master_server", "backend", "hs_master"),
             "node_user": ("node", "nodeuser", "hs_node"),
+            "admin": ("admin", "admingui", "hs_admin"),
         }
         for key, names in mapping.items():
             if onions[key]:
@@ -357,6 +344,7 @@ def _pull_onion_addresses(
         ("FRONTEND_ONION", "frontend"),
         ("MASTER_SERVER_ONION", "master_server"),
         ("NODEUSER_ONION", "node_user"),
+        ("ADMIN_ONION", "admin"),
     ):
         env_val = _env(env_key)
         if env_val.endswith(".onion"):
@@ -761,6 +749,8 @@ def bind_operation_environ(
         "MASTER_SERVER_COLOCATED": "1" if info.get("master_server_colocated") else "0",
     }
     onions = info.get("onions") or {}
+    if onions.get("admin"):
+        mapping["ADMIN_ONION"] = str(onions["admin"])
     if onions.get("frontend"):
         mapping["FRONTEND_ONION"] = str(onions["frontend"])
     if onions.get("master_server"):
@@ -918,6 +908,10 @@ def build_admingui_secrets(pull: dict[str, Any] | None = None) -> dict[str, str]
         ).as_posix(),
         "ADMINGUI_SESSION_STATE_FILE": str(info["session_state_path"]),
         "FRONTEND_ONION": frontend_onion,
+        "ADMIN_ONION": from_any(
+            "ADMIN_ONION",
+            factory=lambda: str(onions.get("admin") or ""),
+        ),
         "MASTER_SERVER_ONION": from_any(
             "MASTER_SERVER_ONION",
             factory=lambda: str(onions.get("master_server") or ""),

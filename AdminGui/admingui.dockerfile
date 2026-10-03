@@ -13,8 +13,10 @@
 #     -t lucid-admingui:v1.0.0 \
 #     /mnt/myssd/LucidTops
 #
-# Secrets mount (§16.1):
-#   /mnt/myssd/LucidTops/AdminGui/secrets/*.secrets
+# Secrets (containers.txt):
+#   Master console: /mnt/myssd/LucidTops/Server/Secrets/*.secrets
+#   Other consoles: LucidTops/Secrets (manually placed program files)
+#   MasterServer GUI access uses ADMIN_ONION from proxy.secrets.
 #
 # RULES:
 # - no hardcoded values; all values created at time of operation via pull_information.
@@ -66,12 +68,8 @@ RUN test -f /app/AdminGui/admin_gui.py \
  && test -s /app/AdminGui/requirements.txt
 
 ENV LUCID_TOPS_ROOT=/mnt/myssd/LucidTops
-ENV SECRETS_DIR=/mnt/myssd/LucidTops/AdminGui/secrets
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
-
-# Secrets directory is expected at runtime (bind-mount); create path for validation.
-RUN mkdir -p /mnt/myssd/LucidTops/AdminGui/secrets /mnt/myssd/LucidTops
 
 # WORKDIR matches AdminGui Python package; PYTHONPATH=/app enables python -m AdminGui (§16.3)
 WORKDIR /app/AdminGui

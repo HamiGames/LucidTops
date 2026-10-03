@@ -11,7 +11,7 @@ Seed sources for *.onion + DOCKER_NETWORK_NAME (fixes.txt §19, read-only):
 - /mnt/myssd/LucidTops/Server/Secrets/proxy.secrets (also Proxy.secrets)
 
 Write target:
-- /mnt/myssd/LucidTops/blockchain/secrets/blockchain.secrets
+- /mnt/myssd/LucidTops/Server/Secrets/blockchain.secrets
 """
 
 from __future__ import annotations

@@ -13,8 +13,8 @@ Seed sources (Proxy Bootstrap → Server/Secrets, read-only for blockchain onion
 - /mnt/myssd/LucidTops/Server/Secrets/Master.secrets
 - /mnt/myssd/LucidTops/Server/Secrets/proxy.secrets (also Proxy.secrets)
 
-Write target (blockchain container secrets — never Server/Secrets):
-- /mnt/myssd/LucidTops/blockchain/secrets/blockchain.secrets
+Write target (Pi console — not inside the image):
+- /mnt/myssd/LucidTops/Server/Secrets/blockchain.secrets
 """
 
 from __future__ import annotations
@@ -297,16 +297,8 @@ def proxy_secrets_path(lucid_root: Path | None = None) -> Path:
 
 
 def blockchain_secrets_dir(lucid_root: Path | None = None) -> Path:
-    """Blockchain write target — never Server/Secrets."""
-    root = lucid_root if lucid_root is not None else resolve_lucid_tops_root()
-    override = _env("SECRETS_DIR")
-    if override:
-        path = Path(override).expanduser().resolve()
-        parts_lower = {part.lower() for part in path.parts}
-        if "server" in parts_lower and path.name.lower() == "secrets":
-            return (root / "blockchain" / "secrets").resolve()
-        return path
-    return (root / "blockchain" / "secrets").resolve()
+    """Blockchain secrets are read from the Pi console Server/Secrets directory."""
+    return server_secrets_dir(lucid_root)
 
 
 def load_master_and_proxy_seed(lucid_root: Path | None = None) -> dict[str, str]:
