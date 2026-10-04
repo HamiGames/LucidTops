@@ -4,7 +4,7 @@ Given a live NodeID (never a placeholder), create:
 - {NodeID}_UserDB
 - {NodeID}_LedgerDB
 
-Register names on LucidTopsNodeDB and extend databases.secrets.
+Register names on {prefix}_NodeDB and extend databases.secrets.
 
 RULES of CODE CREATION:
 - No hardcoded values, all values are created at time of operation.
@@ -150,8 +150,8 @@ def create_node_hosted_databases(
     registration: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
-    Create {NodeID}_UserDB and {NodeID}_LedgerDB on the LucidTopsNodeDB Mongo host
-    (same non-Tor MongoDB process as LucidTopsNodeDB container — logical DBs).
+    Create {NodeID}_UserDB and {NodeID}_LedgerDB on the {prefix}_NodeDB Mongo host
+    (same non-Tor MongoDB process as the {prefix}_NodeDB container — logical DBs).
     """
     pull = pull_realworld_information()
     bind_operation_environ(pull)
@@ -165,7 +165,7 @@ def create_node_hosted_databases(
     ledger_db = node_ledger_db_name(node_id)
     stamp = utc_now()
 
-    # Logical DBs live on the LucidTopsNodeDB container instance.
+    # Logical DBs live on the {prefix}_NodeDB container instance.
     node_container = container_name(resolve_main_database_name(), "_NodeDB")
     client = get_mongo_client(node_container, prefer_host_publish=True)
     try:

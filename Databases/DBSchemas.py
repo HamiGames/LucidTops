@@ -1,12 +1,13 @@
 """MongoDB collection field schemas for LucidTops named Databases.
 
-Field contracts from documentation/Databases.txt:
-- LucidTops_SessionsDB collections: SessionID, session-data, session-data-chunk,
+Field contracts from documentation/Databases.txt lines 125-131
+(prefix = MONGODB_MAIN_DATABASE_NAME):
+- {prefix}_SessionsDB collections: SessionID, session-data, session-data-chunk,
   block-data-queue, block-queue-ID
-- LucidTopsUserDB collection UserID (includes session-count, max-sessions)
-- LucidTopsNodeDB collection {NodeID}
-- LucidTopsLedgerDB / LucidTops_LedgerDB collection BlockID
-- LucidTopsPaySystemsDB collection {UserID}_{timestamp}
+- {prefix}_UserDB collection UserID (includes session-count, max-sessions)
+- {prefix}_NodeDB collection {NodeID}
+- {prefix}__LedgerDB collection BlockID
+- {prefix}_PaymentDB collection {UserID}_{timestamp}
 
 RULES of CODE CREATION:
 - No hardcoded values, all values are created at time of operation.
@@ -28,7 +29,7 @@ from Dns_databases import (
     secret_key_prefix,
 )
 
-# --- LucidTops_SessionsDB collection schema: collection name:"SessionID" ---
+# --- {prefix}_SessionsDB collection schema: collection name:"SessionID" ---
 SESSION_ID_FIELDS: tuple[str, ...] = (
     "SessionID",
     "Host_UserID",
@@ -44,7 +45,7 @@ SESSION_ID_FIELDS: tuple[str, ...] = (
     "block-queue-ID",
 )
 
-# --- LucidTops_SessionsDB collection schema: collection name:"session-data" ---
+# --- {prefix}_SessionsDB collection schema: collection name:"session-data" ---
 SESSION_DATA_FIELDS: tuple[str, ...] = (
     "SessionID",
     "Host_UserID",
@@ -55,7 +56,7 @@ SESSION_DATA_FIELDS: tuple[str, ...] = (
     "aggregate_hash",
 )
 
-# --- LucidTops_SessionsDB collection schema: collection name:"session-data-chunk" ---
+# --- {prefix}_SessionsDB collection schema: collection name:"session-data-chunk" ---
 SESSION_DATA_CHUNK_FIELDS: tuple[str, ...] = (
     "chunk_id",
     "SessionID",
@@ -66,7 +67,7 @@ SESSION_DATA_CHUNK_FIELDS: tuple[str, ...] = (
     "created_at",
 )
 
-# --- LucidTops_SessionsDB collection schema: collection name:"block-data-queue" ---
+# --- {prefix}_SessionsDB collection schema: collection name:"block-data-queue" ---
 BLOCK_DATA_QUEUE_FIELDS: tuple[str, ...] = (
     "block-queue-ID",
     "chunk_refs",
@@ -76,7 +77,7 @@ BLOCK_DATA_QUEUE_FIELDS: tuple[str, ...] = (
     "updated_at",
 )
 
-# --- LucidTops_SessionsDB collection schema: collection name:"block-queue-ID" ---
+# --- {prefix}_SessionsDB collection schema: collection name:"block-queue-ID" ---
 BLOCK_QUEUE_ID_FIELDS: tuple[str, ...] = (
     "block-queue-ID",
     "block-data-queue-ref",
@@ -85,7 +86,7 @@ BLOCK_QUEUE_ID_FIELDS: tuple[str, ...] = (
     "created_at",
 )
 
-# Canonical LucidTops_SessionsDB collection names (documentation/Databases.txt).
+# Canonical {prefix}_SessionsDB collection names (documentation/Databases.txt).
 SESSIONS_DB_COLLECTION_SESSION_ID = "SessionID"
 SESSIONS_DB_COLLECTION_SESSION_DATA = "session-data"
 SESSIONS_DB_COLLECTION_SESSION_DATA_CHUNK = "session-data-chunk"
@@ -95,7 +96,7 @@ SESSIONS_DB_COLLECTION_BLOCK_QUEUE_ID = "block-queue-ID"
 # Cap: block-data-queue holds less than 100 session-data-chunks.
 BLOCK_DATA_QUEUE_MAX_CHUNKS = 99
 
-# --- LucidTopsUserDB collection schema: collection name: "UserID" ---
+# --- {prefix}_UserDB collection schema: collection name: "UserID" ---
 USER_ID_FIELDS: tuple[str, ...] = (
     "UserID",
     "TokenID",
@@ -110,7 +111,7 @@ USER_ID_FIELDS: tuple[str, ...] = (
     "registration_docs",
 )
 
-# --- LucidTopsNodeDB collection schema: collection name: "{NodeID}" ---
+# --- {prefix}_NodeDB collection schema: collection name: "{NodeID}" ---
 NODE_ID_FIELDS: tuple[str, ...] = (
     "NodeID",
     "UserID",
@@ -125,7 +126,7 @@ NODE_ID_FIELDS: tuple[str, ...] = (
     "registration_docs",
 )
 
-# --- LucidTopsLedgerDB collection schema: collection name: "BlockID" ---
+# --- {prefix}__LedgerDB collection schema: collection name: "BlockID" ---
 BLOCK_ID_FIELDS: tuple[str, ...] = (
     "BlockID",
     "creator_id",
@@ -135,7 +136,7 @@ BLOCK_ID_FIELDS: tuple[str, ...] = (
     "Session-data-count",
 )
 
-# --- LucidTopsPaySystemsDB collection schema: collection_name: "{UserID}_{timestamp}" ---
+# --- {prefix}_PaymentDB collection schema: collection_name: "{UserID}_{timestamp}" ---
 PAY_SYSTEMS_FIELDS: tuple[str, ...] = (
     "UserID",
     "Payment_Amount",
@@ -204,7 +205,7 @@ def _collection_spec(
 
 
 def _sessions_db_collections() -> list[dict[str, Any]]:
-    """LucidTops_SessionsDB multi-collection contract (Databases.txt)."""
+    """{prefix}_SessionsDB multi-collection contract (Databases.txt)."""
     session_id_name = resolve_collection_name(
         "SESSIONS_DB_COLLECTION", SESSIONS_DB_COLLECTION_SESSION_ID
     )

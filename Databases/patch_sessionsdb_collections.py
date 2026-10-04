@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Idempotent schema patch for already-created LucidTops Mongo Databases.
 
-Heals LucidTops_SessionsDB multi-collection contract and LucidTopsUserDB
+Heals {prefix}_SessionsDB multi-collection contract and {prefix}_UserDB
 session-count / max-sessions fields without dropping data.
+prefix = MONGODB_MAIN_DATABASE_NAME (Databases.txt lines 125-131).
 
 Targets (Databases.txt / DBSchemas.py):
-  LucidTops_SessionsDB: SessionID, session-data, session-data-chunk,
-                        block-data-queue, block-queue-ID
-  LucidTopsUserDB: UserID (+ session-count, max-sessions on template and docs)
+  {prefix}_SessionsDB: SessionID, session-data, session-data-chunk,
+                       block-data-queue, block-queue-ID
+  {prefix}_UserDB: UserID (+ session-count, max-sessions on template and docs)
 
 Flags:
   --dry-run  (default) report planned actions only
@@ -217,7 +218,7 @@ def patch_sessionsdb(*, apply: bool) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Patch LucidTops_SessionsDB + LucidTopsUserDB schemas on live Mongo"
+        description="Patch {prefix}_SessionsDB + {prefix}_UserDB schemas on live Mongo"
     )
     parser.add_argument(
         "--apply",
