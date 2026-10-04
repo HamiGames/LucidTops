@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -53,10 +52,6 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _env(key: str) -> str:
-    return os.environ.get(key, "").strip()
-
-
 def _load_values() -> dict[str, str]:
     path = databases_secrets_path()
     if path.exists():
@@ -74,25 +69,14 @@ def _mongo_client_for(db_name: str, values: dict[str, str]) -> Any:
     from urllib.parse import quote_plus
 
     prefix = secret_key_prefix(db_name)
-    host_port = values.get(f"{prefix}_HOST_PORT", "").strip()
-    primary_ip = values.get("HOST_PRIMARY_IP", "").strip() or _env("HOST_PRIMARY_IP")
     container_port = values.get(f"{prefix}_PORT", "").strip() or values.get(
         "MONGODB_CONTAINER_PORT", ""
     ).strip()
     dns_host = values.get(f"{prefix}_HOST", "").strip() or db_name
     admin_user = values.get("MONGODB_ADMIN_USER", "").strip()
     admin_password = values.get("MONGODB_ADMIN_PASSWORD", "").strip()
-
-    in_container = Path("/.dockerenv").exists() or bool(_env("HOSTNAME"))
-    if in_container and Path("/.dockerenv").exists():
-        host = dns_host
-        port = container_port
-    elif primary_ip and host_port:
-        host = primary_ip
-        port = host_port
-    else:
-        host = dns_host
-        port = container_port
+    host = dns_host
+    port = container_port
 
     if not host or not port:
         raise RuntimeError(

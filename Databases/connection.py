@@ -18,7 +18,7 @@ import os
 from typing import Any
 from urllib.parse import quote_plus
 
-from Dns_databases import ALL_NAMED_DB_CONTAINERS, zone_for, secret_key_prefix
+from Dns_databases import named_db_containers, zone_for, secret_key_prefix
 from databases_secrets import (
     get_secret,
     load_databases_secrets,
@@ -41,8 +41,9 @@ def _mongo_secrets() -> dict[str, str]:
 def resolve_db_host(db_name: str, *, prefer_host_publish: bool = False) -> str:
     prefix = secret_key_prefix(db_name)
     if prefer_host_publish:
+        host_port = get_secret(f"{prefix}_HOST_PORT")
         primary = get_secret("HOST_PRIMARY_IP") or _env("HOST_PRIMARY_IP")
-        if primary:
+        if primary and host_port:
             return primary
     host = get_secret(f"{prefix}_HOST")
     if host:
@@ -201,15 +202,17 @@ def ping_database(db_name: str, **kwargs: Any) -> dict[str, Any]:
 
 def connection_status() -> dict[str, Any]:
     load_databases_secrets(reload=True)
+    main_name = get_secret("MONGODB_MAIN_DATABASE_NAME")
+    names = list(named_db_containers(main_name)) if main_name else []
     return {
-        "databases": list(ALL_NAMED_DB_CONTAINERS),
+        "databases": names,
         "hosts": {
             name: {
                 "host": get_secret(f"{secret_key_prefix(name)}_HOST"),
                 "port": get_secret(f"{secret_key_prefix(name)}_PORT"),
                 "zone": get_secret(f"{secret_key_prefix(name)}_ZONE"),
             }
-            for name in ALL_NAMED_DB_CONTAINERS
+            for name in names
         },
         "mongodb_via_socks5": bool(get_secret("MONGODB_VIA_SOCKS5") or _env("MONGODB_VIA_SOCKS5")),
     }

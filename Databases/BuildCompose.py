@@ -13,7 +13,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from Dns_databases import ALL_NAMED_DB_CONTAINERS, DB_ZONE, secret_key_prefix
+from Dns_databases import (
+    named_db_containers,
+    network_for_zone,
+    secret_key_prefix,
+    zone_for,
+)
 from databases_secrets import require_secret, utc_now
 
 
@@ -54,48 +59,42 @@ def _network_block(name: str, *, external: bool) -> list[str]:
 def build_databases_compose_yaml(values: dict[str, str]) -> str:
     """Emit compose YAML from secrets/pull values only — raises if any required key missing."""
     image = _require_from_values(values, "MONGODB_IMAGE")
-    container_port = _require_from_values(values, "MONGODB_CONTAINER_PORT")
+    _require_from_values(values, "MONGODB_CONTAINER_PORT")
     data_in_container = _require_from_values(values, "MONGODB_DATA_PATH_IN_CONTAINER")
-    tor_net = _require_from_values(values, "DOCKER_NETWORK_TOR_DB")
-    nontor_net = _require_from_values(values, "DOCKER_NETWORK_NONTOR_DB")
+    lucid_net = _require_from_values(values, "DOCKER_NETWORK_NAME")
     admin_user = _require_from_values(values, "MONGODB_ADMIN_USER")
     admin_password = _require_from_values(values, "MONGODB_ADMIN_PASSWORD")
-    lucid_net = str(values.get("DOCKER_NETWORK_NAME", "")).strip()
+    main_name = _require_from_values(values, "MONGODB_MAIN_DATABASE_NAME")
+    containers = named_db_containers(main_name)
 
-    # Dedupe: when Master/proxy seed maps both zones to the same LucidDNS name,
-    # emit a single networks: entry (YAML forbids duplicate mapping keys).
-    network_names: list[str] = []
-    for name in (tor_net, nontor_net):
-        if name and name not in network_names:
-            network_names.append(name)
+    network_names: list[str] = [lucid_net]
+    for db_name in containers:
+        zone = zone_for(db_name, main_database_name=main_name)
+        zone_net = network_for_zone(zone, values)
+        if zone_net and zone_net not in network_names:
+            network_names.append(zone_net)
 
     lines: list[str] = [
         "# LucidTops Databases compose — generated at time of operation",
         f"# Generated: {utc_now()}",
-        "# Separate MongoDB container per named DB; Tor vs non-Tor networks.",
-        "# Networks matching DOCKER_NETWORK_NAME (Proxy LucidDNS) are external.",
+        "# Six MongoDB containers. DockerDNS name is the container name.",
+        "# Each service joins DOCKER_NETWORK_NAME. No host port publish.",
         "networks:",
     ]
     for name in network_names:
-        external = bool(lucid_net) and name == lucid_net
-        # Shared single-network alignment also treated as external LucidDNS join.
-        if not external and len(network_names) == 1 and lucid_net and name == lucid_net:
-            external = True
-        if not external and len(network_names) == 1 and not lucid_net:
-            # Only one network declared and no separate LucidDNS key — still may
-            # already exist from Proxy; prefer external when tor==nontor.
-            external = tor_net == nontor_net
-        lines.extend(_network_block(name, external=external))
+        lines.extend(_network_block(name, external=True))
 
     lines.extend(["", "services:"])
 
-    for db_name in ALL_NAMED_DB_CONTAINERS:
+    for db_name in containers:
         prefix = secret_key_prefix(db_name)
-        zone = DB_ZONE[db_name]
-        network = tor_net if zone == "tor" else nontor_net
+        zone = zone_for(db_name, main_database_name=main_name)
         data_mount = _require_from_values(values, f"{prefix}_DATA_MOUNT")
-        host_port = _require_from_values(values, f"{prefix}_HOST_PORT")
         service_key = db_name.lower().replace("-", "_")
+        service_networks = [lucid_net]
+        zone_net = network_for_zone(zone, values)
+        if zone_net and zone_net not in service_networks:
+            service_networks.append(zone_net)
 
         lines.extend(
             [
@@ -104,9 +103,12 @@ def build_databases_compose_yaml(values: dict[str, str]) -> str:
                 f"    container_name: {db_name}",
                 "    restart: unless-stopped",
                 "    networks:",
-                f"      - {_yaml_key(network)}",
-                "    ports:",
-                f'      - "{host_port}:{container_port}"',
+            ]
+        )
+        for net_name in service_networks:
+            lines.append(f"      - {_yaml_key(net_name)}")
+        lines.extend(
+            [
                 "    volumes:",
                 f"      - {data_mount}:{data_in_container}",
                 "    environment:",
@@ -152,7 +154,9 @@ def compose_status(values: dict[str, str] | None = None) -> dict[str, Any]:
     return {
         "compose_file": compose_file,
         "compose_exists": bool(path and path.exists()),
-        "services": list(ALL_NAMED_DB_CONTAINERS),
+        "services": list(named_db_containers(values.get("MONGODB_MAIN_DATABASE_NAME", "")))
+        if values.get("MONGODB_MAIN_DATABASE_NAME", "").strip()
+        else [],
         "tor_network": values.get("DOCKER_NETWORK_TOR_DB", ""),
         "nontor_network": values.get("DOCKER_NETWORK_NONTOR_DB", ""),
         "lucid_network": values.get("DOCKER_NETWORK_NAME", ""),

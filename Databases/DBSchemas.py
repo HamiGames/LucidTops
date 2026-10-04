@@ -7,7 +7,6 @@ Field contracts from documentation/Databases.txt:
 - LucidTopsNodeDB collection {NodeID}
 - LucidTopsLedgerDB / LucidTops_LedgerDB collection BlockID
 - LucidTopsPaySystemsDB collection {UserID}_{timestamp}
-- LucidTopsBlockchain_LedgerDB is a replica of LucidTops_LedgerDB (creator_id omitted on replica)
 
 RULES of CODE CREATION:
 - No hardcoded values, all values are created at time of operation.
@@ -22,7 +21,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from Dns_databases import ALL_NAMED_DB_CONTAINERS, secret_key_prefix
+from Dns_databases import SCHEMA_DB_CONTAINERS, secret_key_prefix
 
 # --- LucidTops_SessionsDB collection schema: collection name:"SessionID" ---
 SESSION_ID_FIELDS: tuple[str, ...] = (
@@ -129,11 +128,6 @@ BLOCK_ID_FIELDS: tuple[str, ...] = (
     "Rewards",
     "LastBlockID",
     "Session-data-count",
-)
-
-# Replica omits creator visibility (Blockchain.txt / fixes.txt external copy).
-BLOCK_ID_REPLICA_FIELDS: tuple[str, ...] = tuple(
-    field for field in BLOCK_ID_FIELDS if field != "creator_id"
 )
 
 # --- LucidTopsPaySystemsDB collection schema: collection_name: "{UserID}_{timestamp}" ---
@@ -286,17 +280,9 @@ def database_schema_map() -> dict[str, dict[str, Any]]:
             "indexes": (("BlockID", {"unique": True, "sparse": True}),),
             "omit_fields_on_replica": (),
         },
-        "LucidTopsBlockchain_LedgerDB": {
-            "collection": resolve_collection_name(
-                "BLOCKCHAIN_LEDGER_DB_COLLECTION", "BlockID"
-            ),
-            "fields": BLOCK_ID_REPLICA_FIELDS,
-            "indexes": (("BlockID", {"unique": True, "sparse": True}),),
-            "omit_fields_on_replica": ("creator_id",),
-        },
         "LucidTopsPaySystemsDB": {
             "collection": resolve_collection_name(
-                "PAYSYSTEMS_DB_COLLECTION", "PaySystemsReceipt"
+                "PAYSYSTEMS_DB_COLLECTION", "{UserID}_{timestamp}"
             ),
             "fields": PAY_SYSTEMS_FIELDS,
             "indexes": (("reciept_ID", {"unique": True, "sparse": True}),),
@@ -416,9 +402,9 @@ def schemas_status() -> dict[str, Any]:
             ],
         }
     return {
-        "databases": list(ALL_NAMED_DB_CONTAINERS),
+        "databases": list(SCHEMA_DB_CONTAINERS),
         "contracts": contracts,
         "secret_prefixes": {
-            name: secret_key_prefix(name) for name in ALL_NAMED_DB_CONTAINERS
+            name: secret_key_prefix(name) for name in SCHEMA_DB_CONTAINERS
         },
     }

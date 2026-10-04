@@ -5,8 +5,8 @@ includes:
 - seed DockerDNS / network / master / Tor from Server/Secrets/Master.secrets + proxy.secrets
 - write databases.secrets / mongodb.secrets from seed + pull
 - generate compose for six separate containers (Tor vs non-Tor networks)
-- start containers, apply DBSchemas, verify, mark secrets verified
-- configure ledger replica metadata (LucidTops_LedgerDB -> LucidTopsBlockchain_LedgerDB)
+- start containers, apply DBSchemas on the five documented databases, verify, mark secrets verified
+- ping the sixth container named by MONGODB_MAIN_DATABASE_NAME
 
 RULES of CODE CREATION:
 - No hardcoded values, all values are created at time of operation.
@@ -66,8 +66,9 @@ write_databases_secrets = _secrets.write_databases_secrets
 mark_databases_verified = _secrets.mark_databases_verified
 databases_secrets_status = _secrets.databases_secrets_status
 
-ALL_NAMED_DB_CONTAINERS = _dns.ALL_NAMED_DB_CONTAINERS
-DB_DATA_SUBDIR = _dns.DB_DATA_SUBDIR
+ALL_NAMED_DB_CONTAINERS = _dns.named_db_containers
+SCHEMA_DB_CONTAINERS = _dns.SCHEMA_DB_CONTAINERS
+data_subdir_for = _dns.data_subdir_for
 secret_key_prefix = _dns.secret_key_prefix
 
 apply_schema_to_database = _schemas.apply_schema_to_database
@@ -94,10 +95,10 @@ def _require_proxy_bootstrap_seed(pull: dict[str, Any]) -> dict[str, str]:
     return seed
 
 
-def _ensure_data_dirs(databases_dir: Path) -> list[str]:
+def _ensure_data_dirs(databases_dir: Path, names: tuple[str, ...] | list[str]) -> list[str]:
     created: list[str] = []
-    for db_name, subdir in DB_DATA_SUBDIR.items():
-        path = databases_dir / subdir
+    for db_name in names:
+        path = databases_dir / data_subdir_for(db_name)
         path.mkdir(parents=True, exist_ok=True)
         created.append(path.as_posix())
     return created
@@ -167,6 +168,7 @@ def _compose_up(docker_bin: str, compose_file: Path) -> None:
 
 def _wait_healthy(
     docker_bin: str,
+    names: tuple[str, ...] | list[str],
     *,
     timeout_seconds: int | None = None,
 ) -> dict[str, str]:
@@ -181,7 +183,7 @@ def _wait_healthy(
     statuses: dict[str, str] = {}
     while time.time() < deadline:
         all_ok = True
-        for db_name in ALL_NAMED_DB_CONTAINERS:
+        for db_name in names:
             inspect = _run(
                 [
                     docker_bin,
@@ -201,17 +203,6 @@ def _wait_healthy(
     raise RuntimeError(f"database containers not healthy before timeout: {statuses}")
 
 
-def _running_in_container() -> bool:
-    """True when bootstrap runs inside lucid-databases-orchestrator (not bare host)."""
-    if Path("/.dockerenv").exists():
-        return True
-    try:
-        cgroup = Path("/proc/1/cgroup").read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return False
-    return "docker" in cgroup or "containerd" in cgroup
-
-
 def _mongo_client_for(db_name: str, values: dict[str, str]) -> Any:
     try:
         from pymongo import MongoClient
@@ -220,27 +211,14 @@ def _mongo_client_for(db_name: str, values: dict[str, str]) -> Any:
     from urllib.parse import quote_plus
 
     prefix = secret_key_prefix(db_name)
-    host_port = values.get(f"{prefix}_HOST_PORT", "").strip()
-    primary_ip = values.get("HOST_PRIMARY_IP", "").strip() or _env("HOST_PRIMARY_IP")
     container_port = values.get(f"{prefix}_PORT", "").strip() or values.get(
         "MONGODB_CONTAINER_PORT", ""
     ).strip()
     dns_host = values.get(f"{prefix}_HOST", "").strip() or db_name
     admin_user = values.get("MONGODB_ADMIN_USER", "").strip()
     admin_password = values.get("MONGODB_ADMIN_PASSWORD", "").strip()
-
-    # Inside the orchestrator container: use DockerDNS name + container port (27017).
-    # HOST_PRIMARY_IP here is the orchestrator's eth0 (e.g. 172.18.0.2) — published
-    # host ports are not reachable at that address. On bare metal host, use IP:HOST_PORT.
-    if _running_in_container():
-        host = dns_host
-        port = container_port
-    elif primary_ip and host_port:
-        host = primary_ip
-        port = host_port
-    else:
-        host = dns_host
-        port = container_port
+    host = dns_host
+    port = container_port
 
     if not host or not port:
         raise RuntimeError(
@@ -263,28 +241,19 @@ def _mongo_client_for(db_name: str, values: dict[str, str]) -> Any:
 def _apply_all_schemas(values: dict[str, str]) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     stamp = utc_now()
-    for db_name in ALL_NAMED_DB_CONTAINERS:
+    main_name = values.get("MONGODB_MAIN_DATABASE_NAME", "").strip()
+    for db_name in SCHEMA_DB_CONTAINERS:
         client = _mongo_client_for(db_name, values)
         try:
             db = client[db_name]
             results.append(apply_schema_to_database(db, db_name, created_at=stamp))
-            # Replica metadata document for ledger sync configuration.
-            if db_name == "LucidTopsBlockchain_LedgerDB":
-                source = values.get("LEDGER_REPLICA_SOURCE", "").strip()
-                target = values.get("LEDGER_REPLICA_TARGET", "").strip()
-                db["_replica_meta"].update_one(
-                    {"role": "blockchain_ledger_replica"},
-                    {
-                        "$set": {
-                            "role": "blockchain_ledger_replica",
-                            "source": source,
-                            "target": target,
-                            "omit_fields": ["creator_id"],
-                            "updated_at": stamp,
-                        }
-                    },
-                    upsert=True,
-                )
+        finally:
+            client.close()
+    if main_name:
+        client = _mongo_client_for(main_name, values)
+        try:
+            client.admin.command("ping")
+            results.append({"database": main_name, "action": "ping"})
         finally:
             client.close()
     return results
@@ -297,48 +266,20 @@ def bootstrap_databases(*, force: bool = False) -> dict[str, Any]:
     """
     pull = pull_realworld_information()
     bind_operation_environ(pull)
-    seed = _require_proxy_bootstrap_seed(pull)
-
-    # Require image/port/data-path from env/seed at operation time before writing secrets.
-    if (
-        not _env("MONGODB_IMAGE")
-        and not str(pull.get("mongodb_image") or "").strip()
-        and not seed.get("MONGODB_IMAGE", "").strip()
-    ):
-        raise RuntimeError("MONGODB_IMAGE must be set at time of operation")
-    if (
-        not _env("MONGODB_CONTAINER_PORT")
-        and not str(pull.get("mongodb_container_port") or "").strip()
-        and not seed.get("MONGODB_CONTAINER_PORT", "").strip()
-        and not seed.get("MONGODB_PORT", "").strip()
-    ):
-        raise RuntimeError(
-            "MONGODB_CONTAINER_PORT must be set at time of operation "
-            "(or mongod must be listening so pull can capture it)"
-        )
-    if not _env("MONGODB_DATA_PATH_IN_CONTAINER") and not seed.get(
-        "MONGODB_DATA_PATH_IN_CONTAINER", ""
-    ).strip():
-        raise RuntimeError(
-            "MONGODB_DATA_PATH_IN_CONTAINER must be set at time of operation"
-        )
-    if not _env("DATABASES_HEALTH_TIMEOUT_SECONDS"):
-        raise RuntimeError(
-            "DATABASES_HEALTH_TIMEOUT_SECONDS must be set at time of operation"
-        )
+    _require_proxy_bootstrap_seed(pull)
 
     databases_dir = Path(str(pull["databases_dir"]))
-    data_dirs = _ensure_data_dirs(databases_dir)
-
     db_secrets_path, mongo_secrets_path, values = write_databases_secrets(
         pull, force=force, verified=False
     )
+    names = ALL_NAMED_DB_CONTAINERS(values.get("MONGODB_MAIN_DATABASE_NAME", ""))
+    data_dirs = _ensure_data_dirs(databases_dir, names)
 
     docker_bin = _docker_bin(pull)
     networks = _ensure_networks(docker_bin, values)
     compose_path = write_databases_compose(values)
     _compose_up(docker_bin, compose_path)
-    health = _wait_healthy(docker_bin)
+    health = _wait_healthy(docker_bin, names)
     schema_results = _apply_all_schemas(values)
     mark_databases_verified(values)
 

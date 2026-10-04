@@ -19,10 +19,11 @@
 #   -v /mnt/myssd/LucidTops:/mnt/myssd/LucidTops
 #   -v /var/run/docker.sock:/var/run/docker.sock
 #
-# Secrets — created at time of operation (not baked into the image):
+# Secrets — written onto the console bind at image creation (not baked as literals):
 #   DATABASES_SECRETS_FILE=/mnt/myssd/LucidTops/Server/Secrets/databases.secrets
 #   MONGODB_SECRETS_FILE=/mnt/myssd/LucidTops/Server/Secrets/mongodb.secrets
-#   Seed: Server/Secrets/Master.secrets + proxy.secrets (Proxy Bootstrap)
+#   Seed: Server/Secrets/Master.secrets + proxy.secrets, and /mnt/myssd/LucidTops/torrc
+#   Content mounts: ROOT=/mnt/myssd/LucidTops  DB_ROOT=/mnt/myssd/LucidTops/DATA
 #   Entrypoint: pull_information → BootstrapDatabases → LaunchDatabases
 #
 # RULES:
@@ -32,8 +33,8 @@
 # - NO pull from GIT repository.
 #
 # Rebuild rule (§16.7): wipe image/volumes before rebuild.
-# Networks (§16.4): join LucidDNS from Master.secrets; create tor/nontor DB nets as needed.
-# Mongo data: host SSD bind mounts (Server/Databases / MONGODB_DATA_MOUNT) — not baked into image.
+# Networks (§16.4): join DOCKER_NETWORK_NAME from Master.secrets.
+# Mongo data: host bind DB_ROOT=/mnt/myssd/LucidTops/DATA — not baked into the image.
 
 # -----------------------------------------------------------------------------
 # Build-args (declared before FROM for BASE_IMAGE; re-declared after FROM for use)
@@ -51,7 +52,7 @@ ARG SECRETS_DIR=/mnt/myssd/LucidTops/Server/Secrets
 ARG DATABASES_SECRETS_FILE=/mnt/myssd/LucidTops/Server/Secrets/databases.secrets
 ARG MONGODB_SECRETS_FILE=/mnt/myssd/LucidTops/Server/Secrets/mongodb.secrets
 ARG DATABASES_CONFIGS_DIR=/mnt/myssd/LucidTops/Databases/configs
-ARG MONGODB_DATA_MOUNT=/mnt/myssd/LucidTops/Server/Databases
+ARG MONGODB_DATA_MOUNT=/mnt/myssd/LucidTops/DATA
 ARG RUN_DATABASES_BOOTSTRAP_ON_BUILD=false
 ARG INSTALL_DOCKER_CLI=true
 
@@ -142,6 +143,7 @@ RUN set -eu; \
     test -f /app/Databases/DBSchemas.py; \
     test -f /app/Databases/connection.py; \
     test -f /app/Databases/NodeHostedDB.py; \
+    test -f /app/Databases/patch_sessionsdb_collections.py; \
     test -s /app/Databases/requirements.txt; \
     test -f /app/Databases/Databases.dockerfile; \
     test -d /app/Databases/run; \
@@ -169,8 +171,9 @@ ENV RUN_DATABASES_BOOTSTRAP_ON_START=true
 ENV DOCKER_HOST=unix:///var/run/docker.sock
 
 # Image creation writes databases.secrets and mongodb.secrets onto the console
-# bind of Server/Secrets, seeded from Master.secrets and proxy.secrets.
+# bind of Server/Secrets, from Master.secrets, proxy.secrets, and torrc.
 RUN --mount=type=bind,source=/mnt/myssd/LucidTops/Server/Secrets,target=/mnt/myssd/LucidTops/Server/Secrets \
+    --mount=type=bind,source=/mnt/myssd/LucidTops/torrc,target=/mnt/myssd/LucidTops/torrc \
     python3 -c "import sys; sys.path.insert(0, '/app/Databases'); from pull_information import seed_console_secrets_at_image_creation; seed_console_secrets_at_image_creation()" \
  && test -s /mnt/myssd/LucidTops/Server/Secrets/databases.secrets \
  && test -s /mnt/myssd/LucidTops/Server/Secrets/mongodb.secrets

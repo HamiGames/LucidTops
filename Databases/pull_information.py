@@ -341,19 +341,24 @@ def _published_host_port(port_bindings: dict[str, Any], container_port: str) -> 
 
 def pull_active_mongodb_containers(docker_bin: str = "") -> dict[str, Any]:
     """
-    Read the six named Mongo containers that are running now.
+    Verify the six named Mongo containers that are running now.
 
-    Image, port, dbPath, binds, networks, and admin credentials come only from
-    docker inspect and, when mongod was started with --config, that file.
+    Used after compose up. Image creation does not call this. Host port publish
+    is optional: DockerDNS on DOCKER_NETWORK_NAME is the connection path.
     """
-    from Dns_databases import ALL_NAMED_DB_CONTAINERS, DB_ZONE
+    from Dns_databases import named_db_containers, resolve_main_database_name, zone_for
 
     binary = docker_bin.strip() or _which("docker")
     if not binary:
         raise RuntimeError("docker missing — cannot read active Mongo container config")
 
+    main_name = resolve_main_database_name()
+    if not _env("MONGODB_MAIN_DATABASE_NAME"):
+        os.environ["MONGODB_MAIN_DATABASE_NAME"] = main_name
+    container_names = named_db_containers(main_name)
+
     inspected: dict[str, dict[str, str]] = {}
-    for name in ALL_NAMED_DB_CONTAINERS:
+    for name in container_names:
         result = _run([binary, "inspect", name])
         if result.returncode != 0 or not result.stdout.strip():
             detail = (result.stderr or "").strip()
@@ -400,13 +405,27 @@ def pull_active_mongodb_containers(docker_bin: str = "") -> dict[str, Any]:
                 for key in port_bindings
                 if str(key).endswith("/tcp") and port_bindings.get(key)
             ]
-            if len(published) != 1:
+            exposed = config.get("ExposedPorts") or {}
+            exposed_tcp = [
+                str(key).split("/")[0]
+                for key in exposed
+                if str(key).endswith("/tcp")
+            ]
+            if len(published) == 1:
+                container_port = published[0]
+            elif len(exposed_tcp) == 1:
+                container_port = exposed_tcp[0]
+            elif _env("MONGODB_CONTAINER_PORT"):
+                container_port = _env("MONGODB_CONTAINER_PORT")
+            else:
                 raise RuntimeError(
-                    f"{name} container port missing — mongod --config net.port "
-                    "or a single published tcp port is required"
+                    f"{name} container port missing — mongod --config net.port, "
+                    "one exposed tcp port, or MONGODB_CONTAINER_PORT is required"
                 )
-            container_port = published[0]
-        host_port = _published_host_port(port_bindings, container_port)
+        try:
+            host_port = _published_host_port(port_bindings, container_port)
+        except RuntimeError:
+            host_port = ""
 
         binds = host_config.get("Binds") or []
         if not isinstance(binds, list):
@@ -438,10 +457,21 @@ def pull_active_mongodb_containers(docker_bin: str = "") -> dict[str, Any]:
                 )
             data_mount, data_path = data_binds[0]
 
-        networks = list(((row.get("NetworkSettings") or {}).get("Networks") or {}).keys())
-        if len(networks) != 1 or not networks[0].strip():
+        networks = [
+            item.strip()
+            for item in ((row.get("NetworkSettings") or {}).get("Networks") or {}).keys()
+            if str(item).strip()
+        ]
+        if not networks:
+            raise RuntimeError(f"{name} is not attached to a Docker network")
+        preferred = _env("DOCKER_NETWORK_NAME")
+        if preferred and preferred in networks:
+            attached_network = preferred
+        elif len(networks) == 1:
+            attached_network = networks[0]
+        else:
             raise RuntimeError(
-                f"{name} must be attached to exactly one Docker network — got {networks}"
+                f"{name} is attached to {networks} and DOCKER_NETWORK_NAME is not among them"
             )
         admin_user = env_map.get("MONGO_INITDB_ROOT_USERNAME", "").strip()
         admin_password = env_map.get("MONGO_INITDB_ROOT_PASSWORD", "").strip()
@@ -453,9 +483,7 @@ def pull_active_mongodb_containers(docker_bin: str = "") -> dict[str, Any]:
         image = str(config.get("Image") or "").strip()
         if not image:
             raise RuntimeError(f"{name} image missing from the running container")
-        zone = DB_ZONE.get(name, "")
-        if not zone:
-            raise RuntimeError(f"{name} has no Tor/non-Tor zone")
+        zone = zone_for(name, main_database_name=main_name)
 
         inspected[name] = {
             "status": status,
@@ -464,7 +492,7 @@ def pull_active_mongodb_containers(docker_bin: str = "") -> dict[str, Any]:
             "host_port": host_port,
             "data_mount": data_mount,
             "data_path_in_container": data_path,
-            "network": networks[0].strip(),
+            "network": attached_network,
             "zone": zone,
             "admin_user": admin_user,
             "admin_password": admin_password,
@@ -500,6 +528,12 @@ def pull_active_mongodb_containers(docker_bin: str = "") -> dict[str, Any]:
             raise RuntimeError(f"{zone} Mongo containers are not on one network — {sorted(names)}")
         return next(iter(names))
 
+    seed = load_master_and_proxy_seed()
+    tor_attached = _zone_network("tor")
+    nontor_attached = _zone_network("nontor")
+    tor_net = seed.get("DOCKER_NETWORK_TOR_DB", "").strip() or tor_attached
+    nontor_net = seed.get("DOCKER_NETWORK_NONTOR_DB", "").strip() or nontor_attached
+
     return {
         "image": image,
         "container_port": container_port,
@@ -507,8 +541,8 @@ def pull_active_mongodb_containers(docker_bin: str = "") -> dict[str, Any]:
         "admin_user": admin_user,
         "admin_password": admin_password,
         "mongodb_password": mongodb_password,
-        "docker_network_tor_db": _zone_network("tor"),
-        "docker_network_nontor_db": _zone_network("nontor"),
+        "docker_network_tor_db": tor_net,
+        "docker_network_nontor_db": nontor_net,
         "containers": inspected,
     }
 
@@ -703,23 +737,29 @@ def _pull_secrets_dir(lucid_root: Path) -> Path:
     return chosen.resolve()
 
 
+def read_torrc(lucid_root: Path | None = None) -> str:
+    """Read /mnt/myssd/LucidTops/torrc. Missing or empty is a hard failure."""
+    root = lucid_root if lucid_root is not None else resolve_lucid_tops_root()
+    path = root / "torrc"
+    if not path.is_file():
+        raise RuntimeError(f"torrc missing — expected {path.as_posix()}")
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise RuntimeError(f"torrc unreadable — {path.as_posix()}") from exc
+    if not text.strip():
+        raise RuntimeError(f"torrc empty — {path.as_posix()}")
+    return text
+
+
 def _pull_databases_dir(lucid_root: Path) -> Path:
-    env_db = _env("MONGODB_DATA_MOUNT") or _env("LUCID_DATABASES_DIR")
-    if env_db:
-        path = Path(env_db).expanduser()
-        path.mkdir(parents=True, exist_ok=True)
-        return path.resolve()
-    candidates = [
-        lucid_root / "Server" / "Databases",
-        lucid_root / "Databases",
-        lucid_root / "data" / "mongodb",
-    ]
-    for candidate in candidates:
-        if candidate.is_dir():
-            return candidate.resolve()
-    chosen = candidates[0]
-    chosen.mkdir(parents=True, exist_ok=True)
-    return chosen.resolve()
+    """Mongo content root is DB_ROOT only (containers.txt section 4)."""
+    del lucid_root
+    from Dns_databases import DB_ROOT
+
+    path = Path(DB_ROOT)
+    path.mkdir(parents=True, exist_ok=True)
+    return path.resolve()
 
 
 def _pull_listening_by_process() -> dict[str, list[tuple[str, int]]]:
@@ -1133,56 +1173,14 @@ def export_shell_env(
     return "\n".join(lines) + ("\n" if lines else "")
 
 
-_CONNECTION_SEED_KEYS = (
-    "DOCKER_NETWORK_NAME",
-    "PROXY_SELF_DNS",
-    "MASTER_SERVER_ONION",
-    "FRONTEND_ONION",
-    "NODEUSER_ONION",
-    "BLOCKCHAIN_ONION",
-    "RDP_ONION",
-    "ADMIN_ONION",
-    "TOR_SOCKS_HOST",
-    "TOR_SOCKS_PORT",
-)
-
-
 def seed_console_secrets_at_image_creation() -> None:
-    """Write databases.secrets and mongodb.secrets on the console at image creation."""
+    """Write full databases.secrets and mongodb.secrets on the console at image creation."""
     root = resolve_lucid_tops_root()
-    directory = server_secrets_dir(root)
-    directory.mkdir(parents=True, exist_ok=True)
-    master = _parse_secrets_file(master_secrets_path(root))
-    proxy = _parse_secrets_file(proxy_secrets_path(root))
-    merged: dict[str, str] = dict(proxy)
-    for key, value in master.items():
-        if value:
-            merged[key] = value
-    if not merged.get("DOCKER_NETWORK_NAME", "").strip():
-        raise RuntimeError(
-            "DOCKER_NETWORK_NAME missing from Master.secrets and proxy.secrets"
-        )
-    torrc = root / "torrc"
-    for name in ("databases.secrets", "mongodb.secrets"):
-        path = directory / name
-        values = _parse_secrets_file(path)
-        for key in _CONNECTION_SEED_KEYS:
-            sourced = merged.get(key, "").strip()
-            if sourced:
-                values[key] = sourced
-        values["SECRETS_DIR"] = directory.as_posix()
-        values["LUCID_TOPS_ROOT"] = root.as_posix()
-        values["MASTER_SECRETS_FILE"] = master_secrets_path(root).as_posix()
-        values["PROXY_SECRETS_FILE"] = proxy_secrets_path(root).as_posix()
-        if torrc.is_file():
-            values["HOST_TOR_CONFIG_TORRC"] = torrc.as_posix()
-        lines = [
-            f"# LucidTops {name} — seeded at image creation from Master.secrets and proxy.secrets"
-        ]
-        for key in sorted(values):
-            if values[key]:
-                lines.append(f"{key}={values[key]}")
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    read_torrc(root)
+    pull = pull_realworld_information()
+    from databases_secrets import write_databases_secrets
+
+    write_databases_secrets(pull, force=True, verified=False)
 
 
 def main() -> int:
