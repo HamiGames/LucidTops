@@ -162,11 +162,11 @@ write_container_torrc() {
     host_torrc="/mnt/myssd/LucidTops/torrc"
   fi
   if [ -f "$host_torrc" ]; then
-    grep -E '^(HiddenService|SocksPort|ControlPort) ' "$host_torrc" >> "$dest" || true
+    grep -E '^HiddenService' "$host_torrc" >> "$dest" || true
   fi
   snippet="$(secret_value PROXY_TORRC_SNIPPET_PATH)"
   if [ -n "$snippet" ] && [ -f "$snippet" ]; then
-    grep -E '^(HiddenService|SocksPort|ControlPort) ' "$snippet" >> "$dest" || true
+    grep -E '^HiddenService' "$snippet" >> "$dest" || true
   fi
   grep '^HiddenServiceDir ' "$dest" | awk '{print $2}' | while read -r hs_dir; do
     [ -n "$hs_dir" ] || continue
