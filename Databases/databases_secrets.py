@@ -26,6 +26,7 @@ from typing import Any
 
 from Dns_databases import (
     DB_ROOT,
+    MONGO_DATA_PATH_IN_CONTAINER,
     secret_key_prefix,
     named_db_containers,
     network_for_zone,
@@ -319,15 +320,16 @@ def active_database_secret_fields(snapshot: dict[str, Any]) -> dict[str, str]:
         )
     fields = dict(required)
     data_parents: set[str] = set()
-    from Dns_databases import FIXED_DB_CONTAINERS
-
-    extras = [name for name in containers if name not in FIXED_DB_CONTAINERS]
-    if len(extras) != 1:
+    main_name = require_main_database_name(
+        str(snapshot.get("main_database_name") or "").strip()
+        or os.environ.get("MONGODB_MAIN_DATABASE_NAME", "").strip()
+    )
+    expected = named_db_containers(main_name)
+    missing_names = [name for name in expected if name not in containers]
+    if missing_names:
         raise RuntimeError(
-            "active Mongo snapshot must contain the five fixed containers plus "
-            f"one MONGODB_MAIN_DATABASE_NAME container — extras={extras}"
+            "active Mongo snapshot missing containers: " + ", ".join(missing_names)
         )
-    main_name = require_main_database_name(extras[0])
     fields["MONGODB_MAIN_DATABASE_NAME"] = main_name
     for db_name in named_db_containers(main_name):
         row = containers.get(db_name)
@@ -386,6 +388,15 @@ def active_database_secret_fields(snapshot: dict[str, Any]) -> dict[str, str]:
     return fields
 
 
+def _data_path_in_container(seed: dict[str, str]) -> str:
+    """In-container mongod path. Host directories under DB_ROOT are not this value."""
+    value = str(seed.get("MONGODB_DATA_PATH_IN_CONTAINER", "")).strip()
+    root = DB_ROOT.rstrip("/")
+    if value and value != root and not value.startswith(root + "/"):
+        return value
+    return MONGO_DATA_PATH_IN_CONTAINER
+
+
 def _required_from_seed(seed: dict[str, str], *keys: str) -> str:
     """Connection constants come only from Master.secrets or proxy.secrets."""
     for key in keys:
@@ -417,7 +428,7 @@ def build_databases_secrets_values(
 
     image = _required_from_seed(seed, "MONGODB_IMAGE")
     container_port = _required_from_seed(seed, "MONGODB_CONTAINER_PORT", "MONGODB_PORT")
-    data_in_container = _required_from_seed(seed, "MONGODB_DATA_PATH_IN_CONTAINER")
+    data_in_container = _data_path_in_container(seed)
     admin_user = _required_from_seed(seed, "MONGODB_ADMIN_USER")
     admin_password = _required_from_seed(seed, "MONGODB_ADMIN_PASSWORD", "MONGODB_PASSWORD")
     mongo_password = str(seed.get("MONGODB_PASSWORD", "")).strip() or admin_password

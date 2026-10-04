@@ -21,7 +21,12 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from Dns_databases import SCHEMA_DB_CONTAINERS, secret_key_prefix
+from Dns_databases import (
+    container_name,
+    resolve_main_database_name,
+    schema_db_containers,
+    secret_key_prefix,
+)
 
 # --- LucidTops_SessionsDB collection schema: collection name:"SessionID" ---
 SESSION_ID_FIELDS: tuple[str, ...] = (
@@ -251,15 +256,21 @@ def database_schema_map() -> dict[str, dict[str, Any]]:
     """
     sessions_collections = _sessions_db_collections()
     primary = sessions_collections[0]
+    main = resolve_main_database_name()
+    sessions_name = container_name(main, "_SessionsDB")
+    user_name = container_name(main, "_UserDB")
+    node_name = container_name(main, "_NodeDB")
+    ledger_name = container_name(main, "__LedgerDB")
+    payment_name = container_name(main, "_PaymentDB")
     return {
-        "LucidTops_SessionsDB": {
+        sessions_name: {
             "collection": primary["name"],
             "fields": primary["fields"],
             "indexes": primary["indexes"],
             "collections": sessions_collections,
             "omit_fields_on_replica": (),
         },
-        "LucidTopsUserDB": {
+        user_name: {
             "collection": resolve_collection_name("USER_DB_COLLECTION", "UserID"),
             "fields": USER_ID_FIELDS,
             "indexes": (
@@ -268,19 +279,19 @@ def database_schema_map() -> dict[str, dict[str, Any]]:
             ),
             "omit_fields_on_replica": (),
         },
-        "LucidTopsNodeDB": {
+        node_name: {
             "collection": resolve_collection_name("NODE_DB_COLLECTION", "NodeID"),
             "fields": NODE_ID_FIELDS,
             "indexes": (("NodeID", {"unique": True, "sparse": True}),),
             "omit_fields_on_replica": (),
         },
-        "LucidTops_LedgerDB": {
+        ledger_name: {
             "collection": resolve_collection_name("LEDGER_DB_COLLECTION", "BlockID"),
             "fields": BLOCK_ID_FIELDS,
             "indexes": (("BlockID", {"unique": True, "sparse": True}),),
             "omit_fields_on_replica": (),
         },
-        "LucidTopsPaySystemsDB": {
+        payment_name: {
             "collection": resolve_collection_name(
                 "PAYSYSTEMS_DB_COLLECTION", "{UserID}_{timestamp}"
             ),
@@ -402,9 +413,9 @@ def schemas_status() -> dict[str, Any]:
             ],
         }
     return {
-        "databases": list(SCHEMA_DB_CONTAINERS),
+        "databases": list(schema_db_containers()),
         "contracts": contracts,
         "secret_prefixes": {
-            name: secret_key_prefix(name) for name in SCHEMA_DB_CONTAINERS
+            name: secret_key_prefix(name) for name in schema_db_containers()
         },
     }

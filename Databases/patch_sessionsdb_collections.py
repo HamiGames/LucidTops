@@ -40,7 +40,7 @@ from DBSchemas import (  # noqa: E402
     collections_for_spec,
     schema_for_database,
 )
-from Dns_databases import secret_key_prefix  # noqa: E402
+from Dns_databases import container_name, secret_key_prefix  # noqa: E402
 from databases_secrets import (  # noqa: E402
     databases_secrets_path,
     load_databases_secrets,
@@ -130,8 +130,9 @@ def patch_sessionsdb(*, apply: bool) -> dict[str, Any]:
         "user_docs_backfill": {},
     }
 
-    # --- LucidTops_SessionsDB ---
-    sessions_name = "LucidTops_SessionsDB"
+    # --- {prefix}_SessionsDB ---
+    main_name = values.get("MONGODB_MAIN_DATABASE_NAME", "").strip()
+    sessions_name = container_name(main_name, "_SessionsDB")
     sessions_client = _mongo_client_for(sessions_name, values)
     try:
         sessions_db = sessions_client[sessions_name]
@@ -152,8 +153,8 @@ def patch_sessionsdb(*, apply: bool) -> dict[str, Any]:
     finally:
         sessions_client.close()
 
-    # --- LucidTopsUserDB ---
-    user_name = "LucidTopsUserDB"
+    # --- {prefix}_UserDB ---
+    user_name = container_name(main_name, "_UserDB")
     user_client = _mongo_client_for(user_name, values)
     try:
         user_db = user_client[user_name]

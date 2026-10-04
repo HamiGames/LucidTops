@@ -7,10 +7,12 @@
 # Build (on Pi, from mounted SSD):
 #   cd /mnt/myssd/LucidTops
 #   BASE_IMAGE=python:3.11-slim-bookworm
+#   MONGODB_IMAGE=mongo:7.0
 #   APT_PACKAGES="iproute2 ca-certificates curl gnupg"
 #   docker build --no-cache --platform linux/arm64 \
 #     -f /mnt/myssd/LucidTops/Databases/Databases.dockerfile \
 #     --build-arg BASE_IMAGE="${BASE_IMAGE}" \
+#     --build-arg MONGODB_IMAGE="${MONGODB_IMAGE}" \
 #     --build-arg APT_PACKAGES="${APT_PACKAGES}" \
 #     -t lucid-databases-orchestrator:v1.0.0 \
 #     /mnt/myssd/LucidTops
@@ -25,6 +27,11 @@
 #   Seed: Server/Secrets/Master.secrets + proxy.secrets
 #   torrc is read only when those files already contain TOR_SOCKS_HOST and TOR_SOCKS_PORT
 #   Content mounts: ROOT=/mnt/myssd/LucidTops  DB_ROOT=/mnt/myssd/LucidTops/DATA
+#   Mongo data bind: DB_ROOT/<container name>:/data/db
+#   MONGODB_DATA_PATH_IN_CONTAINER=/data/db (inside mongo:7.0, not the host path)
+#   Six containers from MONGODB_MAIN_DATABASE_NAME (prefix, not a container):
+#     {prefix}_SessionsDB {prefix}__LedgerDB {prefix}_UserDB
+#     {prefix}_NodeDB {prefix}_ChainDB {prefix}_PaymentDB
 #   Entrypoint: pull_information → BootstrapDatabases → LaunchDatabases
 #
 # RULES:
@@ -35,12 +42,23 @@
 #
 # Rebuild rule (§16.7): wipe image/volumes before rebuild.
 # Networks (§16.4): join DOCKER_NETWORK_NAME from Master.secrets.
-# Mongo data: host bind DB_ROOT=/mnt/myssd/LucidTops/DATA — not baked into the image.
+# Mongo data: host bind DB_ROOT/<container>:/data/db — not baked into this image.
+# mongo:7.0 is required and pulled here so the six sibling containers can use it.
 
 # -----------------------------------------------------------------------------
 # Build-args (declared before FROM for BASE_IMAGE; re-declared after FROM for use)
 # -----------------------------------------------------------------------------
 ARG BASE_IMAGE=python:3.11-slim-bookworm
+ARG MONGODB_IMAGE=mongo:7.0
+
+# MongoDB 7.0 base image. mongod writes to /data/db unless --dbpath is set.
+FROM ${MONGODB_IMAGE} AS mongodb
+RUN set -eu; \
+    command -v mongod; \
+    command -v mongosh; \
+    mongod --version; \
+    mongosh --version
+
 FROM ${BASE_IMAGE}
 
 # Runtime / install args (NOT used in COPY source paths)
@@ -53,7 +71,9 @@ ARG SECRETS_DIR=/mnt/myssd/LucidTops/Server/Secrets
 ARG DATABASES_SECRETS_FILE=/mnt/myssd/LucidTops/Server/Secrets/databases.secrets
 ARG MONGODB_SECRETS_FILE=/mnt/myssd/LucidTops/Server/Secrets/mongodb.secrets
 ARG DATABASES_CONFIGS_DIR=/mnt/myssd/LucidTops/Databases/configs
+ARG MONGODB_IMAGE=mongo:7.0
 ARG MONGODB_DATA_MOUNT=/mnt/myssd/LucidTops/DATA
+ARG MONGODB_DATA_PATH_IN_CONTAINER=/data/db
 ARG RUN_DATABASES_BOOTSTRAP_ON_BUILD=false
 ARG INSTALL_DOCKER_CLI=true
 
@@ -195,7 +215,9 @@ ENV SECRETS_DIR=${SECRETS_DIR}
 ENV DATABASES_SECRETS_FILE=${DATABASES_SECRETS_FILE}
 ENV MONGODB_SECRETS_FILE=${MONGODB_SECRETS_FILE}
 ENV DATABASES_CONFIGS_DIR=${DATABASES_CONFIGS_DIR}
+ENV MONGODB_IMAGE=${MONGODB_IMAGE}
 ENV MONGODB_DATA_MOUNT=${MONGODB_DATA_MOUNT}
+ENV MONGODB_DATA_PATH_IN_CONTAINER=${MONGODB_DATA_PATH_IN_CONTAINER}
 ENV RUN_DATABASES_BOOTSTRAP_ON_START=true
 ENV DOCKER_HOST=unix:///var/run/docker.sock
 

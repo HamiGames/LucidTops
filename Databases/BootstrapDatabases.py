@@ -67,7 +67,8 @@ mark_databases_verified = _secrets.mark_databases_verified
 databases_secrets_status = _secrets.databases_secrets_status
 
 ALL_NAMED_DB_CONTAINERS = _dns.named_db_containers
-SCHEMA_DB_CONTAINERS = _dns.SCHEMA_DB_CONTAINERS
+schema_db_containers = _dns.schema_db_containers
+chain_db_container = _dns.chain_db_container
 data_subdir_for = _dns.data_subdir_for
 secret_key_prefix = _dns.secret_key_prefix
 
@@ -242,20 +243,20 @@ def _apply_all_schemas(values: dict[str, str]) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     stamp = utc_now()
     main_name = values.get("MONGODB_MAIN_DATABASE_NAME", "").strip()
-    for db_name in SCHEMA_DB_CONTAINERS:
+    for db_name in schema_db_containers(main_name):
         client = _mongo_client_for(db_name, values)
         try:
             db = client[db_name]
             results.append(apply_schema_to_database(db, db_name, created_at=stamp))
         finally:
             client.close()
-    if main_name:
-        client = _mongo_client_for(main_name, values)
-        try:
-            client.admin.command("ping")
-            results.append({"database": main_name, "action": "ping"})
-        finally:
-            client.close()
+    chain_name = chain_db_container(main_name)
+    client = _mongo_client_for(chain_name, values)
+    try:
+        client.admin.command("ping")
+        results.append({"database": chain_name, "action": "ping"})
+    finally:
+        client.close()
     return results
 
 

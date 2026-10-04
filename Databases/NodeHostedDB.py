@@ -34,6 +34,7 @@ from databases_secrets import (
     utc_now,
     write_secrets_file,
 )
+from Dns_databases import container_name, resolve_main_database_name
 from pull_information import pull_realworld_information, bind_operation_environ
 
 _NODE_ID_PATTERN = re.compile(r"^[A-Za-z0-9]{16}$")
@@ -95,7 +96,10 @@ def _register_on_node_db(
     ledger_db: str,
     registration: dict[str, Any],
 ) -> dict[str, Any]:
-    db = get_database("LucidTopsNodeDB", prefer_host_publish=True)
+    db = get_database(
+        container_name(resolve_main_database_name(), "_NodeDB"),
+        prefer_host_publish=True,
+    )
     collection_name = resolve_collection_name("NODE_DB_COLLECTION", "NodeID")
     col = db[collection_name]
     stamp = utc_now()
@@ -162,7 +166,8 @@ def create_node_hosted_databases(
     stamp = utc_now()
 
     # Logical DBs live on the LucidTopsNodeDB container instance.
-    client = get_mongo_client("LucidTopsNodeDB", prefer_host_publish=True)
+    node_container = container_name(resolve_main_database_name(), "_NodeDB")
+    client = get_mongo_client(node_container, prefer_host_publish=True)
     try:
         schema_info = _apply_node_hosted_schemas(
             client, user_db=user_db, ledger_db=ledger_db, stamp=stamp
@@ -192,7 +197,10 @@ def node_hosted_status(node_id: str) -> dict[str, Any]:
     node_id = validate_node_id(node_id)
     user_db = node_user_db_name(node_id)
     ledger_db = node_ledger_db_name(node_id)
-    client = get_mongo_client("LucidTopsNodeDB", prefer_host_publish=True)
+    client = get_mongo_client(
+        container_name(resolve_main_database_name(), "_NodeDB"),
+        prefer_host_publish=True,
+    )
     try:
         names = set(client.list_database_names())
         return {

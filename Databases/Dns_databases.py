@@ -1,12 +1,15 @@
 """DockerDNS mapping for the six LucidTops Databases containers.
 
-Canonical inventory from documentation/Databases.txt:
-- LucidTops_LedgerDB
-- LucidTops_SessionsDB
-- LucidTopsUserDB
-- LucidTopsNodeDB
-- LucidTopsPaySystemsDB
-- sixth container name = MONGODB_MAIN_DATABASE_NAME (Master.secrets or proxy.secrets)
+Canonical inventory from documentation/Databases.txt (prefix = MONGODB_MAIN_DATABASE_NAME):
+- {prefix}_SessionsDB
+- {prefix}__LedgerDB
+- {prefix}_UserDB
+- {prefix}_NodeDB
+- {prefix}_ChainDB
+- {prefix}_PaymentDB
+
+MONGODB_MAIN_DATABASE_NAME is the prefix (LucidTops), not a seventh container.
+Host data dirs are DB_ROOT/<container name>. mongo:7.0 writes to /data/db.
 
 Content mounts from documentation/containers.txt section 4:
 - ROOT=/mnt/myssd/LucidTops
@@ -30,38 +33,18 @@ from typing import Any
 ROOT = "/mnt/myssd/LucidTops"
 DB_ROOT = "/mnt/myssd/LucidTops/DATA"
 
-# Fixed five containers. The sixth name is MONGODB_MAIN_DATABASE_NAME.
-TOR_DB_CONTAINERS: tuple[str, ...] = (
-    "LucidTops_SessionsDB",
-    "LucidTops_LedgerDB",
-)
+# Path inside every mongo:7.0 container. Host side is DB_ROOT/<container name>.
+MONGO_DATA_PATH_IN_CONTAINER = "/data/db"
 
-NONTOR_DB_CONTAINERS: tuple[str, ...] = (
-    "LucidTopsUserDB",
-    "LucidTopsNodeDB",
-    "LucidTopsPaySystemsDB",
-)
-
-FIXED_DB_CONTAINERS: tuple[str, ...] = TOR_DB_CONTAINERS + NONTOR_DB_CONTAINERS
-
-# Schemas in Databases.txt apply to these five. The sixth container is ping-only.
-SCHEMA_DB_CONTAINERS: tuple[str, ...] = FIXED_DB_CONTAINERS
-
-DB_ZONE: dict[str, str] = {
-    **{name: "tor" for name in TOR_DB_CONTAINERS},
-    **{name: "nontor" for name in NONTOR_DB_CONTAINERS},
-}
-
-# DNS-selected names MasterServer may link (aligns with backend/Dns_selection.py comments).
-MASTER_DNS_SELECTED_DBS: frozenset[str] = frozenset(
-    {
-        "LucidTops_SessionsDB",
-        "LucidTopsNodeDB",
-        "LucidTopsUserDB",
-        "LucidTopsLedgerDB",
-        "LucidTops_LedgerDB",
-        "LucidTopsPaySystemsDB",
-    }
+# suffix, zone, has collection schema. ChainDB is created and pinged only.
+# Ledger uses two underscores, matching documentation/Databases.txt.
+CONTAINER_SPECS: tuple[tuple[str, str, bool], ...] = (
+    ("_SessionsDB", "tor", True),
+    ("__LedgerDB", "tor", True),
+    ("_UserDB", "nontor", True),
+    ("_NodeDB", "nontor", True),
+    ("_ChainDB", "nontor", False),
+    ("_PaymentDB", "nontor", True),
 )
 
 
@@ -97,16 +80,15 @@ def _console_secret_value(key: str) -> str:
 
 
 def require_main_database_name(name: str) -> str:
-    """Sixth container name. Empty or a collision with the fixed five is refused."""
+    """Prefix for the six containers. Empty is refused. This is not a container name."""
     value = (name or "").strip()
     if not value:
         raise RuntimeError(
             "MONGODB_MAIN_DATABASE_NAME missing — must be set in Master.secrets or proxy.secrets"
         )
-    if value in FIXED_DB_CONTAINERS:
+    if any(ch in value for ch in ("/", "\\", " ")):
         raise RuntimeError(
-            "MONGODB_MAIN_DATABASE_NAME "
-            f"{value!r} collides with a fixed database container"
+            f"MONGODB_MAIN_DATABASE_NAME {value!r} is not a container-name prefix"
         )
     return value
 
@@ -118,23 +100,97 @@ def resolve_main_database_name(candidate: str = "") -> str:
     return require_main_database_name(value)
 
 
-def named_db_containers(main_database_name: str) -> tuple[str, ...]:
-    """Five fixed containers plus the container named by MONGODB_MAIN_DATABASE_NAME."""
+def container_name(main_database_name: str, suffix: str) -> str:
+    """One container: prefix plus a Databases.txt suffix (Ledger keeps two underscores)."""
     main = require_main_database_name(main_database_name)
-    return FIXED_DB_CONTAINERS + (main,)
+    if suffix not in {item[0] for item in CONTAINER_SPECS}:
+        raise RuntimeError(f"unknown database suffix {suffix!r}")
+    return f"{main}{suffix}"
+
+
+def named_db_containers(main_database_name: str) -> tuple[str, ...]:
+    """Six containers derived from MONGODB_MAIN_DATABASE_NAME. The prefix is not a container."""
+    main = require_main_database_name(main_database_name)
+    names = tuple(f"{main}{suffix}" for suffix, _zone, _schema in CONTAINER_SPECS)
+    if main in names or len(set(names)) != len(names):
+        raise RuntimeError(
+            "MONGODB_MAIN_DATABASE_NAME "
+            f"{main!r} does not produce six distinct container names"
+        )
+    return names
+
+
+def _resolved_main(candidate: str = "") -> str:
+    value = (candidate or "").strip() or _env("MONGODB_MAIN_DATABASE_NAME")
+    if not value:
+        value = _console_secret_value("MONGODB_MAIN_DATABASE_NAME")
+    return value.strip()
 
 
 def all_named_db_containers() -> tuple[str, ...]:
-    """Six containers when the main name is known; otherwise the fixed five."""
-    candidate = _env("MONGODB_MAIN_DATABASE_NAME") or _console_secret_value(
-        "MONGODB_MAIN_DATABASE_NAME"
-    )
+    """Six containers when the prefix is known; otherwise empty."""
+    candidate = _resolved_main()
     if not candidate:
-        return FIXED_DB_CONTAINERS
+        return ()
     try:
         return named_db_containers(candidate)
     except RuntimeError:
-        return FIXED_DB_CONTAINERS
+        return ()
+
+
+def tor_db_containers(main_database_name: str = "") -> tuple[str, ...]:
+    main = _resolved_main(main_database_name)
+    if not main:
+        return ()
+    try:
+        names = named_db_containers(main)
+    except RuntimeError:
+        return ()
+    return tuple(
+        name
+        for name, (_suffix, zone, _schema) in zip(names, CONTAINER_SPECS)
+        if zone == "tor"
+    )
+
+
+def nontor_db_containers(main_database_name: str = "") -> tuple[str, ...]:
+    main = _resolved_main(main_database_name)
+    if not main:
+        return ()
+    try:
+        names = named_db_containers(main)
+    except RuntimeError:
+        return ()
+    return tuple(
+        name
+        for name, (_suffix, zone, _schema) in zip(names, CONTAINER_SPECS)
+        if zone == "nontor"
+    )
+
+
+def schema_db_containers(main_database_name: str = "") -> tuple[str, ...]:
+    """Five schema containers. ChainDB is omitted (ping only)."""
+    main = _resolved_main(main_database_name)
+    if not main:
+        return ()
+    try:
+        names = named_db_containers(main)
+    except RuntimeError:
+        return ()
+    return tuple(
+        name
+        for name, (_suffix, _zone, has_schema) in zip(names, CONTAINER_SPECS)
+        if has_schema
+    )
+
+
+def chain_db_container(main_database_name: str = "") -> str:
+    main = _resolved_main(main_database_name)
+    if not main:
+        raise RuntimeError(
+            "MONGODB_MAIN_DATABASE_NAME missing — must be set in Master.secrets or proxy.secrets"
+        )
+    return container_name(main, "_ChainDB")
 
 
 # Importers that expect a tuple (backend write_container_secrets) see the six
@@ -159,28 +215,13 @@ def secret_key_prefix(db_name: str) -> str:
     return "_".join(part.upper() for part in parts if part)
 
 
-def tor_db_containers() -> tuple[str, ...]:
-    return TOR_DB_CONTAINERS
-
-
-def nontor_db_containers() -> tuple[str, ...]:
-    return NONTOR_DB_CONTAINERS
-
-
-def schema_db_containers() -> tuple[str, ...]:
-    return SCHEMA_DB_CONTAINERS
-
-
 def zone_for(db_name: str, *, main_database_name: str = "") -> str:
     name = db_name.strip()
-    zone = DB_ZONE.get(name)
-    if zone:
-        return zone
-    main = (main_database_name or "").strip() or _env("MONGODB_MAIN_DATABASE_NAME")
-    if not main:
-        main = _console_secret_value("MONGODB_MAIN_DATABASE_NAME")
-    if main and name == main and name not in FIXED_DB_CONTAINERS:
-        return "nontor"
+    main = _resolved_main(main_database_name)
+    if main:
+        for suffix, zone, _schema in CONTAINER_SPECS:
+            if name == f"{main}{suffix}":
+                return zone
     raise RuntimeError(f"unknown database container {db_name!r} — not in the six-container inventory")
 
 
@@ -202,11 +243,10 @@ def _normalize(name: str) -> str:
 
 
 def allows_master_dns_link(name: str) -> bool:
-    """MasterServer may open DockerDNS links to the named database containers."""
+    """MasterServer may open DockerDNS links to the six named database containers."""
     key = _normalize(name)
-    selected = {_normalize(item) for item in MASTER_DNS_SELECTED_DBS}
     named = {_normalize(item) for item in all_named_db_containers()}
-    return key in selected or key in named
+    return key in named
 
 
 def network_env_key_for_zone(zone: str) -> str:
@@ -233,9 +273,9 @@ def dns_databases_status() -> dict[str, Any]:
     return {
         "root": ROOT,
         "db_root": DB_ROOT,
-        "tor": list(TOR_DB_CONTAINERS),
-        "nontor": list(NONTOR_DB_CONTAINERS),
-        "fixed": list(FIXED_DB_CONTAINERS),
+        "mongo_data_path_in_container": MONGO_DATA_PATH_IN_CONTAINER,
+        "tor": list(tor_db_containers()),
+        "nontor": list(nontor_db_containers()),
+        "schema": list(schema_db_containers()),
         "all": list(all_named_db_containers()),
-        "master_dns_selected": sorted(MASTER_DNS_SELECTED_DBS),
     }
