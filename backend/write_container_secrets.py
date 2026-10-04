@@ -8,13 +8,16 @@ Run on the Pi from the SSD mount:
     python backend/write_container_secrets.py
 
 No git. No remote fetch. Database image, port, dbPath, binds, networks, and
-admin credentials come from the running named Mongo containers.
+admin credentials come from the running named Mongo containers. If any of
+those containers is not running, databases.secrets and mongodb.secrets
+content is skipped and the files are left unchanged.
 """
 
 from __future__ import annotations
 
 import importlib.util
 import os
+import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -132,6 +135,29 @@ def _require_keys(path: Path, keys: tuple[str, ...]) -> dict[str, str]:
     return loaded
 
 
+def _database_containers_not_running(docker_bin: str) -> list[str]:
+    """Named Mongo containers that are not status=running. Empty when all are up."""
+    from Dns_databases import ALL_NAMED_DB_CONTAINERS
+
+    binary = docker_bin.strip()
+    if not binary:
+        return list(ALL_NAMED_DB_CONTAINERS)
+    stopped: list[str] = []
+    for name in ALL_NAMED_DB_CONTAINERS:
+        result = subprocess.run(
+            [binary, "inspect", "-f", "{{.State.Status}}", name],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        status = (result.stdout or "").strip()
+        if result.returncode != 0 or status != "running":
+            stopped.append(name)
+    return stopped
+
+
 def _bind_mongo_from_snapshot(snapshot: dict[str, Any]) -> None:
     sessions = (snapshot.get("containers") or {}).get("LucidTops_SessionsDB") or {}
     host = "LucidTops_SessionsDB"
@@ -150,7 +176,7 @@ def _bind_mongo_from_snapshot(snapshot: dict[str, Any]) -> None:
     os.environ["LUCID_MONGODB_URL"] = f"mongodb://{host}:{port}"
 
 
-def _write_server_and_config(snapshot: dict[str, Any]) -> tuple[Path, Path]:
+def _write_server_and_config(snapshot: dict[str, Any] | None) -> tuple[Path, Path]:
     import builderMasterServer as builder
 
     launch_values = builder._resolve_launch_values(None)
@@ -163,8 +189,9 @@ def _write_server_and_config(snapshot: dict[str, Any]) -> tuple[Path, Path]:
     builder._apply_master_secrets_from_proxy(secrets_dir)
     root_dir = Path(launch_values["root_dir"])
     generated = builder._resolve_generated_secrets(root_dir / "secrets.env")
-    generated["MONGODB_ADMIN_PASSWORD"] = str(snapshot["admin_password"])
-    generated["MONGODB_PASSWORD"] = str(snapshot["mongodb_password"])
+    if snapshot is not None:
+        generated["MONGODB_ADMIN_PASSWORD"] = str(snapshot["admin_password"])
+        generated["MONGODB_PASSWORD"] = str(snapshot["mongodb_password"])
     generated["MASTER_SERVER_ID"] = builder._resolve_or_create_master_server_id(
         secrets_dir=secrets_dir,
         pull=launch_values["hardware_pull"],
@@ -312,23 +339,37 @@ def main() -> int:
     os.environ["LUCID_TOPS_ROOT"] = str(info["lucid_tops_root"])
 
     db_pull, db_secrets = _load_databases(backend_pull)
-    snapshot = db_pull.pull_active_mongodb_containers(str((info.get("bins") or {}).get("docker") or ""))
-    _bind_mongo_from_snapshot(snapshot)
-    info["mongodb_host"] = "LucidTops_SessionsDB"
-    info["mongodb_port"] = str(snapshot["container_port"])
+    docker_bin = str((info.get("bins") or {}).get("docker") or "")
+    not_running = _database_containers_not_running(docker_bin)
+    snapshot: dict[str, Any] | None = None
+    databases_path: Path | None = None
+    mongodb_path: Path | None = None
+    db_values: dict[str, str] = {}
+    if not_running:
+        print(
+            "skipped databases.secrets and mongodb.secrets content — not running: "
+            + ", ".join(not_running),
+            file=sys.stderr,
+        )
+    else:
+        snapshot = db_pull.pull_active_mongodb_containers(docker_bin)
+        _bind_mongo_from_snapshot(snapshot)
+        info["mongodb_host"] = "LucidTops_SessionsDB"
+        info["mongodb_port"] = str(snapshot["container_port"])
 
     server_path, config_path = _write_server_and_config(snapshot)
 
     os.environ["DATABASES_SECRETS_FILE"] = (CANONICAL_SECRETS_DIR / "databases.secrets").as_posix()
     os.environ["MONGODB_SECRETS_FILE"] = (CANONICAL_SECRETS_DIR / "mongodb.secrets").as_posix()
     os.environ["SECRETS_DIR"] = CANONICAL_SECRETS_DIR.as_posix()
-    db_info = db_pull.pull_realworld_information()
-    db_info["active_mongodb"] = snapshot
-    databases_path, mongodb_path, db_values = db_secrets.write_databases_secrets(
-        db_info,
-        force=True,
-        verified=True,
-    )
+    if snapshot is not None:
+        db_info = db_pull.pull_realworld_information()
+        db_info["active_mongodb"] = snapshot
+        databases_path, mongodb_path, db_values = db_secrets.write_databases_secrets(
+            db_info,
+            force=True,
+            verified=True,
+        )
 
     operations_dir = PROJECT_ROOT / "operations"
     if str(operations_dir) not in sys.path:
@@ -371,7 +412,8 @@ def main() -> int:
     )
     payments_path = payments.write_payments_secrets(info, secrets_dir=CANONICAL_SECRETS_DIR)
 
-    _bind_backend_mongo(db_values)
+    if db_values:
+        _bind_backend_mongo(db_values)
     from BuildConfigs import write_backend_secrets
 
     backend_path = write_backend_secrets(CANONICAL_SECRETS_DIR, force=True)
@@ -381,23 +423,26 @@ def main() -> int:
         "server.secrets": server_path,
         "config.secrets": config_path,
         "operations.secrets": Path(operations_path),
-        "mongodb.secrets": Path(mongodb_path),
-        "databases.secrets": Path(databases_path),
+        "mongodb.secrets": Path(mongodb_path) if mongodb_path is not None else None,
+        "databases.secrets": Path(databases_path) if databases_path is not None else None,
         "blockchain.secrets": Path(blockchain_path),
         "payments.secrets": Path(payments_path),
         "backend.secrets": Path(backend_path),
     }
     _require_keys(written["server.secrets"], SERVER_REQUIRED_KEYS)
     server_loaded = _parse_secrets(written["server.secrets"])
-    if server_loaded.get("MONGODB_HOST") != "LucidTops_SessionsDB":
-        raise RuntimeError("server.secrets MONGODB_HOST is not LucidTops_SessionsDB")
-    if server_loaded.get("MONGODB_PORT") != str(snapshot["container_port"]):
-        raise RuntimeError("server.secrets MONGODB_PORT does not match the running container")
-    if server_loaded.get("MONGODB_ADMIN_PASSWORD") != str(snapshot["admin_password"]):
-        raise RuntimeError("server.secrets admin password does not match the running container")
+    if snapshot is not None:
+        if server_loaded.get("MONGODB_HOST") != "LucidTops_SessionsDB":
+            raise RuntimeError("server.secrets MONGODB_HOST is not LucidTops_SessionsDB")
+        if server_loaded.get("MONGODB_PORT") != str(snapshot["container_port"]):
+            raise RuntimeError("server.secrets MONGODB_PORT does not match the running container")
+        if server_loaded.get("MONGODB_ADMIN_PASSWORD") != str(snapshot["admin_password"]):
+            raise RuntimeError("server.secrets admin password does not match the running container")
+        if databases_path is None or mongodb_path is None:
+            raise RuntimeError("databases.secrets and mongodb.secrets were not written")
+        _verify_database_files(db_secrets, snapshot, databases_path, mongodb_path)
     _require_keys(written["config.secrets"], CONFIG_REQUIRED_KEYS)
     _require_keys(written["operations.secrets"], OPERATIONS_REQUIRED_KEYS)
-    _verify_database_files(db_secrets, snapshot, written["databases.secrets"], written["mongodb.secrets"])
     _require_keys(written["blockchain.secrets"], BLOCKCHAIN_REQUIRED_KEYS)
     _require_keys(
         written["payments.secrets"],
@@ -414,11 +459,15 @@ def main() -> int:
         ),
     )
     backend_loaded = _require_keys(written["backend.secrets"], BACKEND_REQUIRED_KEYS)
-    if backend_loaded.get("MONGODB_HOST") != "LucidTops_SessionsDB":
+    if snapshot is not None and backend_loaded.get("MONGODB_HOST") != "LucidTops_SessionsDB":
         raise RuntimeError("backend.secrets MONGODB_HOST is not LucidTops_SessionsDB")
 
     for name in OPERATIONAL_FILES:
-        print(written[name].resolve().as_posix())
+        path = written[name]
+        if path is None:
+            print(f"skipped {name}")
+            continue
+        print(path.resolve().as_posix())
     return 0
 
 
