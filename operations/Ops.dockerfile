@@ -104,6 +104,32 @@ RUN set -eu; \
 # -----------------------------------------------------------------------------
 # Copy package + validate (§16.2 / §16.3)
 # -----------------------------------------------------------------------------
+RUN set -eu; \
+  if [ ! -d "${SECRETS_DIR}" ]; then \
+    mkdir -p "${SECRETS_DIR}"; \
+    touch "${SECRETS_DIR}/.gitkeep"; \
+  fi; \
+  if [ ! -d /app/operations ]; then \
+    mkdir -p /app/operations; \
+    touch /app/operations/.gitkeep; \
+  fi; \
+  if [ ! -d /app/operations/run ]; then \
+    mkdir -p /app/operations/run; \
+    touch /app/operations/run/.gitkeep; \
+  fi; \
+  if [ ! -d /app/operations/configs ]; then \
+    mkdir -p /app/operations/configs; \
+    touch /app/operations/configs/.gitkeep; \
+  fi; \
+  if [ ! -d /app/backend ]; then \
+    mkdir -p /app/backend; \
+    touch /app/backend/.gitkeep; \
+  fi; \
+  if [ ! -d /app/sessions ]; then \
+    mkdir -p /app/sessions; \
+    touch /app/sessions/.gitkeep; \
+  fi
+
 COPY operations/ /app/operations/
 COPY backend/ /app/backend/
 COPY sessions/ /app/sessions/
