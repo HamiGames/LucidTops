@@ -741,30 +741,13 @@ def read_torrc(
     lucid_root: Path | None = None,
     seed: dict[str, str] | None = None,
 ) -> str:
-    """Read torrc only when Master.secrets or proxy.secrets already has TOR_SOCKS_HOST and TOR_SOCKS_PORT.
+    """Databases does not require torrc or Tor data fields.
 
-    The file text is not parsed. Ports and onions stay the values already in those secrets.
-    Returns an empty string when those keys are absent.
+    containers.txt section 4 reads torrc only if required. Connection values stay
+    in Master.secrets or proxy.secrets. This returns empty and does not open torrc.
     """
-    root = lucid_root if lucid_root is not None else resolve_lucid_tops_root()
-    loaded = seed if seed is not None else load_master_and_proxy_seed(root)
-    host = str(loaded.get("TOR_SOCKS_HOST", "")).strip()
-    port = str(loaded.get("TOR_SOCKS_PORT", "")).strip()
-    if not host or not port:
-        return ""
-    path = root / "torrc"
-    if not path.is_file():
-        raise RuntimeError(
-            "torrc missing — TOR_SOCKS_HOST and TOR_SOCKS_PORT are set in "
-            f"Master.secrets or proxy.secrets, expected {path.as_posix()}"
-        )
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError as exc:
-        raise RuntimeError(f"torrc unreadable — {path.as_posix()}") from exc
-    if not text.strip():
-        raise RuntimeError(f"torrc empty — {path.as_posix()}")
-    return text
+    del lucid_root, seed
+    return ""
 
 
 def _pull_databases_dir(lucid_root: Path) -> Path:

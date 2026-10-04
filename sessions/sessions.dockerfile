@@ -16,9 +16,10 @@
 #     /mnt/myssd/LucidTops
 #
 # Secrets (§16.1) — created at time of operation (not baked into the image):
-#   SECRETS_DIR=/mnt/myssd/LucidTops/sessions/secrets
-#   Entrypoint: sessions_pull_information → write_session_secrets → uvicorn
-#   If empty: write sessions.secrets from live hardware pull.
+#   SECRETS_DIR=/mnt/myssd/LucidTops/Server/Secrets
+#   Torrc: /mnt/myssd/LucidTops/torrc
+#   Entrypoint: pull_information → write_session_secrets → uvicorn
+#   If empty: write sessions.secrets on the console from Master.secrets and proxy.secrets.
 #   Host mount required: -v /mnt/myssd/LucidTops:/mnt/myssd/LucidTops
 #
 # RULES:
@@ -43,8 +44,8 @@ ARG APT_PACKAGES=""
 ARG PIP_PACKAGES=""
 ARG PIP_WHEEL_PACKAGES="pip setuptools wheel"
 ARG LUCID_TOPS_ROOT=/mnt/myssd/LucidTops
-ARG SECRETS_DIR=/mnt/myssd/LucidTops/sessions/secrets
-ARG SESSIONS_SECRETS_FILE=/mnt/myssd/LucidTops/sessions/secrets/sessions.secrets
+ARG SECRETS_DIR=/mnt/myssd/LucidTops/Server/Secrets
+ARG SESSIONS_SECRETS_FILE=/mnt/myssd/LucidTops/Server/Secrets/sessions.secrets
 ARG SESSIONS_CONFIGS_DIR=/mnt/myssd/LucidTops/sessions/configs
 ARG RUN_SESSIONS_PULL_ON_BUILD=false
 
@@ -109,6 +110,7 @@ RUN set -eu; \
     test -f /app/sessions/sessions_entrypoint.sh; \
     test -f /app/sessions/app.py; \
     test -f /app/sessions/sessions_pull_information.py; \
+    test -f /app/sessions/pull_information.py; \
     test -f /app/sessions/Config_sessions.py; \
     test -f /app/sessions/SessionCore.py; \
     test -f /app/sessions/sessionID.py; \
@@ -125,7 +127,9 @@ RUN set -eu; \
     test -f /app/backend/config.py; \
     test -f /app/backend/pull_information.py; \
     test -d "${SECRETS_DIR}"; \
-    chmod +x /app/sessions/sessions_entrypoint.sh /app/sessions/sessions_pull_information.py
+    chmod +x /app/sessions/sessions_entrypoint.sh \
+      /app/sessions/sessions_pull_information.py \
+      /app/sessions/pull_information.py
 
 # -----------------------------------------------------------------------------
 # Runtime environment
@@ -141,7 +145,7 @@ ENV SESSIONS_CONFIGS_DIR=${SESSIONS_CONFIGS_DIR}
 # Optional sessions pull + secrets write at build (default false — SSD/hardware at first start)
 RUN set -eu; \
     if [ "${RUN_SESSIONS_PULL_ON_BUILD}" = "true" ]; then \
-      python3 /app/sessions/sessions_pull_information.py >/dev/null; \
+      python3 /app/sessions/pull_information.py >/dev/null; \
       python3 -c "from Config_sessions import write_session_secrets; write_session_secrets(force=False)"; \
     fi
 

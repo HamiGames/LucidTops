@@ -11,8 +11,9 @@ Seed sources (Proxy Bootstrap → Server/Secrets, read-only for sessions):
 - /mnt/myssd/LucidTops/Server/Secrets/Master.secrets
 - /mnt/myssd/LucidTops/Server/Secrets/proxy.secrets (also Proxy.secrets)
 
-Write target (sessions container secrets):
-- /mnt/myssd/LucidTops/sessions/secrets/sessions.secrets
+Write target (Pi console — not inside the image):
+- /mnt/myssd/LucidTops/Server/Secrets/sessions.secrets
+- Torrc: /mnt/myssd/LucidTops/torrc
 """
 
 from __future__ import annotations
@@ -134,17 +135,8 @@ def proxy_secrets_path(lucid_root: Path | None = None) -> Path:
 
 
 def sessions_secrets_dir(lucid_root: Path | None = None) -> Path:
-    """Sessions write target — never Server/Secrets."""
-    root = lucid_root if lucid_root is not None else resolve_lucid_tops_root()
-    override = _env("SECRETS_DIR")
-    if override:
-        path = Path(override).expanduser().resolve()
-        parts_lower = {part.lower() for part in path.parts}
-        # If SECRETS_DIR was left pointing at Server/Secrets, redirect to sessions.
-        if "server" in parts_lower and path.name.lower() == "secrets":
-            return (root / "sessions" / "secrets").resolve()
-        return path
-    return (root / "sessions" / "secrets").resolve()
+    """Sessions secrets are read from the Pi console Server/Secrets directory."""
+    return server_secrets_dir(lucid_root)
 
 
 def load_master_and_proxy_seed(lucid_root: Path | None = None) -> dict[str, str]:

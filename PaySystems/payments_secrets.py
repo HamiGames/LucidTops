@@ -10,7 +10,11 @@ RULES of CODE CREATION:
 
 from __future__ import annotations
 
+import json
 import os
+import shutil
+import subprocess
+from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -196,6 +200,277 @@ def require_wallet_address() -> str:
         "wallet address missing — set one of WALLET_ADDRESS_KEYS in payments.secrets "
         "at time of operation"
     )
+
+
+PAYMENT_SECRET_KEYS: tuple[str, ...] = (
+    "WALLET_ADDRESS_KEYS",
+    "NOWPAYMENTS_API_KEY",
+    "NOWPAYMENTS_API_URL",
+    "JACKPOT_MIN_PAYOUT_USD",
+    "JACKPOT_GOAL_INCREASE_PERCENT",
+    "JACKPOT_MAX_INCREASE_PERCENT",
+    "JACKPOT_TOP_USERS",
+    "SUBSCRIPTION_PERIOD_DAYS",
+    "PAYMENTS_API_PREFIX",
+    "PAYMENTS_APP_TITLE",
+    "PAYMENTS_APP_DESCRIPTION",
+    "PAYMENTS_APP_VERSION",
+    "PAYMENTS_CONTAINER_APP_TITLE",
+    "PAYMENTS_CURRENCY",
+    "PAYMENTS_METHOD",
+    "FREE_TIER_NAME",
+    "TOR_SOCKS_HOST",
+    "TOR_SOCKS_PORT",
+)
+
+PAYMENT_RUNTIME_KEYS: tuple[str, ...] = (
+    "PAYMENTS_SECRETS_FILE",
+    "SECRETS_DIR",
+    "LUCID_TOPS_ROOT",
+    "PAYMENTS_CONTAINER_NAME",
+    "PAYMENTS_DOCKER_DNS_NAME",
+    "PAYSYSTEMS_BIND_HOST",
+    "PAYSYSTEMS_BIND_PORT",
+    "PAYMENTS_NETWORK_NAME",
+    "HOST_PRIMARY_IP",
+    "HOST_PRIMARY_MAC",
+    "HOST_HOSTNAME",
+)
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        cmd,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+
+def _env_list_to_map(env_list: list[str] | None) -> dict[str, str]:
+    mapped: dict[str, str] = {}
+    for item in env_list or []:
+        if "=" not in item:
+            continue
+        key, _, value = item.partition("=")
+        key = key.strip()
+        if key:
+            mapped[key] = value.strip()
+    return mapped
+
+
+def _payments_container_name(docker_bin: str) -> str:
+    result = _run([docker_bin, "ps", "--format", "{{.Names}}"])
+    if result.returncode != 0:
+        detail = (result.stderr or "").strip()
+        raise RuntimeError(
+            "docker ps failed — PaySystems container inspect requires a running daemon"
+            + (f" ({detail})" if detail else "")
+        )
+    names = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    override = _env("PAYMENTS_CONTAINER_NAME")
+    if override and override in names:
+        return override
+    matches = [
+        name
+        for name in names
+        if "paysystem" in name.lower() or name.lower() in {"lucid-paysystems", "pay"}
+    ]
+    if not matches:
+        raise RuntimeError("PaySystems container is not running")
+    preferred = [
+        name
+        for name in matches
+        if name.lower() in {"lucid-paysystems", "paysystems"}
+    ]
+    if len(preferred) == 1:
+        return preferred[0]
+    if len(matches) == 1:
+        return matches[0]
+    raise RuntimeError(f"multiple PaySystems containers are running — {matches}")
+
+
+def pull_active_payments_container(docker_bin: str = "") -> dict[str, Any]:
+    """Read the running PaySystems container. Does not invent wallet or API keys."""
+    binary = docker_bin.strip() or shutil.which("docker") or ""
+    if not binary:
+        raise RuntimeError("docker missing — cannot read the PaySystems container")
+    name = _payments_container_name(binary)
+    result = _run([binary, "inspect", name])
+    if result.returncode != 0 or not result.stdout.strip():
+        detail = (result.stderr or "").strip()
+        raise RuntimeError(
+            f"{name} inspect failed" + (f" — {detail}" if detail else "")
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"{name} inspect output is not JSON") from exc
+    row = payload[0] if isinstance(payload, list) else payload
+    if not isinstance(row, dict):
+        raise RuntimeError(f"{name} inspect payload is empty")
+    status = str((row.get("State") or {}).get("Status") or "").strip()
+    if status != "running":
+        raise RuntimeError(f"{name} status is {status or 'missing'} — container must be running")
+    config = row.get("Config") or {}
+    host_config = row.get("HostConfig") or {}
+    env_map = _env_list_to_map(config.get("Env"))
+    port_bindings = host_config.get("PortBindings") or {}
+    if not isinstance(port_bindings, dict):
+        port_bindings = {}
+    published: list[tuple[str, str, str]] = []
+    for key, binding in port_bindings.items():
+        if not str(key).endswith("/tcp") or not binding:
+            continue
+        host_port = str((binding[0] or {}).get("HostPort") or "").strip()
+        host_ip = str((binding[0] or {}).get("HostIp") or "").strip()
+        container_port = str(key).split("/")[0]
+        if host_port:
+            published.append((container_port, host_port, host_ip))
+    if len(published) != 1:
+        raise RuntimeError(
+            f"{name} must publish exactly one tcp port — got {list(port_bindings)}"
+        )
+    networks = list(((row.get("NetworkSettings") or {}).get("Networks") or {}).keys())
+    if len(networks) != 1 or not networks[0].strip():
+        raise RuntimeError(
+            f"{name} must be attached to exactly one Docker network — got {networks}"
+        )
+    return {
+        "name": name,
+        "status": status,
+        "container_port": published[0][0],
+        "host_port": published[0][1],
+        "host_ip": published[0][2],
+        "network": networks[0].strip(),
+        "env": env_map,
+    }
+
+
+def write_payments_secrets(
+    pull: dict[str, Any] | None = None,
+    *,
+    secrets_dir: Path | None = None,
+    container: dict[str, Any] | None = None,
+) -> Path:
+    """
+    Write payments.secrets from the running PaySystems container plus keys already
+    present in that container's environment or the existing payments.secrets file.
+    """
+    info = pull or {}
+    target_dir = secrets_dir or Path(
+        str(info.get("secrets_dir") or _env(SECRETS_DIR_ENV) or "")
+    ).expanduser()
+    if not str(target_dir):
+        raise RuntimeError("SECRETS_DIR missing — payments.secrets path is Server/Secrets")
+    path = target_dir / (
+        _env(PAYMENTS_SECRETS_NAME_ENV) or "payments.secrets"
+    )
+    os.environ[PAYMENTS_SECRETS_FILE_ENV] = path.as_posix()
+    os.environ["SECRETS_DIR"] = target_dir.as_posix()
+
+    active = container if isinstance(container, dict) and container.get("name") else None
+    if active is None:
+        docker_bin = str((info.get("bins") or {}).get("docker") or "")
+        active = pull_active_payments_container(docker_bin)
+    container_env = active.get("env") if isinstance(active.get("env"), dict) else {}
+    existing = parse_secrets_file(path)
+
+    values: dict[str, str] = {}
+    for key, value in existing.items():
+        if value:
+            values[key] = value
+    for key, value in container_env.items():
+        if value and not values.get(key):
+            values[key] = value
+
+    bind_host = str(active.get("host_ip") or "").strip()
+    if bind_host in {"", "0.0.0.0", "::", "[::]"}:
+        bind_host = str(info.get("primary_ip") or _env("HOST_PRIMARY_IP") or "").strip()
+    if not bind_host:
+        raise RuntimeError("PaySystems bind host missing from the running container and hardware pull")
+    bind_port = str(active.get("host_port") or "").strip()
+    if not bind_port:
+        raise RuntimeError("PaySystems bind port missing from the running container")
+    container_name = str(active.get("name") or "").strip()
+    network_name = str(active.get("network") or "").strip()
+    lucid_root = str(info.get("lucid_tops_root") or _env(LUCID_TOPS_ROOT_ENV) or "").strip()
+    runtime = {
+        "PAYMENTS_SECRETS_FILE": path.as_posix(),
+        "SECRETS_DIR": target_dir.as_posix(),
+        "LUCID_TOPS_ROOT": lucid_root,
+        "PAYMENTS_CONTAINER_NAME": container_name,
+        "PAYMENTS_DOCKER_DNS_NAME": container_name,
+        "PAYSYSTEMS_BIND_HOST": bind_host,
+        "PAYSYSTEMS_BIND_PORT": bind_port,
+        "PAYMENTS_NETWORK_NAME": network_name,
+        "HOST_PRIMARY_IP": str(info.get("primary_ip") or "").strip(),
+        "HOST_PRIMARY_MAC": str(info.get("primary_mac") or "").strip(),
+        "HOST_HOSTNAME": str(info.get("hostname") or "").strip(),
+    }
+    for key, value in runtime.items():
+        if not value and key in {"LUCID_TOPS_ROOT", "HOST_PRIMARY_IP", "HOST_PRIMARY_MAC", "HOST_HOSTNAME"}:
+            continue
+        if not value:
+            raise RuntimeError(f"{key} missing from the running PaySystems container")
+        values[key] = value
+
+    for key in ("TOR_SOCKS_HOST", "TOR_SOCKS_PORT"):
+        if not values.get(key) and _env(key):
+            values[key] = _env(key)
+
+    missing = [key for key in PAYMENT_SECRET_KEYS if not str(values.get(key, "")).strip()]
+    if missing:
+        raise RuntimeError(
+            "payments.secrets refused — missing wallet or processor keys from the "
+            "running container or existing payments.secrets: " + ", ".join(missing)
+        )
+    wallet_keys = tuple(
+        item.strip() for item in values["WALLET_ADDRESS_KEYS"].split(",") if item.strip()
+    )
+    if not wallet_keys or not any(str(values.get(key, "")).strip() for key in wallet_keys):
+        raise RuntimeError(
+            "wallet address missing — set one of WALLET_ADDRESS_KEYS in the running "
+            "PaySystems container or the existing payments.secrets file"
+        )
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "# LucidTops payments.secrets — written from the running PaySystems container",
+        f"# Generated: {_utc_now()}",
+        f"# Container: {container_name}",
+        "",
+    ]
+    written_keys = list(PAYMENT_RUNTIME_KEYS) + list(PAYMENT_SECRET_KEYS)
+    seen: set[str] = set()
+    for key in written_keys:
+        value = str(values.get(key, "")).strip()
+        if value:
+            lines.append(f"{key}={value}")
+            seen.add(key)
+    for key in sorted(values):
+        if key in seen:
+            continue
+        value = str(values[key]).strip()
+        if value:
+            lines.append(f"{key}={value}")
+    lines.append("")
+    path.write_text("\n".join(lines), encoding="utf-8")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    _load_payments_secrets_cached.cache_clear()
+    for key, value in values.items():
+        if value and not _env(key):
+            os.environ[key] = value
+    return path
 
 
 def payments_status() -> dict[str, Any]:

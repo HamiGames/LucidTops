@@ -48,6 +48,16 @@ COPY useronly/requirements.txt /app/useronly/requirements.txt
 RUN test -s /app/useronly/requirements.txt \
  && pip install --no-cache-dir -r /app/useronly/requirements.txt
 
+RUN set -eu; \
+  if [ ! -d /app/secrets ]; then \
+    mkdir -p /app/secrets; \
+    touch /app/secrets/.gitkeep; \
+  fi; \
+  if [ ! -d /app/useronly ]; then \
+    mkdir -p /app/useronly; \
+    touch /app/useronly/.gitkeep; \
+  fi
+
 COPY useronly /app/useronly
 
 # Creation-time routes. Both files must be in the build context

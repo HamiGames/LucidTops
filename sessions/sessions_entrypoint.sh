@@ -3,7 +3,7 @@
 # Order:
 #   1) bind Server/Secrets seed paths (Master.secrets + proxy.secrets)
 #   2) pull hardware + seed DockerDNS/network into env
-#   3) write sessions/secrets/sessions.secrets
+#   3) write Server/Secrets/sessions.secrets
 #   4) start uvicorn
 set -eu
 
@@ -30,9 +30,10 @@ if [ -z "${PROXY_SECRETS_FILE:-}" ]; then
 fi
 export PROXY_SECRETS_FILE
 
-# Sessions write target (never Server/Secrets)
-export SECRETS_DIR="${SECRETS_DIR:-${LUCID_TOPS_ROOT}/sessions/secrets}"
+# Sessions write target is the Pi console Server/Secrets directory.
+export SECRETS_DIR="${SERVER_SECRETS_DIR}"
 export SESSIONS_SECRETS_FILE="${SESSIONS_SECRETS_FILE:-${SECRETS_DIR}/sessions.secrets}"
+export HOST_TOR_CONFIG_TORRC="${HOST_TOR_CONFIG_TORRC:-${LUCID_TOPS_ROOT}/torrc}"
 mkdir -p "${SECRETS_DIR}"
 
 if [ ! -f "${MASTER_SECRETS_FILE}" ] && [ ! -f "${PROXY_SECRETS_FILE}" ]; then
@@ -42,7 +43,7 @@ if [ ! -f "${MASTER_SECRETS_FILE}" ] && [ ! -f "${PROXY_SECRETS_FILE}" ]; then
 fi
 
 ENV_FILE="$(mktemp)"
-python "${SESSIONS_DIR}/sessions_pull_information.py" > "${ENV_FILE}"
+python "${SESSIONS_DIR}/pull_information.py" > "${ENV_FILE}"
 # shellcheck disable=SC1090
 . "${ENV_FILE}"
 rm -f "${ENV_FILE}"

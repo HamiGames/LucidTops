@@ -1,65 +1,140 @@
-# LucidTops stack — Docker DNS, Tor inside lucid-server-default (no tor-proxy sidecar)
-# Repo: https://github.com/HamiGames/LucidTops
-# Pi host SSD mount: /mnt/myssd/LucidTops (server.env, secrets.env, torrc, tor data)
+# LucidTops Pi console stack.
+# Start together after proxy has written Master.secrets and proxy.secrets.
+# Export DOCKER_NETWORK_NAME from Master.secrets before compose up.
+# The network is created by the proxy container's bootstrap; it must exist first.
+#
+# operations, Rdp, useronly, and AdminGui images are built on this console
+# after Master.secrets and proxy.secrets exist. They are not started here.
+# AdminGui may be started on this console separately; it reads Server/Secrets.
 
 services:
-  lucid-mongodb:
-    image: mongo:7
-    container_name: lucid-mongodb
+  lucid-proxy:
+    image: lucid-proxy:v1.0.0
+    container_name: lucid-proxy
     restart: unless-stopped
-    networks:
-      - lucid-stack
+    environment:
+      LUCID_TOPS_ROOT: /mnt/myssd/LucidTops
+      SECRETS_DIR: /mnt/myssd/LucidTops/Server/Secrets
+      PROXY_SECRETS_FILE: /mnt/myssd/LucidTops/Server/Secrets/proxy.secrets
+      MASTER_SECRETS_FILE: /mnt/myssd/LucidTops/Server/Secrets/Master.secrets
     volumes:
-      - lucid-mongo-data:/data/db
-    healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 20s
+      - /mnt/myssd/LucidTops:/mnt/myssd/LucidTops
+    networks:
+      - lucid
+
+  lucid-databases:
+    image: lucid-databases-orchestrator:v1.0.0
+    container_name: lucid-databases-orchestrator
+    restart: unless-stopped
+    depends_on:
+      - lucid-proxy
+    environment:
+      LUCID_TOPS_ROOT: /mnt/myssd/LucidTops
+      SECRETS_DIR: /mnt/myssd/LucidTops/Server/Secrets
+      DATABASES_SECRETS_FILE: /mnt/myssd/LucidTops/Server/Secrets/databases.secrets
+      MONGODB_SECRETS_FILE: /mnt/myssd/LucidTops/Server/Secrets/mongodb.secrets
+      DOCKER_HOST: unix:///var/run/docker.sock
+    volumes:
+      - /mnt/myssd/LucidTops:/mnt/myssd/LucidTops
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - lucid
 
   lucid-server-default:
-    build:
-      # COPY context must be the mounted LucidTops SSD root only
-      context: /mnt/myssd/LucidTops
-      dockerfile: backend/Server.dockerfile
+    image: lucid-server-default:v1.0.0
     container_name: lucid-server-default
     restart: unless-stopped
     depends_on:
-      lucid-mongodb:
-        condition: service_healthy
-    env_file:
-      - /mnt/myssd/LucidTops/server.env
+      - lucid-proxy
+      - lucid-databases
     environment:
       LUCID_TOPS_ROOT: /mnt/myssd/LucidTops
-      SECRETS_DIR: /mnt/myssd/LucidTops/secrets
-      SERVER_ENV_FILE: /mnt/myssd/LucidTops/server.env
-      SECRETS_ENV_FILE: /mnt/myssd/LucidTops/secrets.env
-      SERVER_SECRETS_FILE: /mnt/myssd/LucidTops/secrets/server.secrets
-      CONFIG_SECRETS_FILE: /mnt/myssd/LucidTops/secrets/config.secrets
-      OPERATIONS_SECRETS_FILE: /mnt/myssd/LucidTops/secrets/operations.secrets
-      MONGODB_SECRETS_FILE: /mnt/myssd/LucidTops/secrets/mongodb.secrets
-      DATABASES_SECRETS_FILE: /mnt/myssd/LucidTops/secrets/databases.secrets
-      BLOCKCHAIN_SECRETS_FILE: /mnt/myssd/LucidTops/secrets/blockchain.secrets
-      PAYMENTS_SECRETS_FILE: /mnt/myssd/LucidTops/secrets/payments.secrets
+      SECRETS_DIR: /mnt/myssd/LucidTops/Server/Secrets
+      MASTER_SECRETS_FILE: /mnt/myssd/LucidTops/Server/Secrets/Master.secrets
+      PROXY_SECRETS_FILE: /mnt/myssd/LucidTops/Server/Secrets/proxy.secrets
+      SERVER_SECRETS_FILE: /mnt/myssd/LucidTops/Server/Secrets/server.secrets
+      CONFIG_SECRETS_FILE: /mnt/myssd/LucidTops/Server/Secrets/config.secrets
+      BACKEND_SECRETS_FILE: /mnt/myssd/LucidTops/Server/Secrets/backend.secrets
       HOST_TOR_CONFIG_TORRC: /mnt/myssd/LucidTops/torrc
-      TOR_HOST: "127.0.0.1"
-      TOR_SOCKS_HOST: "127.0.0.1"
-      MASTER_SERVER_BIND_HOST: "127.0.0.1"
-      MASTER_SERVER_TOR_ONLY: "true"
       RUN_BUILDER_ON_START: "true"
     volumes:
       - /mnt/myssd/LucidTops:/mnt/myssd/LucidTops
-      - lucid-tor-data:/app/var/lib/tor
-      - lucid-onion-data:/app/run/lucid/onion
     networks:
-      - lucid-stack
+      - lucid
+
+  lucid-frontend:
+    image: lucid-frontend:v1.0.0
+    container_name: lucid-frontend
+    restart: unless-stopped
+    depends_on:
+      - lucid-server-default
+    environment:
+      LUCID_TOPS_ROOT: /mnt/myssd/LucidTops
+      SECRETS_DIR: /mnt/myssd/LucidTops/Server/Secrets
+      FRONTEND_SECRETS_FILE: /mnt/myssd/LucidTops/Server/Secrets/frontend.secrets
+      MASTER_SECRETS_FILE: /mnt/myssd/LucidTops/Server/Secrets/Master.secrets
+      PROXY_SECRETS_FILE: /mnt/myssd/LucidTops/Server/Secrets/proxy.secrets
+      HOST_TOR_CONFIG_TORRC: /mnt/myssd/LucidTops/torrc
+    volumes:
+      - /mnt/myssd/LucidTops:/mnt/myssd/LucidTops
+    networks:
+      - lucid
+
+  lucid-sessions:
+    image: lucid-sessions:v1.0.0
+    container_name: lucid-sessions
+    restart: unless-stopped
+    depends_on:
+      - lucid-server-default
+    environment:
+      LUCID_TOPS_ROOT: /mnt/myssd/LucidTops
+      SECRETS_DIR: /mnt/myssd/LucidTops/Server/Secrets
+      SESSIONS_SECRETS_FILE: /mnt/myssd/LucidTops/Server/Secrets/sessions.secrets
+      MASTER_SECRETS_FILE: /mnt/myssd/LucidTops/Server/Secrets/Master.secrets
+      PROXY_SECRETS_FILE: /mnt/myssd/LucidTops/Server/Secrets/proxy.secrets
+      HOST_TOR_CONFIG_TORRC: /mnt/myssd/LucidTops/torrc
+    volumes:
+      - /mnt/myssd/LucidTops:/mnt/myssd/LucidTops
+    networks:
+      - lucid
+
+  lucid-blockchain:
+    image: lucid-blockchain:v1.0.0
+    container_name: lucid-blockchain
+    restart: unless-stopped
+    depends_on:
+      - lucid-databases
+      - lucid-server-default
+    environment:
+      LUCID_TOPS_ROOT: /mnt/myssd/LucidTops
+      SECRETS_DIR: /mnt/myssd/LucidTops/Server/Secrets
+      BLOCKCHAIN_SECRETS_FILE: /mnt/myssd/LucidTops/Server/Secrets/blockchain.secrets
+      MASTER_SECRETS_FILE: /mnt/myssd/LucidTops/Server/Secrets/Master.secrets
+      PROXY_SECRETS_FILE: /mnt/myssd/LucidTops/Server/Secrets/proxy.secrets
+    volumes:
+      - /mnt/myssd/LucidTops:/mnt/myssd/LucidTops
+    networks:
+      - lucid
+
+  lucid-paysystems:
+    image: lucid-paysystems:v1.0.0
+    container_name: lucid-paysystems
+    restart: unless-stopped
+    depends_on:
+      - lucid-server-default
+    environment:
+      LUCID_TOPS_ROOT: /mnt/myssd/LucidTops
+      SECRETS_DIR: /mnt/myssd/LucidTops/Server/Secrets
+      PAYMENTS_SECRETS_FILE: /mnt/myssd/LucidTops/Server/Secrets/payments.secrets
+      MASTER_SECRETS_FILE: /mnt/myssd/LucidTops/Server/Secrets/Master.secrets
+      PROXY_SECRETS_FILE: /mnt/myssd/LucidTops/Server/Secrets/proxy.secrets
+      HOST_TOR_CONFIG_TORRC: /mnt/myssd/LucidTops/torrc
+    volumes:
+      - /mnt/myssd/LucidTops:/mnt/myssd/LucidTops
+    networks:
+      - lucid
 
 networks:
-  lucid-stack:
-    name: lucid-stack
-
-volumes:
-  lucid-mongo-data:
-  lucid-tor-data:
-  lucid-onion-data:
+  lucid:
+    name: ${DOCKER_NETWORK_NAME}
+    external: true
