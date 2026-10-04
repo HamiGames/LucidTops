@@ -737,12 +737,27 @@ def _pull_secrets_dir(lucid_root: Path) -> Path:
     return chosen.resolve()
 
 
-def read_torrc(lucid_root: Path | None = None) -> str:
-    """Read /mnt/myssd/LucidTops/torrc. Missing or empty is a hard failure."""
+def read_torrc(
+    lucid_root: Path | None = None,
+    seed: dict[str, str] | None = None,
+) -> str:
+    """Read torrc only when Master.secrets or proxy.secrets already has TOR_SOCKS_HOST and TOR_SOCKS_PORT.
+
+    The file text is not parsed. Ports and onions stay the values already in those secrets.
+    Returns an empty string when those keys are absent.
+    """
     root = lucid_root if lucid_root is not None else resolve_lucid_tops_root()
+    loaded = seed if seed is not None else load_master_and_proxy_seed(root)
+    host = str(loaded.get("TOR_SOCKS_HOST", "")).strip()
+    port = str(loaded.get("TOR_SOCKS_PORT", "")).strip()
+    if not host or not port:
+        return ""
     path = root / "torrc"
     if not path.is_file():
-        raise RuntimeError(f"torrc missing — expected {path.as_posix()}")
+        raise RuntimeError(
+            "torrc missing — TOR_SOCKS_HOST and TOR_SOCKS_PORT are set in "
+            f"Master.secrets or proxy.secrets, expected {path.as_posix()}"
+        )
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
@@ -1175,8 +1190,6 @@ def export_shell_env(
 
 def seed_console_secrets_at_image_creation() -> None:
     """Write full databases.secrets and mongodb.secrets on the console at image creation."""
-    root = resolve_lucid_tops_root()
-    read_torrc(root)
     pull = pull_realworld_information()
     from databases_secrets import write_databases_secrets
 

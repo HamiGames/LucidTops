@@ -401,15 +401,16 @@ def build_databases_secrets_values(
     *,
     force: bool = False,
 ) -> dict[str, str]:
-    """Build databases.secrets from Master/proxy seed, torrc, and the hardware pull."""
+    """Build databases.secrets from Master/proxy seed and the hardware pull."""
     lucid_root = resolve_lucid_tops_root(pull)
-    read_torrc(lucid_root)
     secrets_path = databases_secrets_path()
     mongo_path = mongodb_secrets_path()
     raw_seed = pull.get("master_proxy_seed")
     if not isinstance(raw_seed, dict) or not raw_seed:
         raw_seed = load_master_and_proxy_seed(lucid_root)
     seed = map_seed_to_databases_keys({str(k): str(v) for k, v in raw_seed.items()})
+    # Open torrc only when the seed already has both SOCKS keys. Do not parse the file.
+    torrc_text = read_torrc(lucid_root, seed)
 
     prior = parse_secrets_file(secrets_path) if secrets_path.exists() and not force else {}
     existing = _seed_prior_from_master_and_proxy(lucid_root, prior)
@@ -457,7 +458,6 @@ def build_databases_secrets_values(
         "LUCID_DATABASES_DIR": data_root,
         "DB_ROOT": data_root,
         "ROOT": lucid_root.as_posix(),
-        "HOST_TOR_CONFIG_TORRC": (lucid_root / "torrc").as_posix(),
         "MONGODB_SECRETS_FILE": mongo_path.as_posix(),
         "MASTER_SECRETS_FILE": existing.get("MASTER_SECRETS_FILE", "")
         or master_secrets_path(lucid_root).as_posix(),
@@ -466,6 +466,8 @@ def build_databases_secrets_values(
         "SECRETS_DIR": secrets_dir().as_posix(),
         "LUCID_TOPS_ROOT": lucid_root.as_posix(),
     }
+    if torrc_text:
+        values["HOST_TOR_CONFIG_TORRC"] = (lucid_root / "torrc").as_posix()
 
     per_db: dict[str, str] = {}
     for db_name in named_db_containers(main_name):
@@ -548,6 +550,8 @@ def build_databases_secrets_values(
         if values.get(key):
             merged[key] = values[key]
     drop = {"LEDGER_REPLICA_SOURCE", "LEDGER_REPLICA_TARGET"}
+    if not torrc_text:
+        drop.add("HOST_TOR_CONFIG_TORRC")
     return {
         key: value
         for key, value in merged.items()
