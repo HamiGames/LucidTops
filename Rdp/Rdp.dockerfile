@@ -43,6 +43,16 @@ RUN if [ -n "${APT_PACKAGES}" ]; then \
       && rm -rf /var/lib/apt/lists/*; \
     fi
 
+RUN set -eu; \
+  if [ ! -d /app/Rdp ]; then \
+    mkdir -p /app/Rdp; \
+    touch /app/Rdp/.gitkeep; \
+  fi; \
+  if [ ! -d /app/Secrets ]; then \
+    mkdir -p /app/Secrets; \
+    touch /app/Secrets/.gitkeep; \
+  fi
+
 COPY ${RDP_DIRECTORY}/requirements.txt /app/Rdp/requirements.txt
 RUN test -s /app/Rdp/requirements.txt \
  && pip install --no-cache-dir -r /app/Rdp/requirements.txt \
@@ -58,8 +68,7 @@ RUN test -f /app/Rdp/createRDP.py \
  && test -f /app/Rdp/ViewerWindow.py \
  && test -s /app/Rdp/requirements.txt \
  && test -f /app/Rdp/pull_information.py \
- && chmod +x /app/Rdp/createRDP.py /app/Rdp/RunRdp.py /app/Rdp/pull_information.py \
- && mkdir -p /app/Secrets
+ && chmod +x /app/Rdp/createRDP.py /app/Rdp/RunRdp.py /app/Rdp/pull_information.py 
 
 ENV PYTHONPATH=/app/Rdp
 ENV PYTHONUNBUFFERED=1
