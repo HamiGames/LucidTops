@@ -224,7 +224,7 @@ ENV DOCKER_HOST=unix:///var/run/docker.sock
 # Image creation writes databases.secrets and mongodb.secrets onto the console
 # bind of Server/Secrets, from Master.secrets and proxy.secrets.
 # source is relative to the build context (/mnt/myssd/LucidTops).
-RUN --mount=type=bind,source=Server/Secrets,target=/mnt/myssd/LucidTops/Server/Secrets \
+RUN --mount=type=bind,source=Server/Secrets,target=/mnt/myssd/LucidTops/Server/Secrets,rw \
     python3 -c "import sys; sys.path.insert(0, '/app/Databases'); from pull_information import seed_console_secrets_at_image_creation; seed_console_secrets_at_image_creation()" \
  && test -s /mnt/myssd/LucidTops/Server/Secrets/databases.secrets \
  && test -s /mnt/myssd/LucidTops/Server/Secrets/mongodb.secrets
