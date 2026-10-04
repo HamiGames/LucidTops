@@ -7,21 +7,28 @@
 # Build (on Pi, from mounted SSD):
 #   cd /mnt/myssd/LucidTops
 #   BASE_IMAGE=python:3.11-slim-bookworm
-#   APT_PACKAGES="ca-certificates curl iproute2 nginx tor"
-#   docker build --no-cache --platform linux/arm64 \
+#   APT_PACKAGES="ca-certificates curl gnupg iproute2 nginx tor"
+#   sudo docker build --no-cache --platform linux/arm64 \
 #     -f /mnt/myssd/LucidTops/proxy/proxy.dockerfile \
 #     --build-arg BASE_IMAGE="${BASE_IMAGE}" \
 #     --build-arg APT_PACKAGES="${APT_PACKAGES}" \
 #     -t lucid-proxy:v1.0.0 \
 #     /mnt/myssd/LucidTops
 #
+# Runtime (gate for Tor and the frontend; secrets stay on the console):
+#   sudo docker run --rm \
+#     --network <DOCKER_NETWORK_NAME> \
+#     -v /mnt/myssd/LucidTops:/mnt/myssd/LucidTops \
+#     -v /var/run/docker.sock:/var/run/docker.sock \
+#     lucid-proxy:v1.0.0
+#
 # Secrets (Bootstrap / fixes.txt §16 + Server layout):
 #   Canonical file: /mnt/myssd/LucidTops/Server/Secrets/proxy.secrets
 #   §16 directory link: /mnt/myssd/LucidTops/proxy/secrets → Server/Secrets
-#
+#   No secrets are baked into the image.
 #
 # Rebuild rule (§16.7): wipe image/volumes before rebuild.
-# Networks (§16.4): join at run via dockercmd.txt.
+# Networks (§16.4): join DOCKER_NETWORK_NAME from proxy.secrets / Master.secrets.
 
 # -----------------------------------------------------------------------------
 # Build-args (declared before FROM for BASE_IMAGE; re-declared after FROM for use)
@@ -30,7 +37,9 @@ ARG BASE_IMAGE=python:3.11-slim-bookworm
 FROM ${BASE_IMAGE}
 
 # Runtime / install args (NOT used in COPY source paths)
-ARG APT_PACKAGES=""
+# nginx + tor: the gate. iproute2: hardware pull. gnupg/curl: Docker CLI apt repo.
+ARG APT_PACKAGES="ca-certificates curl gnupg iproute2 nginx tor"
+ARG INSTALL_DOCKER_CLI=true
 ARG PIP_PACKAGES=""
 ARG PIP_WHEEL_PACKAGES="pip setuptools wheel"
 ARG LUCID_TOPS_ROOT=/mnt/myssd/LucidTops
@@ -78,14 +87,185 @@ RUN set -eu; \
     test "$(readlink -f "${PROXY_SECRETS_LINK}")" = "$(readlink -f "${SECRETS_DIR}")"
 
 # -----------------------------------------------------------------------------
-# OS packages
+# OS packages + Docker CLI (daemon stays on the Pi via docker.sock)
 # -----------------------------------------------------------------------------
 RUN set -eu; \
+    apt-get update; \
     if [ -n "${APT_PACKAGES}" ]; then \
-      apt-get update \
-      && apt-get install -y --no-install-recommends ${APT_PACKAGES} \
-      && rm -rf /var/lib/apt/lists/*; \
+      apt-get install -y --no-install-recommends ${APT_PACKAGES}; \
+    fi; \
+    if [ "${INSTALL_DOCKER_CLI}" = "true" ]; then \
+      apt-get install -y --no-install-recommends ca-certificates curl gnupg; \
+      install -m 0755 -d /etc/apt/keyrings; \
+      curl -fsSL https://download.docker.com/linux/debian/gpg \
+        | gpg --dearmor -o /etc/apt/keyrings/docker.gpg; \
+      chmod a+r /etc/apt/keyrings/docker.gpg; \
+      ARCH="$(dpkg --print-architecture)"; \
+      . /etc/os-release; \
+      echo "deb [arch=${ARCH} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian ${VERSION_CODENAME} stable" \
+        > /etc/apt/sources.list.d/docker.list; \
+      apt-get update; \
+      apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin; \
+    fi; \
+    command -v ip >/dev/null; \
+    command -v nginx >/dev/null; \
+    command -v tor >/dev/null; \
+    if [ "${INSTALL_DOCKER_CLI}" = "true" ]; then \
+      command -v docker >/dev/null; \
+      docker compose version >/dev/null; \
+    fi; \
+    rm -rf /var/lib/apt/lists/*
+
+# systemctl is not available in this image. Bootstrap still calls
+# systemctl for tor@default and nginx. This shim starts those processes directly.
+RUN cat > /usr/local/bin/systemctl <<'EOF'
+#!/bin/sh
+set -eu
+
+cmd=""
+unit=""
+for arg in "$@"; do
+  case "$arg" in
+    start|stop|restart|is-active|list-units|list-unit-files) cmd="$arg" ;;
+    --*) ;;
+    *) unit="$arg" ;;
+  esac
+done
+unit="${unit%.service}"
+
+secret_value() {
+  file="/mnt/myssd/LucidTops/Server/Secrets/proxy.secrets"
+  if [ ! -f "$file" ]; then
+    return 0
+  fi
+  grep "^${1}=" "$file" 2>/dev/null | tail -n 1 | cut -d= -f2- || true
+}
+
+tor_up() {
+  python3 -c 'import socket; socket.create_connection(("127.0.0.1", 9050), 1).close()' >/dev/null 2>&1
+}
+
+write_container_torrc() {
+  dest="/etc/lucid-proxy/torrc"
+  mkdir -p /etc/lucid-proxy /var/lib/tor /var/log/tor
+  {
+    echo "SocksPort 127.0.0.1:9050"
+    echo "ControlPort 127.0.0.1:9051"
+    echo "CookieAuthentication 1"
+    echo "DataDirectory /var/lib/tor"
+    echo "PidFile /var/run/tor.pid"
+    echo "Log notice file /var/log/tor/notices.log"
+  } > "$dest"
+  host_torrc="$(secret_value TORRC_PATH)"
+  if [ -z "$host_torrc" ]; then
+    host_torrc="/mnt/myssd/LucidTops/torrc"
+  fi
+  if [ -f "$host_torrc" ]; then
+    grep -E '^(HiddenService|SocksPort|ControlPort) ' "$host_torrc" >> "$dest" || true
+  fi
+  snippet="$(secret_value PROXY_TORRC_SNIPPET_PATH)"
+  if [ -n "$snippet" ] && [ -f "$snippet" ]; then
+    cat "$snippet" >> "$dest"
+  fi
+  printf '%s\n' "$dest"
+}
+
+start_tor() {
+  if tor_up; then
+    return 0
+  fi
+  torrc="$(write_container_torrc)"
+  tor -f "$torrc" >/var/log/tor/stdout.log 2>&1 &
+  i=0
+  while [ "$i" -lt 30 ]; do
+    if tor_up; then
+      return 0
     fi
+    i=$((i + 1))
+    sleep 0.5
+  done
+  echo "tor did not open 127.0.0.1:9050" >&2
+  return 1
+}
+
+stop_tor() {
+  if [ -f /var/run/tor.pid ]; then
+    kill "$(cat /var/run/tor.pid)" 2>/dev/null || true
+    rm -f /var/run/tor.pid
+  fi
+}
+
+start_nginx() {
+  conf="$(secret_value NGINX_CONF_PATH)"
+  if [ -n "$conf" ] && [ -f "$conf" ]; then
+    nginx -t -c "$conf"
+    if [ -f /run/nginx.pid ] && kill -0 "$(cat /run/nginx.pid)" 2>/dev/null; then
+      nginx -s reload
+      return 0
+    fi
+    nginx -c "$conf"
+    return 0
+  fi
+  nginx
+}
+
+case "$cmd" in
+  list-unit-files)
+    printf '%s\n' "tor@default.service enabled" "nginx.service enabled"
+    ;;
+  list-units)
+    if tor_up; then
+      printf '%s\n' "tor@default.service loaded active running Tor"
+    else
+      printf '%s\n' "tor@default.service loaded inactive dead Tor"
+    fi
+    ;;
+  is-active)
+    case "$unit" in
+      tor@default|tor)
+        if tor_up; then printf '%s\n' active; else printf '%s\n' inactive; fi
+        ;;
+      nginx)
+        if [ -f /run/nginx.pid ] && kill -0 "$(cat /run/nginx.pid)" 2>/dev/null; then
+          printf '%s\n' active
+        else
+          printf '%s\n' inactive
+        fi
+        ;;
+      *)
+        printf '%s\n' inactive
+        ;;
+    esac
+    ;;
+  start)
+    case "$unit" in
+      tor@default|tor) start_tor ;;
+      nginx) start_nginx ;;
+      *) echo "unsupported unit ${unit}" >&2; exit 1 ;;
+    esac
+    ;;
+  stop)
+    case "$unit" in
+      tor@default|tor) stop_tor ;;
+      nginx) nginx -s quit || true ;;
+    esac
+    ;;
+  restart)
+    case "$unit" in
+      tor@default|tor) stop_tor; start_tor ;;
+      nginx) start_nginx ;;
+      *) echo "unsupported unit ${unit}" >&2; exit 1 ;;
+    esac
+    ;;
+  *)
+    echo "unsupported systemctl command: $*" >&2
+    exit 1
+    ;;
+esac
+EOF
+RUN chmod 0755 /usr/local/bin/systemctl \
+ && systemctl list-unit-files tor@default.service | grep -q tor@default \
+ && systemctl is-active tor@default | grep -q inactive
 
 # -----------------------------------------------------------------------------
 # Pip wheel installer + requirements (literal COPY — no ARG in source path)
