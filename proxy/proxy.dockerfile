@@ -147,8 +147,9 @@ tor_up() {
 
 write_container_torrc() {
   dest="/etc/lucid-proxy/torrc"
-  mkdir -p /etc/lucid-proxy /var/lib/tor /var/log/tor
+  mkdir -p /etc/lucid-proxy /var/lib/tor /var/log/tor /var/run
   {
+    echo "User debian-tor"
     echo "SocksPort 127.0.0.1:9050"
     echo "ControlPort 127.0.0.1:9051"
     echo "CookieAuthentication 1"
@@ -165,8 +166,17 @@ write_container_torrc() {
   fi
   snippet="$(secret_value PROXY_TORRC_SNIPPET_PATH)"
   if [ -n "$snippet" ] && [ -f "$snippet" ]; then
-    cat "$snippet" >> "$dest"
+    grep -E '^(HiddenService|SocksPort|ControlPort) ' "$snippet" >> "$dest" || true
   fi
+  grep '^HiddenServiceDir ' "$dest" | awk '{print $2}' | while read -r hs_dir; do
+    [ -n "$hs_dir" ] || continue
+    mkdir -p "$hs_dir"
+    chown -R debian-tor:debian-tor "$hs_dir"
+  done
+  chown -R debian-tor:debian-tor /var/lib/tor /var/log/tor /etc/lucid-proxy
+  chmod 700 /var/lib/tor
+  touch /var/run/tor.pid
+  chown debian-tor:debian-tor /var/run/tor.pid
   printf '%s\n' "$dest"
 }
 
@@ -174,8 +184,14 @@ start_tor() {
   if tor_up; then
     return 0
   fi
+  if ! id debian-tor >/dev/null 2>&1; then
+    echo "debian-tor user missing — tor package did not install" >&2
+    return 1
+  fi
   torrc="$(write_container_torrc)"
-  tor -f "$torrc" >/var/log/tor/stdout.log 2>&1 &
+  : > /var/log/tor/stdout.log
+  chown debian-tor:debian-tor /var/log/tor/stdout.log
+  tor -f "$torrc" >>/var/log/tor/stdout.log 2>&1 &
   i=0
   while [ "$i" -lt 30 ]; do
     if tor_up; then
@@ -185,6 +201,12 @@ start_tor() {
     sleep 0.5
   done
   echo "tor did not open 127.0.0.1:9050" >&2
+  if [ -s /var/log/tor/stdout.log ]; then
+    cat /var/log/tor/stdout.log >&2
+  fi
+  if [ -s /var/log/tor/notices.log ]; then
+    cat /var/log/tor/notices.log >&2
+  fi
   return 1
 }
 
