@@ -2,13 +2,13 @@
 purpose:
 1. to define the limitations of the Dns-selected containers for use by the Backend container.
 
-dns-selected containers:
+dns-selected containers (prefix is MONGODB_MAIN_DATABASE_NAME):
 - operations
-- LucidTops_SessionsDB
-- LucidTopsNodeDB
-- LucidTopsUserDB
-- LucidTopsLedgerDB
-- LucidTopsPaySystemsDB
+- {prefix}_SessionsDB
+- {prefix}_NodeDB
+- {prefix}_UserDB
+- {prefix}__LedgerDB
+- {prefix}_PaymentDB
 - PaySystems
 
 none-direct containers:

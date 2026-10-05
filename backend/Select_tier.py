@@ -55,6 +55,8 @@ tier 8 limitations: [no billing]
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
 from typing import Any
 
 from config import (
@@ -79,6 +81,15 @@ def tier_ids() -> tuple[int, ...]:
     if not ids:
         raise RuntimeError("TIER_IDS is empty")
     return tuple(ids)
+
+
+def _named_db(suffix: str) -> str:
+    db_dir = Path(__file__).resolve().parent.parent / "Databases"
+    if str(db_dir) not in sys.path:
+        sys.path.insert(0, str(db_dir))
+    from Dns_databases import container_name, resolve_main_database_name
+
+    return container_name(resolve_main_database_name(), suffix)
 
 
 def tiers_collection_name() -> str:
@@ -193,7 +204,7 @@ def store_user_tier(
             {"$set": record, "$setOnInsert": {"created_at": utc_now()}},
             upsert=True,
         )
-        # Seed LucidTopsUserDB / users profile gating fields (Databases.txt).
+        # Seed {prefix}_UserDB / users profile gating fields (Databases.txt).
         max_sessions = (
             None
             if definition["unlimited_sessions"]
@@ -219,7 +230,7 @@ def store_user_tier(
         )
         try:
             user_db_name = get_config_value_optional("LUCIDTOPS_USER_DB_NAME") or (
-                get_config_value_optional("LUCIDTOPSUSERDB_NAME") or "LucidTopsUserDB"
+                get_config_value_optional("LUCIDTOPSUSERDB_NAME") or _named_db("_UserDB")
             )
             user_col_name = (
                 get_config_value_optional("USER_DB_COLLECTION") or "UserID"

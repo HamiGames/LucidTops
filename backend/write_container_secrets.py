@@ -135,6 +135,20 @@ def _require_keys(path: Path, keys: tuple[str, ...]) -> dict[str, str]:
     return loaded
 
 
+def _ensure_databases_path() -> None:
+    db_dir = PROJECT_ROOT / "Databases"
+    if str(db_dir) not in sys.path:
+        sys.path.insert(0, str(db_dir))
+
+
+def _sessions_container_name() -> str:
+    """DockerDNS name of the Sessions container from MONGODB_MAIN_DATABASE_NAME."""
+    _ensure_databases_path()
+    from Dns_databases import container_name, resolve_main_database_name
+
+    return container_name(resolve_main_database_name(), "_SessionsDB")
+
+
 def _database_containers_not_running(docker_bin: str) -> list[str]:
     """Named Mongo containers that are not status=running. Empty when all are up."""
     from Dns_databases import ALL_NAMED_DB_CONTAINERS
@@ -159,8 +173,8 @@ def _database_containers_not_running(docker_bin: str) -> list[str]:
 
 
 def _bind_mongo_from_snapshot(snapshot: dict[str, Any]) -> None:
-    sessions = (snapshot.get("containers") or {}).get("LucidTops_SessionsDB") or {}
-    host = "LucidTops_SessionsDB"
+    host = _sessions_container_name()
+    sessions = (snapshot.get("containers") or {}).get(host) or {}
     port = str(snapshot.get("container_port") or "").strip()
     if not port:
         raise RuntimeError("active Mongo snapshot has no container port")
@@ -169,10 +183,13 @@ def _bind_mongo_from_snapshot(snapshot: dict[str, Any]) -> None:
     os.environ["MONGODB_ADMIN_USER"] = str(snapshot.get("admin_user") or "")
     os.environ["MONGODB_ADMIN_PASSWORD"] = str(snapshot.get("admin_password") or "")
     os.environ["MONGODB_PASSWORD"] = str(snapshot.get("mongodb_password") or "")
+    # Prefix stays MONGODB_MAIN_DATABASE_NAME. init_database is the Mongo
+    # database inside the Sessions container, not the container-name prefix.
+    prefix = os.environ.get("MONGODB_MAIN_DATABASE_NAME", "").strip()
     init_database = str(sessions.get("init_database") or "").strip()
-    if init_database:
-        os.environ["MONGODB_MAIN_DATABASE_NAME"] = init_database
-        os.environ["MONGODB_URL"] = f"mongodb://{host}:{port}/{init_database}"
+    url_database = init_database or prefix
+    if url_database:
+        os.environ["MONGODB_URL"] = f"mongodb://{host}:{port}/{url_database}"
     os.environ["LUCID_MONGODB_URL"] = f"mongodb://{host}:{port}"
 
 
@@ -271,8 +288,11 @@ def _verify_database_files(
         "DOCKER_NETWORK_NONTOR_DB",
     )
     mongo_loaded = _require_keys(mongodb_path, mongo_keys)
-    if mongo_loaded["MONGODB_HOST"] != "LucidTops_SessionsDB":
-        raise RuntimeError("mongodb.secrets MONGODB_HOST is not LucidTops_SessionsDB")
+    sessions_host = _sessions_container_name()
+    if mongo_loaded["MONGODB_HOST"] != sessions_host:
+        raise RuntimeError(
+            f"mongodb.secrets MONGODB_HOST is not {sessions_host}"
+        )
     if mongo_loaded["MONGODB_PORT"] != str(snapshot["container_port"]):
         raise RuntimeError("mongodb.secrets MONGODB_PORT does not match the running container")
     for key in (
@@ -305,7 +325,7 @@ def _verify_database_files(
 def _bind_backend_mongo(db_values: dict[str, str]) -> None:
     from Dns_databases import secret_key_prefix
 
-    prefix = secret_key_prefix("LucidTops_SessionsDB")
+    prefix = secret_key_prefix(_sessions_container_name())
     host = db_values.get(f"{prefix}_HOST", "").strip()
     port = db_values.get(f"{prefix}_PORT", "").strip()
     database = db_values.get("MONGODB_MAIN_DATABASE_NAME", "").strip() or os.environ.get(
@@ -354,7 +374,7 @@ def main() -> int:
     else:
         snapshot = db_pull.pull_active_mongodb_containers(docker_bin)
         _bind_mongo_from_snapshot(snapshot)
-        info["mongodb_host"] = "LucidTops_SessionsDB"
+        info["mongodb_host"] = _sessions_container_name()
         info["mongodb_port"] = str(snapshot["container_port"])
 
     server_path, config_path = _write_server_and_config(snapshot)
@@ -432,8 +452,11 @@ def main() -> int:
     _require_keys(written["server.secrets"], SERVER_REQUIRED_KEYS)
     server_loaded = _parse_secrets(written["server.secrets"])
     if snapshot is not None:
-        if server_loaded.get("MONGODB_HOST") != "LucidTops_SessionsDB":
-            raise RuntimeError("server.secrets MONGODB_HOST is not LucidTops_SessionsDB")
+        sessions_host = _sessions_container_name()
+        if server_loaded.get("MONGODB_HOST") != sessions_host:
+            raise RuntimeError(
+                f"server.secrets MONGODB_HOST is not {sessions_host}"
+            )
         if server_loaded.get("MONGODB_PORT") != str(snapshot["container_port"]):
             raise RuntimeError("server.secrets MONGODB_PORT does not match the running container")
         if server_loaded.get("MONGODB_ADMIN_PASSWORD") != str(snapshot["admin_password"]):
@@ -459,8 +482,12 @@ def main() -> int:
         ),
     )
     backend_loaded = _require_keys(written["backend.secrets"], BACKEND_REQUIRED_KEYS)
-    if snapshot is not None and backend_loaded.get("MONGODB_HOST") != "LucidTops_SessionsDB":
-        raise RuntimeError("backend.secrets MONGODB_HOST is not LucidTops_SessionsDB")
+    if snapshot is not None:
+        sessions_host = _sessions_container_name()
+        if backend_loaded.get("MONGODB_HOST") != sessions_host:
+            raise RuntimeError(
+                f"backend.secrets MONGODB_HOST is not {sessions_host}"
+            )
 
     for name in OPERATIONAL_FILES:
         path = written[name]

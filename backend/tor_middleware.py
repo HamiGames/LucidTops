@@ -14,7 +14,7 @@ operational requirements:
 - requires registration with the MasterServer (uvicorn server and FastAPI system) to be operational
 - stabalizes connection to the MasterServer (uvicorn server and FastAPI system)
 - ensures the connection is secure and encrypted
-- uses (mnt/myssd/LucidTops/secrets/backend.secrets) for authentication and encryption requirements
+- uses (/mnt/myssd/LucidTops/Server/Secrets/backend.secrets) for authentication and encryption requirements
 
 
 clearnet requirements:

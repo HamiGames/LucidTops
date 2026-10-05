@@ -2,9 +2,9 @@
 
 Registration accepts email, password, and console hardware. It does not accept a
 TokenID and it does not call derive_user_and_node_ids. The MasterServer creates
-UserID and TokenID and stores them in LucidTopsUserDB. Login rejects a request
+UserID and TokenID and stores them in {prefix}_UserDB. Login rejects a request
 that has no TokenID. A presented TokenID is the API key and is looked up in
-LucidTopsUserDB.
+{prefix}_UserDB. prefix is MONGODB_MAIN_DATABASE_NAME.
 """
 
 from __future__ import annotations
@@ -12,6 +12,8 @@ from __future__ import annotations
 import hashlib
 import json
 import secrets
+import sys
+from pathlib import Path
 from typing import Any
 
 from config import get_config_value_optional, get_mongo_client, utc_now
@@ -26,11 +28,20 @@ _HARDWARE_FIELDS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
+def _named_db(suffix: str) -> str:
+    db_dir = Path(__file__).resolve().parent.parent / "Databases"
+    if str(db_dir) not in sys.path:
+        sys.path.insert(0, str(db_dir))
+    from Dns_databases import container_name, resolve_main_database_name
+
+    return container_name(resolve_main_database_name(), suffix)
+
+
 def _user_db_name() -> str:
     return (
         get_config_value_optional("LUCIDTOPS_USER_DB_NAME")
         or get_config_value_optional("LUCIDTOPSUSERDB_NAME")
-        or "LucidTopsUserDB"
+        or _named_db("_UserDB")
     )
 
 
@@ -42,7 +53,7 @@ def _node_db_name() -> str:
     return (
         get_config_value_optional("LUCIDTOPS_NODE_DB_NAME")
         or get_config_value_optional("LUCIDTOPSNODEDB_NAME")
-        or "LucidTopsNodeDB"
+        or _named_db("_NodeDB")
     )
 
 
@@ -241,7 +252,7 @@ def _insert_node(
 
 
 def register_public_user(body: dict[str, Any], *, client: Any | None = None) -> dict[str, str]:
-    """Create a UserID and TokenID when the email is not already in LucidTopsUserDB."""
+    """Create a UserID and TokenID when the email is not already in the User database."""
     email, password = _require_email_password(body)
     hardware = _hardware(body)
     mongo = client if client is not None else get_mongo_client()
@@ -316,7 +327,7 @@ def _presented_token(body: dict[str, Any]) -> str:
 
 
 def login_public_user(body: dict[str, Any], *, client: Any | None = None) -> dict[str, str]:
-    """Accept login only when TokenID matches a LucidTopsUserDB document."""
+    """Accept login only when TokenID matches a User database document."""
     token = _presented_token(body)
     password = _field(body, "Password", "password")
     if not password:
@@ -333,7 +344,7 @@ def login_public_user(body: dict[str, Any], *, client: Any | None = None) -> dic
             raise PermissionError("TokenID was not accepted")
         user = find_user_by_token(mongo, token)
         if user is None:
-            raise PermissionError("TokenID was not found in LucidTopsUserDB")
+            raise PermissionError(f"TokenID was not found in {_user_db_name()}")
         user_id = str(user.get("UserID") or "").strip()
         if claimed_user and claimed_user != user_id:
             raise PermissionError("UserID does not match TokenID")
@@ -368,7 +379,7 @@ def login_public_node(body: dict[str, Any], *, client: Any | None = None) -> dic
             raise PermissionError("TokenID was not accepted")
         user = find_user_by_token(mongo, token)
         if user is None:
-            raise PermissionError("TokenID was not found in LucidTopsUserDB")
+            raise PermissionError(f"TokenID was not found in {_user_db_name()}")
         if not _password_matches(user, password):
             raise PermissionError("Password does not match the registered User")
         node = node_accounts(mongo).find_one({"NodeID": claimed_node})
