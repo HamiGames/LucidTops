@@ -47,13 +47,26 @@ mkdir -p "${LUCID_TOPS_ROOT}" \
          "${LUCID_TOPS_ROOT}/logs"
 
 _source_secrets_if_present() {
-  local path="$1"
-  if [ -n "${path}" ] && [ -f "${path}" ]; then
-    set -a
-    # shellcheck disable=SC1090
-    source "${path}"
-    set +a
-  fi
+  local path="$1" line key value
+  [ -n "${path}" ] && [ -f "${path}" ] || return 0
+  while IFS= read -r line || [ -n "${line}" ]; do
+    line="${line%$'\r'}"
+    case "${line}" in
+      ''|\#*) continue ;;
+    esac
+    case "${line}" in
+      *=*) ;;
+      *) continue ;;
+    esac
+    key="${line%%=*}"
+    value="${line#*=}"
+    key="${key#"${key%%[![:space:]]*}"}"
+    key="${key%"${key##*[![:space:]]}"}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    [ -n "${key}" ] || continue
+    export "${key}=${value}"
+  done < "${path}"
 }
 
 # Console secrets only. MASTER_SERVER_ONION is taken from proxy.secrets.
