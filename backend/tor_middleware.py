@@ -42,6 +42,7 @@ from config import (
     utc_now,
 )
 from connection import (
+    load_proxy_secrets_onions,
     normalize_onion_address,
     resolve_connection_network,
     resolve_connection_protocol,
@@ -108,10 +109,6 @@ def _frontend_source_prefix() -> str:
 
 def _hostname_from_host(host: str) -> str:
     return host.split(":")[0].strip().lower()
-
-
-def _host_is_tor(host: str) -> bool:
-    return _hostname_from_host(host).endswith(".onion")
 
 
 def _host_is_local_tor_forward(host: str) -> bool:
@@ -357,10 +354,10 @@ def register_tor_middleware(app: object) -> None:
                 _attach_response_headers(denied, cors_headers)
                 return denied
 
-            if _host_is_tor(host):
-                if master_onion and request_onion and request_onion != master_onion:
+            if request_onion:
+                if request_onion not in load_proxy_secrets_onions():
                     denied = _tor_denied_response(
-                        detail="Host *.onion does not match master server hidden service",
+                        detail="Host *.onion is not listed in proxy.secrets",
                         master_onion=master_onion,
                         frontend_onion=frontend_onion,
                         path=path,

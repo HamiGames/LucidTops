@@ -36,9 +36,11 @@ from connection import (
     ConnectionType,
     establish_connection,
     get_tor_connection_config,
+    load_proxy_secrets_onions,
     normalize_onion_address,
     resolve_onion_for_entity,
     validate_connection_source,
+    validate_onion_address,
 )
 from handshake import (
     perform_connect_handshake,
@@ -163,9 +165,9 @@ def _resolve_connection_type(
 
 
 def _request_is_tor_compatible(host: str) -> bool:
-    hostname = host.split(":")[0].lower()
-    if hostname.endswith(".onion"):
-        return True
+    hostname = host.split(":")[0].strip().lower()
+    if validate_onion_address(hostname):
+        return normalize_onion_address(hostname) in load_proxy_secrets_onions()
     if hostname in get_local_tor_forward_hosts():
         return True
     return not MASTER_SERVER_TOR_ONLY
@@ -435,7 +437,7 @@ def register_client_handler_routes(app: Any, *, api_prefix: str | None = None) -
         if not _request_is_tor_compatible(request.headers.get("host", "")):
             raise HTTPException(  # pyright: ignore[reportOptionalCall]
                 status_code=status.HTTP_403_FORBIDDEN,  # pyright: ignore[reportOptionalMemberAccess]
-                detail="Client requests must originate via the master server *.onion hidden service",
+                detail="Client requests must originate from an onion listed in proxy.secrets",
             )
 
         try:

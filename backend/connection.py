@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from pathlib import Path
 from typing import Any, Literal
 
 from config import (
@@ -19,6 +20,7 @@ from config import (
     MASTER_SERVER_PORT,
     MASTER_SERVER_TOR_ONLY,
     NODEUSER_ONION,
+    SECRETS_DIR,
     TOR_CONTROL_PORT,
     TOR_HOST,
     TOR_SOCKS_HOST,
@@ -30,6 +32,8 @@ from config import (
     get_master_db,
     get_master_server_public_url,
     get_mongo_client,
+    optional_env,
+    parse_secrets_file,
     read_onion_from_hidden_service_dir,
     resolve_master_server_onion,
     utc_now,
@@ -108,6 +112,8 @@ __all__ = (
     "MASTER_SERVER_TOR_ONLY",
     "validate_onion_address",
     "normalize_onion_address",
+    "PROXY_SECRETS_ONION_KEYS",
+    "load_proxy_secrets_onions",
     "resolve_onion_for_entity",
     "get_tor_connection_config",
     "validate_tor_endpoint",
@@ -138,6 +144,33 @@ def validate_onion_address(onion: str) -> bool:
     if not onion:
         return False
     return ONION_V3_PATTERN.fullmatch(normalize_onion_address(onion)) is not None
+
+
+PROXY_SECRETS_ONION_KEYS: tuple[str, ...] = (
+    "FRONTEND_ONION",
+    "BLOCKCHAIN_ONION",
+    "MASTER_SERVER_ONION",
+    "NODEUSER_ONION",
+    "RDP_ONION",
+)
+
+
+def _proxy_secrets_path() -> Path:
+    raw = optional_env("PROXY_SECRETS_FILE")
+    if raw:
+        return Path(raw).expanduser()
+    return SECRETS_DIR / "proxy.secrets"
+
+
+def load_proxy_secrets_onions() -> frozenset[str]:
+    """Return normalized onion hostnames stored in proxy.secrets for the allow keys."""
+    values = parse_secrets_file(_proxy_secrets_path())
+    allowed: set[str] = set()
+    for key in PROXY_SECRETS_ONION_KEYS:
+        raw = values.get(key, "").strip()
+        if raw and validate_onion_address(raw):
+            allowed.add(normalize_onion_address(raw))
+    return frozenset(allowed)
 
 
 def resolve_onion_for_entity(entity: str) -> str | None:
