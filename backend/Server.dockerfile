@@ -29,6 +29,10 @@
 # Networks (§16.4): DOCKER_NETWORK_NAME is set at build (ARG→ENV).
 #   Runtime join is still required:
 #     docker run --network "${DOCKER_NETWORK_NAME}" …
+#
+# main.py imports operations. operations/session.py and operations/Viewer.py
+# import the sessions package. Both are copied to /app so PYTHONPATH can see them.
+# Ops.dockerfile uses the same /app/operations and /app/sessions layout.
 
 # -----------------------------------------------------------------------------
 # Build-args (declared before FROM for BASE_IMAGE; re-declared after FROM for use)
@@ -64,6 +68,8 @@ RUN set -eu; \
       /app/backend/run \
       /app/backend/configs \
       /app/backend/logs \
+      /app/operations \
+      /app/sessions \
       "${LUCID_TOPS_ROOT}" \
       "${SECRETS_DIR}" \
       "${BACKEND_CONFIGS_DIR}" \
@@ -71,6 +77,8 @@ RUN set -eu; \
       "${LUCID_TOPS_ROOT}/configs" \
       "${LUCID_TOPS_ROOT}/logs"; \
     test -d /app/backend; \
+    test -d /app/operations; \
+    test -d /app/sessions; \
     test -d "${SECRETS_DIR}"; \
     test -d "${LUCID_TOPS_ROOT}"
 
@@ -108,9 +116,12 @@ RUN set -eu; \
     "${PY}" -c "import fastapi, uvicorn, pydantic, pymongo, socks, httpx, dotenv"
 
 # -----------------------------------------------------------------------------
-# Copy entire backend package, then validate required modules (§16.2 / §16.3)
+# Copy backend, operations, and sessions, then validate required modules (§16.2 / §16.3)
+# operations matches Ops.dockerfile. sessions is required by operations/session.py.
 # -----------------------------------------------------------------------------
 COPY backend/ /app/backend/
+COPY operations/ /app/operations/
+COPY sessions/ /app/sessions/
 
 RUN set -eu; \
     test -f /app/backend/main.py; \
@@ -122,11 +133,23 @@ RUN set -eu; \
     test -f /app/backend/config.py; \
     test -f /app/backend/connection.py; \
     test -f /app/backend/MasterServerRoutes.py; \
+    test -f /app/backend/WebPageLink.py; \
+    test -f /app/backend/load_module.py; \
+    test -f /app/backend/NodeDbSchema.py; \
     test -s /app/backend/requirements.txt; \
     test -f /app/backend/Server.dockerfile; \
     test -d /app/backend/run; \
     test -d /app/backend/configs; \
     test -d /app/backend/logs; \
+    test -f /app/operations/__init__.py; \
+    test -f /app/operations/operations_secrets.py; \
+    test -f /app/operations/_common.py; \
+    test -f /app/operations/session.py; \
+    test -f /app/operations/SessionRoutes.py; \
+    test -f /app/sessions/__init__.py; \
+    test -f /app/sessions/compress.py; \
+    test -f /app/sessions/SessionCore.py; \
+    test -f /app/sessions/sessionID.py; \
     test -L "${BACKEND_SECRETS_LINK}"; \
     test -d "${SECRETS_DIR}"; \
     chmod +x /app/backend/server_entrypoint.sh /app/backend/pull_information.py /app/backend/builderMasterServer.py
@@ -134,7 +157,7 @@ RUN set -eu; \
 # -----------------------------------------------------------------------------
 # Runtime environment
 # -----------------------------------------------------------------------------
-ENV PYTHONPATH=/app:/app/backend
+ENV PYTHONPATH=/app:/app/backend:/app/operations:/app/sessions
 ENV PYTHONUNBUFFERED=1
 ENV LUCID_PROJECT_ROOT=/app
 ENV LUCID_TOPS_ROOT=${LUCID_TOPS_ROOT}
