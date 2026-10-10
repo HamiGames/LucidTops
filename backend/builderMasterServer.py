@@ -1721,6 +1721,11 @@ def build_master_server(launch_config: dict[str, Any] | None = None) -> dict[str
         write_operations_secrets_template(secrets_dir, populate_from_env=True, force=False)
     except ImportError:
         pass
+    except RuntimeError as exc:
+        # operations.secrets is owned by the operations image (launch_order step 4).
+        # write_operations_secrets refuses to create that file at backend start.
+        if "runtime write is not allowed" not in str(exc):
+            raise
     write_databases_secrets_template(secrets_dir, populate_from_env=True, force=False)
     try:
         from BuildConfigs import write_backend_secrets
