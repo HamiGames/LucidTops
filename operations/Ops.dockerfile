@@ -7,7 +7,7 @@
 # Build (on Pi, from mounted SSD):
 #   cd /mnt/myssd/LucidTops
 #   BASE_IMAGE=python:3.11-slim-bookworm
-#   APT_PACKAGES=""
+#   APT_PACKAGES="iproute2"
 #   docker build --no-cache --platform linux/arm64 \
 #     -f /mnt/myssd/LucidTops/operations/Ops.dockerfile \
 #     --build-arg BASE_IMAGE="${BASE_IMAGE}" \
@@ -15,18 +15,12 @@
 #     -t lucid-operations:v1.0.0 \
 #     /mnt/myssd/LucidTops
 #
-# Secrets (Operations.txt / dockerfile-structure.txt §9) — created at image build (RUN), not at container start:
-#   Internal file: /app/secrets/operations.secrets
-#   Required in the build context:
-#     Server/Secrets/Master.secrets
-#     Server/Secrets/proxy.secrets
-#     Server/Secrets/databases.secrets
-#     torrc
-#   Used when the file is present:
-#     Server/Secrets/mongodb.secrets
-#     Server/Secrets/server.secrets (BLOCKCHAIN_SECRET and BLOCKCHAIN_SECRET_KEY only)
-#     Server/Secrets/operations.secrets
-#   Node / Admin / MasterUser devices read that in-image file. They do not rebuild it.
+# Secrets (Operations.txt / dockerfile-structure.txt §9) — created at image build, not at container start:
+#   Console source: /mnt/myssd/LucidTops/Server/Secrets/*.secrets
+#   COPY those files into /tmp/ops-secrets-src/ (context path Server/Secrets/*.secrets)
+#   Build writes the in-image file /app/secrets/operations.secrets from that /tmp copy.
+#   torrc is copied from /mnt/myssd/LucidTops/torrc.
+#   Node / Admin / MasterUser devices read the in-image file. They do not rebuild it.
 #
 # RULES:
 # - connection values are sourced from Master.secrets, databases.secrets, proxy.secrets, and torrc at image creation.
@@ -47,7 +41,7 @@ ARG BASE_IMAGE=python:3.11-slim-bookworm
 FROM ${BASE_IMAGE}
 
 # Runtime / install args (NOT used in COPY source paths)
-ARG APT_PACKAGES=""
+ARG APT_PACKAGES="iproute2"
 ARG PIP_PACKAGES=""
 ARG PIP_WHEEL_PACKAGES="pip setuptools wheel"
 ARG LUCID_TOPS_ROOT=/mnt/myssd/LucidTops
@@ -81,11 +75,10 @@ RUN set -eu; \
 # OS packages
 # -----------------------------------------------------------------------------
 RUN set -eu; \
-    if [ -n "${APT_PACKAGES}" ]; then \
-      apt-get update \
-      && apt-get install -y --no-install-recommends ${APT_PACKAGES} \
-      && rm -rf /var/lib/apt/lists/*; \
-    fi
+    apt-get update; \
+    apt-get install -y --no-install-recommends iproute2 ${APT_PACKAGES}; \
+    command -v ip >/dev/null; \
+    rm -rf /var/lib/apt/lists/*
 
 # -----------------------------------------------------------------------------
 # Pip wheel installer + requirements (literal COPY — no ARG in source path)
@@ -157,30 +150,18 @@ ENV OPERATIONS_CONFIGS_DIR=/app/operations/configs
 
 # -----------------------------------------------------------------------------
 # Bootstrap at image build (dockerfile-structure.txt §9) — not container start
-# Build context is /mnt/myssd/LucidTops. operations.secrets is optional.
+# Console source: /mnt/myssd/LucidTops/Server/Secrets/*.secrets
+# COPY context root is /mnt/myssd/LucidTops, so the dockerfile path is Server/Secrets/*.secrets
 # -----------------------------------------------------------------------------
-RUN --mount=type=bind,source=Server/Secrets,target=/tmp/ops-secrets-mount,ro \
-    --mount=type=bind,source=torrc,target=/tmp/ops-torrc,ro \
-    set -eu; \
-    mkdir -p /tmp/ops-secrets-src; \
-    cp /tmp/ops-secrets-mount/Master.secrets /tmp/ops-secrets-src/Master.secrets; \
-    cp /tmp/ops-secrets-mount/proxy.secrets /tmp/ops-secrets-src/proxy.secrets; \
-    cp /tmp/ops-secrets-mount/databases.secrets /tmp/ops-secrets-src/databases.secrets; \
-    if [ -s /tmp/ops-secrets-mount/mongodb.secrets ]; then \
-      cp /tmp/ops-secrets-mount/mongodb.secrets /tmp/ops-secrets-src/mongodb.secrets; \
-    fi; \
-    if [ -s /tmp/ops-secrets-mount/server.secrets ]; then \
-      cp /tmp/ops-secrets-mount/server.secrets /tmp/ops-secrets-src/server.secrets; \
-    fi; \
-    if [ -s /tmp/ops-secrets-mount/operations.secrets ]; then \
-      cp /tmp/ops-secrets-mount/operations.secrets /tmp/ops-secrets-src/operations.secrets; \
-    fi; \
-    cp /tmp/ops-torrc /tmp/ops-secrets-src/torrc; \
-    test -f /app/operations/pull_information.py; \
+COPY Server/Secrets/*.secrets /tmp/ops-secrets-src/
+COPY torrc /tmp/ops-secrets-src/torrc
+
+RUN set -eu; \
     test -s /tmp/ops-secrets-src/Master.secrets; \
     test -s /tmp/ops-secrets-src/proxy.secrets; \
     test -s /tmp/ops-secrets-src/databases.secrets; \
     test -s /tmp/ops-secrets-src/torrc; \
+    test -f /app/operations/pull_information.py; \
     python3 /app/operations/pull_information.py --write-image; \
     test -s /app/secrets/operations.secrets; \
     rm -rf /tmp/ops-secrets-src
