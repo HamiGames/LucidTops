@@ -85,7 +85,10 @@ except ImportError:  # pragma: no cover
     HTTPException = None  # type: ignore[misc, assignment]
     status = None  # type: ignore[misc, assignment]
     BaseModel = object  # type: ignore[misc, assignment]
-    Field = lambda *args, **kwargs: None  # type: ignore[misc, assignment]
+
+    def Field(*_args: Any, **_kwargs: Any) -> Any:  # type: ignore[misc]
+        return None
+
     model_validator = None  # type: ignore[misc, assignment]
 
 SESSION_RECORDS_COLLECTION: str
