@@ -55,8 +55,16 @@ def id_secrets_candidates(operator_id: str | None = None) -> list[Path]:
         paths.append(id_dir / "ID.secrets")
         paths.append(accounts_dir / "ID.secrets")
     else:
-        paths.append(id_dir / "ID.secrets")
-        paths.append(accounts_dir / "ID.secrets")
+        for name in (
+            "ID.secrets",
+            "MasterID.secrets",
+            "AdminID.secrets",
+            "MasterUserID.secrets",
+            "MasterServerID.secrets",
+            "NodeID.secrets",
+        ):
+            paths.append(id_dir / name)
+            paths.append(accounts_dir / name)
     return paths
 
 

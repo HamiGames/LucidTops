@@ -1321,6 +1321,13 @@ def write_operations_secrets_at_build(
         merged["NODE_USER_COLLECTION"] = merged["LUCIDTOPS_USER_DB_COLLECTION"]
     if not merged.get("NODE_HOSTED_DB_COLLECTION", "").strip():
         merged["NODE_HOSTED_DB_COLLECTION"] = merged["LUCIDTOPS_NODE_DB_COLLECTION"]
+    lucid_root = merged.get("LUCID_TOPS_ROOT", "").strip()
+    if lucid_root:
+        accounts_dir = (Path(lucid_root) / "accounts").as_posix()
+        if not merged.get("ID_SECRETS_DIR", "").strip():
+            merged["ID_SECRETS_DIR"] = accounts_dir
+        if not merged.get("ACCOUNTS_DIR", "").strip():
+            merged["ACCOUNTS_DIR"] = accounts_dir
     merged["SESSION_CONTROL_SETTING_KEYS"] = _control_setting_keys(merged)
     for key, default in _CHUNK_COLLECTION_DEFAULTS.items():
         if not merged.get(key, "").strip():
