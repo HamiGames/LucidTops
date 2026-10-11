@@ -159,23 +159,23 @@ ENV OPERATIONS_CONFIGS_DIR=/app/operations/configs
 # Bootstrap at image build (dockerfile-structure.txt §9) — not container start
 # Build context is /mnt/myssd/LucidTops. operations.secrets is optional.
 # -----------------------------------------------------------------------------
-RUN --mount=type=bind,source=Server/Secrets,target=/mnt/ops-secrets,ro \
-    --mount=type=bind,source=torrc,target=/mnt/ops-torrc,ro \
+RUN --mount=type=bind,source=Server/Secrets,target=/tmp/ops-secrets-mount,ro \
+    --mount=type=bind,source=torrc,target=/tmp/ops-torrc,ro \
     set -eu; \
     mkdir -p /tmp/ops-secrets-src; \
-    cp /mnt/ops-secrets/Master.secrets /tmp/ops-secrets-src/Master.secrets; \
-    cp /mnt/ops-secrets/proxy.secrets /tmp/ops-secrets-src/proxy.secrets; \
-    cp /mnt/ops-secrets/databases.secrets /tmp/ops-secrets-src/databases.secrets; \
-    if [ -s /mnt/ops-secrets/mongodb.secrets ]; then \
-      cp /mnt/ops-secrets/mongodb.secrets /tmp/ops-secrets-src/mongodb.secrets; \
+    cp /tmp/ops-secrets-mount/Master.secrets /tmp/ops-secrets-src/Master.secrets; \
+    cp /tmp/ops-secrets-mount/proxy.secrets /tmp/ops-secrets-src/proxy.secrets; \
+    cp /tmp/ops-secrets-mount/databases.secrets /tmp/ops-secrets-src/databases.secrets; \
+    if [ -s /tmp/ops-secrets-mount/mongodb.secrets ]; then \
+      cp /tmp/ops-secrets-mount/mongodb.secrets /tmp/ops-secrets-src/mongodb.secrets; \
     fi; \
-    if [ -s /mnt/ops-secrets/server.secrets ]; then \
-      cp /mnt/ops-secrets/server.secrets /tmp/ops-secrets-src/server.secrets; \
+    if [ -s /tmp/ops-secrets-mount/server.secrets ]; then \
+      cp /tmp/ops-secrets-mount/server.secrets /tmp/ops-secrets-src/server.secrets; \
     fi; \
-    if [ -s /mnt/ops-secrets/operations.secrets ]; then \
-      cp /mnt/ops-secrets/operations.secrets /tmp/ops-secrets-src/operations.secrets; \
+    if [ -s /tmp/ops-secrets-mount/operations.secrets ]; then \
+      cp /tmp/ops-secrets-mount/operations.secrets /tmp/ops-secrets-src/operations.secrets; \
     fi; \
-    cp /mnt/ops-torrc /tmp/ops-secrets-src/torrc; \
+    cp /tmp/ops-torrc /tmp/ops-secrets-src/torrc; \
     test -f /app/operations/pull_information.py; \
     test -s /tmp/ops-secrets-src/Master.secrets; \
     test -s /tmp/ops-secrets-src/proxy.secrets; \
