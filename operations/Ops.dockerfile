@@ -61,14 +61,18 @@ RUN set -eu; \
       /app/operations/configs \
       /app/operations/logs \
       /app/secrets \
+      /tmp/ops-secrets-src \
       "${LUCID_TOPS_ROOT}" \
       "${LUCID_TOPS_ROOT}/logs/operations" \
       "${LUCID_TOPS_ROOT}/run/operations"; \
+    touch /tmp/ops-secrets-src/.gitkeep; \
     test -d /app/operations; \
     test -d /app/operations/run; \
     test -d /app/operations/configs; \
     test -d /app/operations/logs; \
     test -d /app/secrets; \
+    test -d /tmp/ops-secrets-src; \
+    test -f /tmp/ops-secrets-src/.gitkeep; \
     test -d "${LUCID_TOPS_ROOT}"
 
 # -----------------------------------------------------------------------------
