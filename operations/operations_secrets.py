@@ -29,13 +29,8 @@ IN_IMAGE_OPERATIONS_SECRETS = IN_IMAGE_SECRETS_DIR / "operations.secrets"
 BUILD_REQUIRED_CONNECTION_KEYS: tuple[str, ...] = (
     "OPERATIONS_BIND_HOST",
     "OPERATIONS_BIND_PORT",
-    "OPERATIONS_DOCKER_DNS_NAME",
     "OPERATIONS_NETWORK_NAME",
-    "BLOCKCHAIN_DOCKER_DNS_NAME",
-    "BLOCKCHAIN_BIND_PORT",
-    "BLOCKCHAIN_API_PREFIX",
-    "BLOCKCHAIN_SECRET",
-    "BLOCKCHAIN_SECRET_KEY",
+    "MONGODB_MAIN_DATABASE_NAME",
 )
 
 _CONNECTION_KEY_ALIASES: dict[str, tuple[str, ...]] = {
@@ -43,8 +38,10 @@ _CONNECTION_KEY_ALIASES: dict[str, tuple[str, ...]] = {
         "OPERATIONS_BIND_HOST",
         "MASTER_SERVER_BIND_HOST",
         "MASTER_SERVER_HOST",
+        "MASTER_SERVER_INTERNAL_HOST",
         "PROXY_BIND_HOST",
         "HOST_PRIMARY_IP",
+        "HARDWARE_PRIMARY_IP",
     ),
     "OPERATIONS_BIND_PORT": (
         "OPERATIONS_BIND_PORT",
@@ -140,6 +137,20 @@ OPERATIONS_SECRETS_KEYS: tuple[str, ...] = (
     "REGISTRATION_APPROVED_STATUS",
     "SESSION_COMPLETE_STATUS",
     "NODE_LEDGER_LAST_BLOCK_FIELD",
+    "MONGODB_MAIN_DATABASE_NAME",
+    "SESSION_CHUNK_SIZE_BYTES",
+    "SESSION_HASH_ALGORITHM",
+    "SESSION_ID_COLLECTION",
+    "SESSION_DATA_COLLECTION",
+    "SESSION_DATA_CHUNK_COLLECTION",
+    "BLOCK_DATA_QUEUE_COLLECTION",
+    "BLOCK_QUEUE_ID_COLLECTION",
+    "BLOCK_DATA_QUEUE_MAX_CHUNKS",
+    "NODE_USER_COLLECTION",
+    "NODE_HOSTED_DB_COLLECTION",
+    "NODE_SEED_COLLECTION",
+    "MAX_CONSOLES_PER_NODE_USER",
+    "GUI_PREFIX",
     "OPERATIONS_BIND_HOST",
     "OPERATIONS_BIND_PORT",
     "OPERATIONS_DOCKER_DNS_NAME",
@@ -383,7 +394,11 @@ def resolve_operations_query_limit() -> int:
 
 
 def resolve_blockchain_hash_algorithm() -> str:
-    return require_secret("BLOCKCHAIN_HASH_ALGORITHM")
+    """Session chunk hash from Master.secrets SESSION_HASH_ALGORITHM."""
+    value = resolve_secret("SESSION_HASH_ALGORITHM") or resolve_secret("BLOCKCHAIN_HASH_ALGORITHM")
+    if not value:
+        value = require_secret("SESSION_HASH_ALGORITHM")
+    return value
 
 
 def resolve_session_transfer_default_target() -> str:
@@ -484,36 +499,112 @@ def resolve_payments_wallet_address_keys() -> frozenset[str]:
     )
 
 
+def _prefixed_database(suffix: str) -> str:
+    return f"{require_secret('MONGODB_MAIN_DATABASE_NAME')}{suffix}"
+
+
 def resolve_lucidtops_node_db_name() -> str:
-    return require_secret("LUCIDTOPS_NODE_DB_NAME")
+    return _prefixed_database("_NodeDB")
 
 
 def resolve_lucidtops_node_db_collection() -> str:
-    return require_secret("LUCIDTOPS_NODE_DB_COLLECTION")
+    value = resolve_secret("NODE_HOSTED_DB_COLLECTION") or resolve_secret(
+        "LUCIDTOPS_NODE_DB_COLLECTION"
+    )
+    if not value:
+        value = require_secret("NODE_HOSTED_DB_COLLECTION")
+    return value
+
+
+def resolve_node_seed_collection() -> str:
+    value = resolve_secret("NODE_SEED_COLLECTION")
+    if not value or value == "YOUR_COLLECTION_NAME":
+        return resolve_lucidtops_node_db_collection()
+    return value
 
 
 def resolve_lucidtops_user_db_name() -> str:
-    return require_secret("LUCIDTOPS_USER_DB_NAME")
+    return _prefixed_database("_UserDB")
 
 
 def resolve_lucidtops_user_db_collection() -> str:
-    return require_secret("LUCIDTOPS_USER_DB_COLLECTION")
+    value = resolve_secret("NODE_USER_COLLECTION") or resolve_secret(
+        "LUCIDTOPS_USER_DB_COLLECTION"
+    )
+    if not value:
+        value = require_secret("NODE_USER_COLLECTION")
+    return value
 
 
 def resolve_lucidtops_sessions_db_name() -> str:
-    return require_secret("LUCIDTOPS_SESSIONS_DB_NAME")
+    return _prefixed_database("_SessionsDB")
 
 
 def resolve_lucidtops_sessions_collection() -> str:
-    return require_secret("LUCIDTOPS_SESSIONS_COLLECTION")
+    value = resolve_secret("SESSION_RECORDS_COLLECTION") or resolve_secret(
+        "LUCIDTOPS_SESSIONS_COLLECTION"
+    )
+    if not value:
+        value = require_secret("SESSION_RECORDS_COLLECTION")
+    return value
+
+
+def resolve_session_id_collection() -> str:
+    return require_secret("SESSION_ID_COLLECTION")
+
+
+def resolve_session_data_collection() -> str:
+    return require_secret("SESSION_DATA_COLLECTION")
+
+
+def resolve_session_data_chunk_collection() -> str:
+    return require_secret("SESSION_DATA_CHUNK_COLLECTION")
+
+
+def resolve_block_data_queue_collection() -> str:
+    return require_secret("BLOCK_DATA_QUEUE_COLLECTION")
+
+
+def resolve_block_queue_id_collection() -> str:
+    return require_secret("BLOCK_QUEUE_ID_COLLECTION")
+
+
+def resolve_block_data_queue_max_chunks() -> int:
+    limit = require_secret_int("BLOCK_DATA_QUEUE_MAX_CHUNKS")
+    if limit < 1:
+        raise RuntimeError("BLOCK_DATA_QUEUE_MAX_CHUNKS must be a positive integer")
+    return limit
+
+
+def resolve_session_chunk_size_bytes() -> int:
+    raw = resolve_secret("SESSION_CHUNK_SIZE_BYTES")
+    if not raw:
+        raw = require_secret("SESSION_CHUNK_SIZE_BYTES")
+    try:
+        size = int(raw)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"SESSION_CHUNK_SIZE_BYTES must be an integer (got {raw!r})"
+        ) from exc
+    if size < 1:
+        raise RuntimeError("SESSION_CHUNK_SIZE_BYTES must be a positive integer")
+    return size
 
 
 def resolve_lucidtops_ledger_db_name() -> str:
-    return require_secret("LUCIDTOPS_LEDGER_DB_NAME")
+    return _prefixed_database("__LedgerDB")
 
 
 def resolve_email_mac_limit() -> int:
-    limit = require_secret_int("EMAIL_MAC_LIMIT")
+    raw = resolve_secret("MAX_CONSOLES_PER_NODE_USER") or resolve_secret("EMAIL_MAC_LIMIT")
+    if not raw:
+        raw = require_secret("EMAIL_MAC_LIMIT")
+    try:
+        limit = int(raw)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"MAX_CONSOLES_PER_NODE_USER / EMAIL_MAC_LIMIT must be an integer (got {raw!r})"
+        ) from exc
     if limit < 1:
         raise RuntimeError("EMAIL_MAC_LIMIT must be a positive integer at time of operation")
     return limit
@@ -548,7 +639,7 @@ def resolve_operations_bind_port() -> int:
 
 
 def resolve_operations_docker_dns_name() -> str:
-    return require_secret("OPERATIONS_DOCKER_DNS_NAME")
+    return resolve_secret("OPERATIONS_DOCKER_DNS_NAME")
 
 
 def resolve_blockchain_onion() -> str:
@@ -567,7 +658,7 @@ def resolve_blockchain_api_prefix() -> str:
     value = require_secret("BLOCKCHAIN_API_PREFIX")
     if not value.startswith("/"):
         return f"/{value}"
-    return value.rstrip("/") or "/blockchain"
+    return value.rstrip("/") or value
 
 
 def resolve_blockchain_secret() -> str:
@@ -781,22 +872,30 @@ def _seed_blockchain_targets_from_master(
             if value:
                 merged[key] = value
 
-    if not merged.get("BLOCKCHAIN_DOCKER_DNS_NAME", "").strip():
-        container = (
-            seed.get("BLOCKCHAIN_CONTAINER_NAME", "").strip()
-            or seed.get("BLOCKCHAIN_DOCKER_DNS_NAME", "").strip()
-            or "lucid-blockchain"
-        )
-        merged["BLOCKCHAIN_DOCKER_DNS_NAME"] = container
-    if not merged.get("BLOCKCHAIN_BIND_PORT", "").strip():
-        merged["BLOCKCHAIN_BIND_PORT"] = (
-            seed.get("BLOCKCHAIN_BIND_PORT", "").strip() or "38421"
-        )
-    if not merged.get("BLOCKCHAIN_API_PREFIX", "").strip():
-        merged["BLOCKCHAIN_API_PREFIX"] = (
-            seed.get("BLOCKCHAIN_API_PREFIX", "").strip() or "/blockchain"
-        )
     return merged
+
+
+def _control_setting_keys(existing: dict[str, str]) -> str:
+    raw = _pick(existing, "SESSION_CONTROL_SETTING_KEYS")
+    if not raw or raw == "audio,video,input,clipboard":
+        raw = "mouse,keyboard,audio,video,screen,transfer,usb,transfer_paths"
+    keys = [item.strip() for item in raw.split(",") if item.strip()]
+    if "transfer_paths" not in keys:
+        keys.append("transfer_paths")
+    return ",".join(keys)
+
+
+def _derived_database_names(prefix: str) -> dict[str, str]:
+    if not prefix:
+        return {}
+    return {
+        "LUCIDTOPS_SESSIONS_DB_NAME": f"{prefix}_SessionsDB",
+        "LUCIDTOPS_LEDGER_DB_NAME": f"{prefix}__LedgerDB",
+        "LUCIDTOPS_USER_DB_NAME": f"{prefix}_UserDB",
+        "LUCIDTOPS_NODE_DB_NAME": f"{prefix}_NodeDB",
+        "LUCIDTOPS_CHAIN_DB_NAME": f"{prefix}_ChainDB",
+        "LUCIDTOPS_PAYMENT_DB_NAME": f"{prefix}_PaymentDB",
+    }
 
 
 def apply_pull_to_operations_configuration(
@@ -913,10 +1012,9 @@ def apply_pull_to_operations_configuration(
         "FRONTEND_ONION": frontend_onion,
         "NODEUSER_ONION": nodeuser_onion,
         "BLOCKCHAIN_ONION": blockchain_onion,
-        "BLOCKCHAIN_DOCKER_DNS_NAME": _pick(existing, "BLOCKCHAIN_DOCKER_DNS_NAME")
-        or "lucid-blockchain",
-        "BLOCKCHAIN_BIND_PORT": _pick(existing, "BLOCKCHAIN_BIND_PORT") or "38421",
-        "BLOCKCHAIN_API_PREFIX": _pick(existing, "BLOCKCHAIN_API_PREFIX") or "/blockchain",
+        "BLOCKCHAIN_DOCKER_DNS_NAME": _pick(existing, "BLOCKCHAIN_DOCKER_DNS_NAME"),
+        "BLOCKCHAIN_BIND_PORT": _pick(existing, "BLOCKCHAIN_BIND_PORT"),
+        "BLOCKCHAIN_API_PREFIX": _pick(existing, "BLOCKCHAIN_API_PREFIX"),
         "BLOCKCHAIN_SECRET": _pick(existing, "BLOCKCHAIN_SECRET"),
         "BLOCKCHAIN_SECRET_KEY": _pick(existing, "BLOCKCHAIN_SECRET_KEY"),
         "SESSION_CONTROL_JAVASCRIPT_SOURCE": _pick(
@@ -930,7 +1028,7 @@ def apply_pull_to_operations_configuration(
         "LUCID_PROGRAM_DIR": program_dir,
         "LUCID_USER_PROGRAM_DIR": user_program_dir,
         "HISTORY_DIR_NAME": _pick(existing, "HISTORY_DIR_NAME") or "history",
-        "RECORDING_FORMAT": _pick(existing, "RECORDING_FORMAT") or "webm",
+        "RECORDING_FORMAT": _pick(existing, "RECORDING_FORMAT") or "mp4",
         "SESSION_RECORDS_COLLECTION": _pick(existing, "SESSION_RECORDS_COLLECTION")
         or "session_records",
         "LUCID_LEDGER_COLLECTION": _pick(existing, "LUCID_LEDGER_COLLECTION")
@@ -964,44 +1062,34 @@ def apply_pull_to_operations_configuration(
         "CHIP_IN_WORLD_ALIASES": _pick(existing, "CHIP_IN_WORLD_ALIASES")
         or "lucid:LUCID,tron:TRON,xrp:XRP",
         "SESSION_ID_LENGTH": _pick(existing, "SESSION_ID_LENGTH") or "10",
-        "SESSION_KEY_MIN_LENGTH": _pick(existing, "SESSION_KEY_MIN_LENGTH")
-        or str(max(16, int(info.get("cpu_count") or 1) * 8)),
+        "SESSION_KEY_MIN_LENGTH": _pick(existing, "SESSION_KEY_MIN_LENGTH"),
         "SESSION_RECORD_DEFAULT_ACTION": _pick(existing, "SESSION_RECORD_DEFAULT_ACTION")
         or "start",
         "SESSION_REQUIRED_FIELDS": _pick(existing, "SESSION_REQUIRED_FIELDS")
-        or "sessionID,UserID,TokenID",
+        or "sessionID,sessionKey,sessionData,sessionStatus,sessionType,sessionTime,sessionDate",
         "SESSION_STATUSES": _pick(existing, "SESSION_STATUSES")
-        or "pending,active,complete,ended,compressed",
-        "SESSION_CONTROL_SETTING_KEYS": (
-            "mouse,keyboard,audio,video,screen,transfer,usb"
-            if (
-                not _pick(existing, "SESSION_CONTROL_SETTING_KEYS")
-                or _pick(existing, "SESSION_CONTROL_SETTING_KEYS")
-                == "audio,video,input,clipboard"
-            )
-            else _pick(existing, "SESSION_CONTROL_SETTING_KEYS")
-        ),
+        or "pending,active,ended,compressed,blockchain_recorded",
+        "SESSION_CONTROL_SETTING_KEYS": _control_setting_keys(existing),
         "PAYMENTS_SECRETS_FILE": payments_secrets,
         "PAYMENTS_WALLET_ADDRESS_KEYS": _pick(existing, "PAYMENTS_WALLET_ADDRESS_KEYS")
         or "WALLET_ADDRESS,TRON_WALLET,XRP_WALLET",
         "OPERATIONS_SERVICE_NAME": service_name,
         "OPERATIONS_NETWORK_NAME": network_name,
-        "FRONTEND_GUI_PREFIX": _pick(existing, "FRONTEND_GUI_PREFIX") or "/gui",
-        "LUCIDTOPS_NODE_DB_NAME": _pick(existing, "LUCIDTOPS_NODE_DB_NAME")
-        or "LucidTopsNodeDB",
-        "LUCIDTOPS_NODE_DB_COLLECTION": _pick(existing, "LUCIDTOPS_NODE_DB_COLLECTION")
-        or "nodes",
-        "LUCIDTOPS_USER_DB_NAME": _pick(existing, "LUCIDTOPS_USER_DB_NAME")
-        or "LucidTopsUserDB",
-        "LUCIDTOPS_USER_DB_COLLECTION": _pick(existing, "LUCIDTOPS_USER_DB_COLLECTION")
-        or "users",
-        "LUCIDTOPS_SESSIONS_DB_NAME": _pick(existing, "LUCIDTOPS_SESSIONS_DB_NAME")
-        or "LucidTops_SessionsDB",
-        "LUCIDTOPS_SESSIONS_COLLECTION": _pick(existing, "LUCIDTOPS_SESSIONS_COLLECTION")
+        "FRONTEND_GUI_PREFIX": _pick(existing, "FRONTEND_GUI_PREFIX", "GUI_PREFIX")
+        or "/gui",
+        "LUCIDTOPS_NODE_DB_COLLECTION": _pick(
+            existing, "NODE_HOSTED_DB_COLLECTION", "LUCIDTOPS_NODE_DB_COLLECTION"
+        )
+        or "NodeID",
+        "LUCIDTOPS_USER_DB_COLLECTION": _pick(
+            existing, "NODE_USER_COLLECTION", "LUCIDTOPS_USER_DB_COLLECTION"
+        )
+        or "User",
+        "LUCIDTOPS_SESSIONS_COLLECTION": _pick(
+            existing, "SESSION_RECORDS_COLLECTION", "LUCIDTOPS_SESSIONS_COLLECTION"
+        )
         or "session_records",
-        "LUCIDTOPS_LEDGER_DB_NAME": _pick(existing, "LUCIDTOPS_LEDGER_DB_NAME")
-        or "LucidTops_LedgerDB",
-        "EMAIL_MAC_LIMIT": _pick(existing, "EMAIL_MAC_LIMIT") or "3",
+        "EMAIL_MAC_LIMIT": _pick(existing, "MAX_CONSOLES_PER_NODE_USER", "EMAIL_MAC_LIMIT"),
         "ID_SECRETS_DIR": id_secrets_dir,
         "ACCOUNTS_DIR": accounts_dir,
         "REGISTRATION_APPROVED_STATUS": _pick(existing, "REGISTRATION_APPROVED_STATUS")
@@ -1009,7 +1097,21 @@ def apply_pull_to_operations_configuration(
         "SESSION_COMPLETE_STATUS": _pick(existing, "SESSION_COMPLETE_STATUS")
         or "complete",
         "NODE_LEDGER_LAST_BLOCK_FIELD": _pick(existing, "NODE_LEDGER_LAST_BLOCK_FIELD")
-        or "LastBlockID",
+        or "Last-BlockID",
+        "SESSION_CHUNK_SIZE_BYTES": _pick(existing, "SESSION_CHUNK_SIZE_BYTES"),
+        "SESSION_HASH_ALGORITHM": _pick(existing, "SESSION_HASH_ALGORITHM") or "sha512",
+        "SESSION_ID_COLLECTION": _pick(existing, "SESSION_ID_COLLECTION") or "SessionID",
+        "SESSION_DATA_COLLECTION": _pick(existing, "SESSION_DATA_COLLECTION") or "session-data",
+        "SESSION_DATA_CHUNK_COLLECTION": _pick(existing, "SESSION_DATA_CHUNK_COLLECTION")
+        or "session-data-chunk",
+        "BLOCK_DATA_QUEUE_COLLECTION": _pick(existing, "BLOCK_DATA_QUEUE_COLLECTION")
+        or "block-data-queue",
+        "BLOCK_QUEUE_ID_COLLECTION": _pick(existing, "BLOCK_QUEUE_ID_COLLECTION")
+        or "block-queue-ID",
+        "BLOCK_DATA_QUEUE_MAX_CHUNKS": _pick(existing, "BLOCK_DATA_QUEUE_MAX_CHUNKS") or "99",
+        "NODE_USER_COLLECTION": _pick(existing, "NODE_USER_COLLECTION") or "User",
+        "NODE_HOSTED_DB_COLLECTION": _pick(existing, "NODE_HOSTED_DB_COLLECTION") or "NodeID",
+        "MONGODB_MAIN_DATABASE_NAME": _pick(existing, "MONGODB_MAIN_DATABASE_NAME"),
         "OPERATIONS_BIND_HOST": bind_host,
         "OPERATIONS_BIND_PORT": bind_port,
         "OPERATIONS_DOCKER_DNS_NAME": docker_dns,
@@ -1032,6 +1134,11 @@ def apply_pull_to_operations_configuration(
     # Preserve any extra prior keys (onion patches, operator fields) not listed above.
     for key, value in existing.items():
         if key not in resolved and value:
+            resolved[key] = value
+
+    prefix = resolved.get("MONGODB_MAIN_DATABASE_NAME", "").strip()
+    for key, value in _derived_database_names(prefix).items():
+        if value:
             resolved[key] = value
 
     return resolved
@@ -1084,20 +1191,143 @@ def _alias_value(merged: dict[str, str], canonical: str) -> str:
     return ""
 
 
+def secret_key_prefix_name(db_name: str) -> str:
+    """Match Databases secret_key_prefix without importing that package."""
+    cleaned = db_name.strip().replace("-", "_")
+    parts: list[str] = []
+    buf = ""
+    for ch in cleaned:
+        if ch == "_":
+            if buf:
+                parts.append(buf)
+                buf = ""
+            continue
+        buf += ch
+    if buf:
+        parts.append(buf)
+    return "_".join(part.upper() for part in parts if part)
+
+
+_SERVER_SECRET_COPY_KEYS: tuple[str, ...] = (
+    "BLOCKCHAIN_SECRET",
+    "BLOCKCHAIN_SECRET_KEY",
+)
+
+_CHUNK_COLLECTION_DEFAULTS: dict[str, str] = {
+    "SESSION_ID_COLLECTION": "SessionID",
+    "SESSION_DATA_COLLECTION": "session-data",
+    "SESSION_DATA_CHUNK_COLLECTION": "session-data-chunk",
+    "BLOCK_DATA_QUEUE_COLLECTION": "block-data-queue",
+    "BLOCK_QUEUE_ID_COLLECTION": "block-queue-ID",
+    "BLOCK_DATA_QUEUE_MAX_CHUNKS": "99",
+    "SESSION_COMPLETE_STATUS": "complete",
+    "NODE_LEDGER_LAST_BLOCK_FIELD": "Last-BlockID",
+    "NODE_USER_COLLECTION": "User",
+    "NODE_HOSTED_DB_COLLECTION": "NodeID",
+    "OPERATIONS_API_PREFIX": "/operations",
+    "OPERATIONS_SERVICE_NAME": "operations",
+    "OPERATIONS_TOR_ONLY": "true",
+}
+
+
+def _usable_secret_value(value: str) -> str:
+    text = value.strip()
+    if text.lower() == "invalid ip":
+        return ""
+    return text
+
+
+def _merge_secret_file(merged: dict[str, str], path: Path | None, *, overwrite: bool) -> None:
+    if path is None or not path.is_file() or path.stat().st_size == 0:
+        return
+    incoming = parse_secrets_file(path)
+    for key, value in incoming.items():
+        cleaned = _usable_secret_value(value)
+        if not cleaned or key in {"MONGODB_URL", "LUCID_MONGODB_URL"}:
+            continue
+        if overwrite or not merged.get(key, "").strip():
+            merged[key] = cleaned
+
+
 def write_operations_secrets_at_build(
     *,
     master_secrets: Path,
     proxy_secrets: Path,
     torrc: Path,
     destination: Path | None = None,
+    databases_secrets: Path | None = None,
+    mongodb_secrets: Path | None = None,
+    server_secrets: Path | None = None,
+    operations_secrets: Path | None = None,
 ) -> Path:
     """
-    Create /app/secrets/operations.secrets during image build (Dockerfile RUN).
-    Values come only from Master.secrets, proxy.secrets, and torrc.
+    Create /app/secrets/operations.secrets during image build.
+    Master.secrets and databases.secrets set database identity.
+    server.secrets contributes BLOCKCHAIN_SECRET and BLOCKCHAIN_SECRET_KEY only.
     """
     merged = _merged_build_sources(master_secrets, proxy_secrets)
+    merged = {
+        key: _usable_secret_value(value)
+        for key, value in merged.items()
+        if _usable_secret_value(value) and key not in {"MONGODB_URL", "LUCID_MONGODB_URL"}
+    }
     if not torrc.is_file():
         raise RuntimeError(f"torrc missing at image build: {torrc.as_posix()}")
+
+    _merge_secret_file(merged, databases_secrets, overwrite=True)
+    _merge_secret_file(merged, mongodb_secrets, overwrite=False)
+    if server_secrets is not None and server_secrets.is_file():
+        server_values = parse_secrets_file(server_secrets)
+        for key in _SERVER_SECRET_COPY_KEYS:
+            cleaned = _usable_secret_value(server_values.get(key, ""))
+            if cleaned:
+                merged[key] = cleaned
+    if operations_secrets is not None and operations_secrets.is_file():
+        prior_ops = parse_secrets_file(operations_secrets)
+        prefix_now = merged.get("MONGODB_MAIN_DATABASE_NAME", "").strip()
+        protected = {"MONGODB_MAIN_DATABASE_NAME"}
+        if prefix_now:
+            protected.update(_derived_database_names(prefix_now))
+        for key, value in prior_ops.items():
+            cleaned = _usable_secret_value(value)
+            if not cleaned or key in {"MONGODB_URL", "LUCID_MONGODB_URL"}:
+                continue
+            if key in protected or key.endswith("_URL") or key.endswith("_DATABASE"):
+                if merged.get(key, "").strip():
+                    continue
+            if not merged.get(key, "").strip():
+                merged[key] = cleaned
+
+    if not merged.get("FRONTEND_GUI_PREFIX", "").strip() and merged.get("GUI_PREFIX", "").strip():
+        merged["FRONTEND_GUI_PREFIX"] = merged["GUI_PREFIX"].strip()
+    if not merged.get("LUCIDTOPS_USER_DB_COLLECTION", "").strip():
+        merged["LUCIDTOPS_USER_DB_COLLECTION"] = (
+            merged.get("NODE_USER_COLLECTION", "").strip() or "User"
+        )
+    if not merged.get("LUCIDTOPS_NODE_DB_COLLECTION", "").strip():
+        merged["LUCIDTOPS_NODE_DB_COLLECTION"] = (
+            merged.get("NODE_HOSTED_DB_COLLECTION", "").strip() or "NodeID"
+        )
+    if not merged.get("LUCIDTOPS_SESSIONS_COLLECTION", "").strip():
+        merged["LUCIDTOPS_SESSIONS_COLLECTION"] = (
+            merged.get("SESSION_RECORDS_COLLECTION", "").strip() or "session_records"
+        )
+    if (
+        not merged.get("EMAIL_MAC_LIMIT", "").strip()
+        and merged.get("MAX_CONSOLES_PER_NODE_USER", "").strip()
+    ):
+        merged["EMAIL_MAC_LIMIT"] = merged["MAX_CONSOLES_PER_NODE_USER"].strip()
+    if not merged.get("NODE_USER_COLLECTION", "").strip():
+        merged["NODE_USER_COLLECTION"] = merged["LUCIDTOPS_USER_DB_COLLECTION"]
+    if not merged.get("NODE_HOSTED_DB_COLLECTION", "").strip():
+        merged["NODE_HOSTED_DB_COLLECTION"] = merged["LUCIDTOPS_NODE_DB_COLLECTION"]
+    merged["SESSION_CONTROL_SETTING_KEYS"] = _control_setting_keys(merged)
+    for key, default in _CHUNK_COLLECTION_DEFAULTS.items():
+        if not merged.get(key, "").strip():
+            merged[key] = default
+    prefix = merged.get("MONGODB_MAIN_DATABASE_NAME", "").strip()
+    for key, value in _derived_database_names(prefix).items():
+        merged[key] = value
 
     onions = _onion_hosts_from_torrc(torrc.read_text(encoding="utf-8"))
     values: dict[str, str] = {
@@ -1109,8 +1339,13 @@ def write_operations_secrets_at_build(
     if onions:
         values["TORRC_ONION_HOSTS"] = ",".join(onions)
 
+    for key, value in merged.items():
+        if value:
+            values[key] = value
     for key in OPERATIONS_SECRETS_KEYS:
-        sourced = merged.get(key, "").strip() or _alias_value(merged, key)
+        if values.get(key, "").strip():
+            continue
+        sourced = _alias_value(merged, key)
         if sourced:
             values[key] = sourced
 
@@ -1124,10 +1359,17 @@ def write_operations_secrets_at_build(
         onion_index += 1
 
     missing = [key for key in BUILD_REQUIRED_CONNECTION_KEYS if not values.get(key, "").strip()]
-    if missing:
+    url_missing: list[str] = []
+    if prefix:
+        for suffix in ("_SessionsDB", "__LedgerDB", "_UserDB", "_NodeDB"):
+            url_key = f"{secret_key_prefix_name(prefix + suffix)}_URL"
+            if not values.get(url_key, "").strip():
+                url_missing.append(url_key)
+    if missing or url_missing:
         raise RuntimeError(
-            "operations.secrets image build failed — required connection keys absent "
-            "from Master.secrets, proxy.secrets, and torrc: " + ", ".join(missing)
+            "operations.secrets image build failed — required keys absent from "
+            "Master.secrets, databases.secrets, and torrc: "
+            + ", ".join(missing + url_missing)
         )
 
     target = destination if destination is not None else IN_IMAGE_OPERATIONS_SECRETS

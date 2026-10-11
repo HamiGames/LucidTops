@@ -36,12 +36,9 @@ from _common import (
 from UserHandler import verify_user_credentials
 from recorder import list_recordings, start_recording
 from session import (
-    agree_session,
-    compress_session,
     connect_session,
     create_session,
     disconnect_session,
-    end_session,
     find_session,
     record_session_event,
     transfer_session_metadata,
@@ -97,7 +94,7 @@ if BaseModel is not object:
             min_length=resolve_session_id_length(),
             max_length=resolve_session_id_length(),
         )
-        session_key: str = Field(..., alias="sessionKey", min_length=resolve_session_key_min_length())
+        session_key: str | None = Field(default=None, alias="sessionKey")
 
         model_config = {"populate_by_name": True}
 
@@ -126,12 +123,14 @@ if BaseModel is not object:
         model_config = {"populate_by_name": True}
 
     class SessionControlPayload(SessionScopedPayload):
-        host_user_id: str | None = Field(default=None, alias="hostUserID")
+        host_user_id: str | None = Field(default=None, alias="Host_UserID")
         modification_request: dict[str, Any] | None = None
         session_settings: dict[str, Any] | None = Field(default=None, alias="Session_settings")
 
 
-def _require_operator_and_user(payload: Any, client: Any) -> dict[str, Any]:
+def _require_operator_and_user(
+    payload: Any, client: Any, *, verify_user: bool = True
+) -> dict[str, Any]:
     operator = require_operations_operator(
         client=client,
         **operator_kwargs_from_payload(payload),
@@ -139,7 +138,7 @@ def _require_operator_and_user(payload: Any, client: Any) -> dict[str, Any]:
     user_id = getattr(payload, "user_id", None)
     user_token = getattr(payload, "user_token_id", None)
     user = None
-    if user_id and user_token:
+    if verify_user and user_id and user_token:
         user = verify_user_credentials(
             user_id=user_id,
             token_id=user_token,
@@ -154,11 +153,14 @@ def _dispatch(route: str) -> Any:
         if client is None:
             raise RuntimeError("Master server database is unavailable")
         try:
-            auth = _require_operator_and_user(payload, client)
+            auth = _require_operator_and_user(
+                payload, client, verify_user=route != "/session-end"
+            )
             if route == "/session-create":
                 result = create_session(
                     host_user_id=payload.user_id,
                     id_token=payload.user_token_id,
+                    client=client,
                 )
             elif route == "/session-find":
                 if payload.user_id:
@@ -167,46 +169,34 @@ def _dispatch(route: str) -> Any:
                         searcher_user_id=payload.user_id,
                     )
                 else:
-                    result = find_session(session_id=payload.session_id)
+                    result = find_session(session_id=payload.session_id, client=client)
             elif route == "/session-connect":
                 result = connect_session(
                     session_id=payload.session_id,
                     session_key=payload.session_key,
                     user_id=payload.user_id,
                     id_token=payload.user_token_id,
-                )
-                agree_session(
-                    session_id=payload.session_id,
-                    user_id=payload.user_id,
-                    id_token=payload.user_token_id,
+                    client=client,
                 )
             elif route == "/session-disconnect":
                 result = disconnect_session(
                     session_id=payload.session_id,
                     user_id=payload.user_id,
                     id_token=payload.user_token_id,
+                    client=client,
                 )
             elif route == "/session-end":
-                result = end_session(
+                result = process_complete_session_to_block(
                     session_id=payload.session_id,
-                    host_user_id=payload.user_id,
-                    id_token=payload.user_token_id,
+                    client=client,
+                    **operator_kwargs_from_payload(payload),
                 )
-                result["compression"] = compress_session(session_id=payload.session_id)
-                try:
-                    result["new_block"] = process_complete_session_to_block(
-                        session_id=payload.session_id,
-                        client=client,
-                        **operator_kwargs_from_payload(payload),
-                    )
-                except ValueError:
-                    # Session may not yet be marked complete in DB; compression still returned.
-                    result["new_block"] = None
             elif route == "/session-record":
                 record_session_event(
                     session_id=payload.session_id,
                     user_id=payload.user_id,
                     action=payload.action,
+                    client=client,
                 )
                 recording = start_recording(
                     session_id=payload.session_id,
@@ -220,6 +210,7 @@ def _dispatch(route: str) -> Any:
                 result = transfer_session_metadata(
                     session_id=payload.session_id,
                     target=payload.target,
+                    client=client,
                 )
             elif route == "/session-control":
                 result = get_session_control_for_route(

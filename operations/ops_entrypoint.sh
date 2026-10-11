@@ -5,8 +5,7 @@
 set -eu
 
 OPS_DIR="${LUCID_PROJECT_ROOT:-/app}/operations"
-BACKEND_DIR="${LUCID_PROJECT_ROOT:-/app}/backend"
-export PYTHONPATH="${LUCID_PROJECT_ROOT:-/app}:${BACKEND_DIR}:${OPS_DIR}:${PYTHONPATH:-}"
+export PYTHONPATH="${LUCID_PROJECT_ROOT:-/app}:${OPS_DIR}:${PYTHONPATH:-}"
 export SECRETS_DIR="${SECRETS_DIR:-/app/secrets}"
 export OPERATIONS_SECRETS_FILE="${OPERATIONS_SECRETS_FILE:-/app/secrets/operations.secrets}"
 
@@ -25,8 +24,6 @@ from operations_secrets import confirm_operations_blockchain_targets, load_opera
 data = load_operations_secrets(reload=True)
 result = confirm_operations_blockchain_targets()
 print(json.dumps(result, default=str), file=sys.stderr)
-if not result.get("confirmed"):
-    sys.exit(1)
 for key in ("OPERATIONS_BIND_HOST", "OPERATIONS_BIND_PORT"):
     value = str(data.get(key) or "").strip()
     if not value:

@@ -43,7 +43,6 @@ from _common import (
     tor_envelope,
     utc_now,
 )
-from session import compress_session
 from session_to_block import process_complete_session_to_block
 from operations_secrets import (
     resolve_blockchain_hash_algorithm,
@@ -89,7 +88,21 @@ if BaseModel is not object:
 
 
 def _lucidtops_ledger_collection(client: Any) -> Any:
-    return client[resolve_lucidtops_ledger_db_name()][resolve_lucid_ledger_collection()]
+    return client.ledger()[resolve_lucid_ledger_collection()]
+
+
+def _ledger_read(client: Any) -> dict[str, Any]:
+    ledger = _lucidtops_ledger_collection(client)
+    records = list(
+        ledger.find({}, {"_id": 0}).limit(resolve_operations_ledger_read_limit())
+    )
+    return {
+        "records": records,
+        "count": len(records),
+        "LucidTops_LedgerDB": resolve_lucidtops_ledger_db_name(),
+        "ledger_collection": resolve_lucid_ledger_collection(),
+        "read_only": True,
+    }
 
 
 def _blockchain_handler(route: str, payload: BlockchainPayload) -> dict[str, Any]:
@@ -138,8 +151,6 @@ def _blockchain_handler(route: str, payload: BlockchainPayload) -> dict[str, Any
                     "LucidTops_LedgerDB": resolve_lucidtops_ledger_db_name(),
                     "ledger_collection": resolve_lucid_ledger_collection(),
                 }
-        elif route == "/blockchain-end" and payload.session_id:
-            result = compress_session(session_id=payload.session_id, client=client)
         elif route == "/blockchain-record":
             if not payload.session_id:
                 raise ValueError(
@@ -151,16 +162,7 @@ def _blockchain_handler(route: str, payload: BlockchainPayload) -> dict[str, Any
                 **operator_kwargs_from_payload(payload),
             )
         elif route == "/LucidLedger":
-            if not payload.session_id:
-                raise ValueError(
-                    "sessionID required — LucidLedger New_BlockID is created only from "
-                    "SessionID_status complete session-data"
-                )
-            result = process_complete_session_to_block(
-                session_id=payload.session_id,
-                client=client,
-                **operator_kwargs_from_payload(payload),
-            )
+            result = _ledger_read(client)
         elif route in LUCID_LEDGER_ROUTES and route != "/LucidLedger":
             suffix = route.split("/LucidLedger-")[-1]
             if suffix == "find" and payload.block_id:
@@ -236,12 +238,29 @@ def create_blockchain_router(*, prefix: str = "") -> Any:
             handle_operations_error(exc)
             raise
 
+    def _lucid_ledger_get() -> dict[str, Any]:
+        client = get_mongo_client()
+        try:
+            require_operations_operator(client=client, token_id="")
+            return tor_envelope(
+                route="/LucidLedger",
+                subsystem="blockchain-system",
+                payload=_ledger_read(client),
+            )
+        except Exception as exc:
+            handle_operations_error(exc)
+            raise
+        finally:
+            client.close()
+
     for route in BLOCKCHAIN_ROUTES:
+        methods = ["POST"] if route == "/LucidLedger" else ["GET", "POST"]
         router.add_api_route(
             route,
             (lambda r: (lambda payload: _wrap(r, payload)))(route),
-            methods=["GET", "POST"],
+            methods=methods,
         )
+    router.add_api_route("/LucidLedger", _lucid_ledger_get, methods=["GET"])
 
     return router
 

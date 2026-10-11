@@ -16,9 +16,8 @@ from typing import Any
 
 OPERATIONS_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = OPERATIONS_DIR.parent
-BACKEND_DIR = PROJECT_ROOT / "backend"
 
-for path in (PROJECT_ROOT, OPERATIONS_DIR, BACKEND_DIR):
+for path in (PROJECT_ROOT, OPERATIONS_DIR):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
@@ -82,6 +81,16 @@ def create_app() -> Any:
         docs_url=None,
         redoc_url=None,
     )
+
+    @app.middleware("http")
+    async def bind_lucid_request_headers(request: Any, call_next: Any) -> Any:
+        from _common import bind_lucid_headers
+
+        bind_lucid_headers(
+            user_id=request.headers.get("X-Lucid-UserID", ""),
+            token_id=request.headers.get("X-Lucid-TokenID", ""),
+        )
+        return await call_next(request)
     app.state.operations_docker_dns = resolve_operations_docker_dns_name()
     app.state.operations_network = resolve_operations_network_name()
     app.state.tor_only = resolve_operations_tor_only()

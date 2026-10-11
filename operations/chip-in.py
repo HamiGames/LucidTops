@@ -52,9 +52,7 @@ from _common import (
     APIRouter,
     BaseModel,
     Field,
-    LUCID_LEDGER_COLLECTION,
     OperatorAuthPayload,
-    get_master_db,
     get_mongo_client,
     handle_operations_error,
     operator_kwargs_from_payload,
@@ -64,9 +62,9 @@ from _common import (
     with_mongo,
 )
 from UserHandler import verify_user_credentials
-from config import LUCID_TOPS_ROOT
 from operations_secrets import (
     resolve_chip_in_collection,
+    resolve_secret,
     resolve_chip_in_connected_status,
     resolve_chip_in_crossover_collection,
     resolve_chip_in_crossover_worlds,
@@ -166,7 +164,7 @@ def create_chip_in(
         "created_at": now,
         "updated_at": now,
     }
-    get_master_db(client)[CHIP_IN_COLLECTION].insert_one(record)
+    client.payment()[CHIP_IN_COLLECTION].insert_one(record)
     return {
         "chipInID": chip_in_id,
         "UserID": user_id,
@@ -177,7 +175,7 @@ def create_chip_in(
 
 @with_mongo
 def find_chip_in(*, chip_in_id: str, client: Any) -> dict[str, Any]:
-    record = get_master_db(client)[CHIP_IN_COLLECTION].find_one(
+    record = client.payment()[CHIP_IN_COLLECTION].find_one(
         {"chipInID": chip_in_id.strip()}, {"_id": 0}
     )
     if not record:
@@ -203,7 +201,7 @@ def connect_chip_in(
     verify_user_credentials(user_id=user_id, token_id=id_token, client=client)
     if not external_address or not external_address.strip():
         raise ValueError("external_address is required")
-    record = get_master_db(client)[CHIP_IN_COLLECTION].find_one(
+    record = client.payment()[CHIP_IN_COLLECTION].find_one(
         {"chipInID": chip_in_id.strip()}
     )
     if not record:
@@ -213,7 +211,7 @@ def connect_chip_in(
     now = utc_now()
     address = external_address.strip()
     connected_status = resolve_chip_in_connected_status()
-    get_master_db(client)[CHIP_IN_COLLECTION].update_one(
+    client.payment()[CHIP_IN_COLLECTION].update_one(
         {"chipInID": chip_in_id.strip()},
         {
             "$set": {
@@ -232,7 +230,7 @@ def connect_chip_in(
         "created_at": now,
         "updated_at": now,
     }
-    get_master_db(client)[CHIP_IN_CROSSOVER_COLLECTION].update_one(
+    client.payment()[CHIP_IN_CROSSOVER_COLLECTION].update_one(
         {"chipInID": chip_in_id.strip()},
         {"$set": crossover},
         upsert=True,
@@ -273,7 +271,7 @@ def register_crossover_address(
         "created_at": now,
         "updated_at": now,
     }
-    get_master_db(client)[CHIP_IN_CROSSOVER_COLLECTION].update_one(
+    client.payment()[CHIP_IN_CROSSOVER_COLLECTION].update_one(
         {"UserID": user_id, "crossover_world": world},
         {"$set": record},
         upsert=True,
@@ -291,7 +289,7 @@ def list_crossover_worlds() -> dict[str, Any]:
 @with_mongo
 def chip_in_status(*, chip_in_id: str, client: Any) -> dict[str, Any]:
     record = find_chip_in(chip_in_id=chip_in_id, client=client)
-    crossover = get_master_db(client)[CHIP_IN_CROSSOVER_COLLECTION].find_one(
+    crossover = client.payment()[CHIP_IN_CROSSOVER_COLLECTION].find_one(
         {"chipInID": chip_in_id.strip()}, {"_id": 0}
     )
     return {
@@ -311,7 +309,7 @@ def record_chip_in_event(
     action: str,
     client: Any,
 ) -> dict[str, Any]:
-    record = get_master_db(client)[CHIP_IN_COLLECTION].find_one(
+    record = client.payment()[CHIP_IN_COLLECTION].find_one(
         {"chipInID": chip_in_id.strip()}
     )
     if not record:
@@ -319,7 +317,7 @@ def record_chip_in_event(
     events = list(record.get("events") or [])
     event = {"action": action, "userID": user_id, "timestamp": utc_now()}
     events.append(event)
-    get_master_db(client)[CHIP_IN_COLLECTION].update_one(
+    client.payment()[CHIP_IN_COLLECTION].update_one(
         {"chipInID": chip_in_id.strip()},
         {"$set": {"events": events, "updated_at": utc_now()}},
     )
@@ -328,18 +326,73 @@ def record_chip_in_event(
 
 @with_mongo
 def transfer_chip_in_to_ledger(*, chip_in_id: str, client: Any) -> dict[str, Any]:
+    from blockchain_client import call_blockchain_create
+    from id_secrets import resolve_operator_from_id_secrets
+    from session_to_block import transport_ledger_to_master_and_node
+
     record = find_chip_in(chip_in_id=chip_in_id, client=client)
-    if record.get("status") != resolve_chip_in_connected_status():
-        raise ValueError("Chip-in must be connected before ledger transfer")
+    status = str(record.get("status") or "").strip()
+    allowed = {resolve_chip_in_connected_status()}
+    if "complete" in resolve_chip_in_statuses():
+        allowed.add("complete")
+    if status not in allowed:
+        raise ValueError("Chip-in must be connected or complete before ledger transfer")
+    binding = resolve_operator_from_id_secrets()
+    operator = {
+        "id_type": binding["id_type"],
+        "operator_id": binding["operator_id"],
+        "TokenID": binding["TokenID"],
+    }
+    id_type = str(operator["id_type"]).lower()
+    if "node" in id_type:
+        actor_type = "node_user"
+        node_user_id = str(operator["operator_id"])
+    else:
+        actor_type = "master_server"
+        node_user_id = None
+    creation = call_blockchain_create(
+        actor_type=actor_type,
+        node_user_id=node_user_id,
+        invoker=str(operator["id_type"]),
+        packet=[
+            {
+                "chipInID": chip_in_id.strip(),
+                "crossover_world": record.get("crossover_world"),
+                "external_address": record.get("external_address"),
+                "record_type": "chip_in_crossover",
+                "chunks": [],
+                "chunk_count": 0,
+            }
+        ],
+    )
+    ledger_doc = creation.get("ledger_doc") if isinstance(creation.get("ledger_doc"), dict) else {}
+    block_id = str(
+        ledger_doc.get("BlockID") or creation.get("BlockID") or creation.get("blockID") or ""
+    ).strip()
+    if not block_id:
+        raise RuntimeError("blockchain create did not return BlockID")
+    now = utc_now()
+    block = creation.get("block") if isinstance(creation.get("block"), dict) else {}
     payload = {
+        "BlockID": block_id,
+        "creator_id": operator["operator_id"],
+        "creator_id_type": operator["id_type"],
+        "creation_timestamp": block.get("confirmed_at") or block.get("created_at") or now,
+        "Rewards": int(block.get("block_reward") or creation.get("lucid_tokens_minted") or 0),
+        "LastBlockID": block.get("previous_block_hash"),
+        "Session-data-count": 0,
         "chipInID": chip_in_id.strip(),
         "crossover_world": record.get("crossover_world"),
         "external_address": record.get("external_address"),
         "record_type": "chip_in_crossover",
-        "created_at": utc_now(),
+        "status": "committed",
+        "committed_at": now,
     }
-    get_master_db(client)[LUCID_LEDGER_COLLECTION].insert_one(payload)
-    return payload
+    return transport_ledger_to_master_and_node(
+        client=client,
+        ledger_doc=payload,
+        operator=operator,
+    )
 
 
 @with_mongo
@@ -378,7 +431,7 @@ def handle_chip_in(
         return {
             "payments_secrets_file": str(PAYMENTS_SECRETS_FILE.as_posix()),
             "wallet_configured": address is not None,
-            "lucid_tops_root": str(LUCID_TOPS_ROOT.as_posix()),
+            "lucid_tops_root": resolve_secret("LUCID_TOPS_ROOT"),
         }
     if not user_id or not id_token:
         raise ValueError("UserID and IDToken are required for chip-in actions")

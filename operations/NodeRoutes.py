@@ -49,7 +49,6 @@ from _common import (
     Field,
     OperatorAuthPayload,
     BaseModel,
-    get_master_db,
     get_mongo_client,
     handle_operations_error,
     operator_kwargs_from_payload,
@@ -57,8 +56,9 @@ from _common import (
     tor_envelope,
     utc_now,
 )
-from NodeDbSchema import NODE_HOSTED_DB_COLLECTION, NODE_SEED_COLLECTION
 from operations_secrets import (
+    resolve_lucidtops_node_db_collection,
+    resolve_node_seed_collection,
     node_ledger_db_name_for_id,
     resolve_lucid_ledger_collection,
     resolve_lucidtops_ledger_db_name,
@@ -121,7 +121,7 @@ if BaseModel is not object:
 
 
 def _lucidtops_ledger_collection(client: Any) -> Any:
-    return client[resolve_lucidtops_ledger_db_name()][resolve_lucid_ledger_collection()]
+    return client.ledger()[resolve_lucid_ledger_collection()]
 
 
 def _ledger_action(
@@ -164,7 +164,7 @@ def _ledger_action(
             records = list(
                 ledger.find({}, {"_id": 0}).limit(resolve_operations_ledger_read_limit())
             )
-            node_ledger = client[node_ledger_db_name_for_id(operator["operator_id"])]
+            node_ledger = client.node_ledger(operator["operator_id"])
             last_field = resolve_node_ledger_last_block_field()
             meta = node_ledger["ledger_meta"].find_one({"_meta": True}, {"_id": 0}) or {}
             return {
@@ -210,8 +210,10 @@ def _node_handler(route: str, payload: Any) -> dict[str, Any]:
             client=client,
             **operator_kwargs_from_payload(payload),
         )
-        db = get_master_db(client)
+        db = client.node()
         now = utc_now()
+        hosted = resolve_lucidtops_node_db_collection()
+        seed_name = resolve_node_seed_collection()
         if route == "/node-create":
             node_database_id = operator["operator_id"]
             record = {
@@ -220,24 +222,24 @@ def _node_handler(route: str, payload: Any) -> dict[str, Any]:
                 "UserID": getattr(payload, "user_id", None),
                 "TokenID": operator["TokenID"],
                 "NodeDatabaseID": node_database_id,
-                "email": operator["email"],
-                "mac": operator["mac"],
+                "Email": operator["email"],
+                "Registered_MAC_IDs": operator["mac"],
                 "created_at": now,
                 "updated_at": now,
             }
-            db[NODE_SEED_COLLECTION].update_one(
+            db[seed_name].update_one(
                 {"NodeID": operator["operator_id"]},
                 {"$set": record},
                 upsert=True,
             )
-            db[NODE_HOSTED_DB_COLLECTION].update_one(
+            db[hosted].update_one(
                 {"NodeID": operator["operator_id"]},
                 {"$set": record},
                 upsert=True,
             )
             result = {"status": "created", **record}
         elif route == "/node-find":
-            record = db[NODE_SEED_COLLECTION].find_one(
+            record = db[seed_name].find_one(
                 {"NodeID": operator["operator_id"]}, {"_id": 0}
             )
             if not record:

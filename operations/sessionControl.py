@@ -51,7 +51,8 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-from _common import SESSION_RECORDS_COLLECTION, get_master_db, utc_now, with_mongo
+from _common import utc_now, with_mongo
+from session import host_user_id, session_query, session_records
 from operations_secrets import (
     resolve_session_control_javascript_source,
     resolve_session_control_setting_keys,
@@ -100,12 +101,10 @@ def load_session_control(
     initial_settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Load host settings.js controls. Participants may read. Only the host may set them once."""
-    record = get_master_db(client)[SESSION_RECORDS_COLLECTION].find_one(
-        {"sessionID": session_id.strip()}
-    )
+    record = session_records(client).find_one(session_query(session_id))
     if not record:
         raise LookupError("Session not found")
-    actual_host = str(record.get("hostUserID") or "")
+    actual_host = host_user_id(record)
     participants = list(record.get("userIDs") or [])
     if host_user_id != actual_host and host_user_id not in participants:
         raise PermissionError("Only a session participant may read session control settings")
@@ -118,10 +117,11 @@ def load_session_control(
             block_modification_attempt(actor=host_user_id, requested_changes=initial_settings)
         settings = _bool_controls(initial_settings)
         paths = _transfer_paths(initial_settings.get("transfer_paths"))
-        get_master_db(client)[SESSION_RECORDS_COLLECTION].update_one(
-            {"sessionID": session_id.strip()},
+        session_records(client).update_one(
+            session_query(session_id),
             {
                 "$set": {
+                    "Session_settings": settings,
                     "session_control_settings": settings,
                     "transfer_paths": paths,
                     "session_control_locked": True,
@@ -129,18 +129,17 @@ def load_session_control(
                 }
             },
         )
-        record = get_master_db(client)[SESSION_RECORDS_COLLECTION].find_one(
-            {"sessionID": session_id.strip()}
-        ) or record
+        record = session_records(client).find_one(session_query(session_id)) or record
         locked = True
     else:
-        stored = record.get("session_control_settings")
+        stored = record.get("Session_settings") or record.get("session_control_settings")
         settings = _freeze_settings(stored if isinstance(stored, dict) else default_control_settings())
         if not stored:
-            get_master_db(client)[SESSION_RECORDS_COLLECTION].update_one(
-                {"sessionID": session_id.strip()},
+            session_records(client).update_one(
+                session_query(session_id),
                 {
                     "$set": {
+                        "Session_settings": settings,
                         "session_control_settings": settings,
                         "updated_at": utc_now(),
                     }

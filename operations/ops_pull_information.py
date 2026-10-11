@@ -17,9 +17,8 @@ from typing import Any
 
 OPERATIONS_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = OPERATIONS_DIR.parent
-BACKEND_DIR = PROJECT_ROOT / "backend"
 
-for path in (PROJECT_ROOT, OPERATIONS_DIR, BACKEND_DIR):
+for path in (PROJECT_ROOT, OPERATIONS_DIR):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 

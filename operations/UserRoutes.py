@@ -31,15 +31,14 @@ RULES of CODE CREATION:
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 from _common import (
     APIRouter,
     BaseModel,
     Field,
-    LUCID_LEDGER_COLLECTION,
     OperatorAuthPayload,
-    get_master_db,
     get_mongo_client,
     handle_operations_error,
     model_validator,
@@ -51,15 +50,15 @@ from _common import (
     verify_user_id_token,
 )
 from UserHandler import verify_user_credentials
-from WebPageLink import frontend_link_for_api_route
 from operations_secrets import (
+    resolve_blockchain_hash_algorithm,
     resolve_blockchain_onion,
     resolve_lucid_ledger_collection,
     resolve_lucidtops_ledger_db_name,
     resolve_operations_api_prefix,
     resolve_operations_ledger_read_limit,
+    resolve_secret,
     resolve_session_id_length,
-    resolve_session_key_min_length,
     resolve_user_register_javascript_source,
     resolve_user_session_transfer_default_target,
 )
@@ -67,11 +66,12 @@ from session import (
     connect_session,
     create_session,
     disconnect_session,
-    end_session,
     find_session,
+    mark_session_complete,
     record_session_event,
     transfer_session_metadata,
 )
+from session_to_block import process_complete_session_to_block
 from sessionControl import get_session_control_for_route
 
 USER_ROUTES: tuple[str, ...] = (
@@ -128,6 +128,8 @@ if BaseModel is not object:
         email: str = Field(..., min_length=3)  # type: ignore[reportIncompatibleVariableOverride]
         password: str = Field(..., min_length=8)
         source: str = Field(default_factory=resolve_user_register_javascript_source)
+        tier_selected: int | None = Field(default=None, alias="Tier_selected")
+        max_sessions: int | None = Field(default=None, alias="max-sessions")
 
         model_config = {"populate_by_name": True}
 
@@ -144,7 +146,7 @@ if BaseModel is not object:
             min_length=resolve_session_id_length(),
             max_length=resolve_session_id_length(),
         )
-        session_key: str = Field(..., alias="sessionKey", min_length=resolve_session_key_min_length())
+        session_key: str | None = Field(default=None, alias="sessionKey")
 
         model_config = {"populate_by_name": True}
 
@@ -163,15 +165,16 @@ if BaseModel is not object:
         report: str = Field(default_factory=str)
 
 
+def _hash_user_value(value: str) -> str:
+    return hashlib.new(resolve_blockchain_hash_algorithm(), value.encode("utf-8")).hexdigest()
+
+
 def _attach_frontend_link(result: dict[str, Any], route: str) -> None:
-    """Attach Tor-compatible javascript frontend linkage when mapped for this route."""
-    link = frontend_link_for_api_route(route)
-    frontend = link.get("frontend")
-    if frontend:
-        result["frontend"] = frontend
-    javascript = link.get("javascript")
-    if javascript:
-        result["javascript"] = javascript
+    """GUI linkage uses FRONTEND_GUI_PREFIX. Page files are not appended here."""
+    del route
+    gui_prefix = resolve_secret("FRONTEND_GUI_PREFIX") or resolve_secret("GUI_PREFIX")
+    if gui_prefix:
+        result["gui_prefix"] = gui_prefix
 
 
 def _user_handler(route: str, payload: Any) -> dict[str, Any]:
@@ -190,7 +193,7 @@ def _user_handler(route: str, payload: Any) -> dict[str, Any]:
                 client=client,
             ):
                 raise PermissionError("UserID / TokenID verification failed")
-            ledger_db = client[resolve_lucidtops_ledger_db_name()]
+            ledger_db = client.ledger()
             ledger_collection = resolve_lucid_ledger_collection()
             records = list(
                 ledger_db[ledger_collection]
@@ -217,24 +220,27 @@ def _user_handler(route: str, payload: Any) -> dict[str, Any]:
             **operator_kwargs_from_payload(payload),
         )
         users = user_accounts_collection(client)
-        db = get_master_db(client)
 
         if route == "/user-create":
-            existing = users.find_one({"email": payload.email})
+            email_hash = _hash_user_value(payload.email)
+            existing = users.find_one({"$or": [{"Email": email_hash}, {"email": payload.email}]})
             if existing:
                 raise ValueError("User already exists")
-            # UserID and TokenID are created at time of operation (not placeholders).
             import secrets as _secrets
 
             user_id = _secrets.token_hex(8)
             token_id = _secrets.token_urlsafe(32)
             now = utc_now()
+            tier = getattr(payload, "tier_selected", None)
             users.insert_one(
                 {
                     "UserID": user_id,
                     "TokenID": token_id,
-                    "email": payload.email,
-                    "password": payload.password,
+                    "Email": email_hash,
+                    "Password": _hash_user_value(payload.password),
+                    "Tier_selected": tier,
+                    "session-count": 0,
+                    "max-sessions": getattr(payload, "max_sessions", None),
                     "created_at": now,
                     "updated_at": now,
                     "source": payload.source,
@@ -285,44 +291,51 @@ def _user_handler(route: str, payload: Any) -> dict[str, Any]:
             result = create_session(
                 host_user_id=payload.user_id,
                 id_token=payload.user_token_id,
+                client=client,
             )
         elif route == "/user-session-find":
-            result = find_session(session_id=payload.session_id)
+            result = find_session(session_id=payload.session_id, client=client)
         elif route == "/user-session-connect":
             result = connect_session(
                 session_id=payload.session_id,
                 session_key=payload.session_key,
                 user_id=payload.user_id,
                 id_token=payload.user_token_id,
+                client=client,
             )
         elif route == "/user-session-disconnect":
             result = disconnect_session(
                 session_id=payload.session_id,
                 user_id=payload.user_id,
                 id_token=payload.user_token_id,
+                client=client,
             )
         elif route == "/user-session-end":
-            result = end_session(
+            mark_session_complete(session_id=payload.session_id, client=client)
+            result = process_complete_session_to_block(
                 session_id=payload.session_id,
-                host_user_id=payload.user_id,
-                id_token=payload.user_token_id,
+                client=client,
+                **operator_kwargs_from_payload(payload),
             )
         elif route == "/user-session-record":
             result = record_session_event(
                 session_id=payload.session_id,
                 user_id=payload.user_id,
                 action="user-session-record",
+                client=client,
             )
         elif route == "/user-session-report":
             result = record_session_event(
                 session_id=payload.session_id,
                 user_id=payload.user_id,
                 action=f"report:{getattr(payload, 'report', '')}",
+                client=client,
             )
         elif route == "/user-session-transfer":
             result = transfer_session_metadata(
                 session_id=payload.session_id,
                 target=resolve_user_session_transfer_default_target(),
+                client=client,
             )
         elif route == "/user-session-control":
             result = get_session_control_for_route(

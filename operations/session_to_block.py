@@ -19,11 +19,8 @@ from __future__ import annotations
 from typing import Any
 
 from _common import (
-    chunk_session_data,
-    get_master_db,
     require_operations_operator,
     utc_now,
-    verify_chunk_hashes,
     with_mongo,
 )
 from blockchain_client import call_blockchain_create
@@ -31,12 +28,24 @@ from operations_secrets import (
     node_ledger_db_name_for_id,
     resolve_blockchain_hash_algorithm,
     resolve_blockchain_onion,
+    resolve_block_data_queue_collection,
+    resolve_block_data_queue_max_chunks,
+    resolve_block_queue_id_collection,
     resolve_lucid_ledger_collection,
     resolve_lucidtops_ledger_db_name,
-    resolve_lucidtops_sessions_collection,
-    resolve_lucidtops_sessions_db_name,
     resolve_node_ledger_last_block_field,
+    resolve_session_chunk_size_bytes,
     resolve_session_complete_status,
+    resolve_session_data_chunk_collection,
+    resolve_session_data_collection,
+    resolve_session_id_collection,
+)
+from session import (
+    handoff_status_allowed,
+    host_user_id,
+    session_query,
+    session_records,
+    session_status_value,
 )
 
 # Fields that must match between Master LucidTops_LedgerDB and NodeID_LedgerDB.
@@ -51,46 +60,22 @@ _LEDGER_PARITY_FIELDS: tuple[str, ...] = (
 
 
 def _sessions_collection(client: Any) -> Any:
-    return client[resolve_lucidtops_sessions_db_name()][
-        resolve_lucidtops_sessions_collection()
-    ]
+    return session_records(client)
 
 
 def _ledger_db(client: Any) -> Any:
-    return client[resolve_lucidtops_ledger_db_name()]
+    return client.ledger()
 
 
 def _find_complete_session(client: Any, session_id: str) -> dict[str, Any]:
     complete = resolve_session_complete_status()
     collection = _sessions_collection(client)
-    record = collection.find_one(
-        {
-            "$or": [
-                {"SessionID": session_id},
-                {"sessionID": session_id},
-            ]
-        }
-    )
-    if not record:
-        master = get_master_db(client)
-        record = master[resolve_lucidtops_sessions_collection()].find_one(
-            {
-                "$or": [
-                    {"SessionID": session_id},
-                    {"sessionID": session_id},
-                ]
-            }
-        )
+    record = collection.find_one(session_query(session_id))
     if not record:
         raise LookupError(f"SessionID not found: {session_id}")
 
-    status_value = str(
-        record.get("SessionID_status")
-        or record.get("session_status")
-        or record.get("status")
-        or ""
-    ).strip()
-    if status_value != complete:
+    status_value = session_status_value(record)
+    if not handoff_status_allowed(status_value):
         raise ValueError(
             f"SessionID_status must be {complete!r} before chunking "
             f"(got {status_value!r})"
@@ -231,7 +216,7 @@ def transport_ledger_to_master_and_node(
 
     last_field = resolve_node_ledger_last_block_field()
     node_ledger_name = node_ledger_db_name_for_id(operator["operator_id"])
-    node_ledger = client[node_ledger_name]
+    node_ledger = client.node_ledger(operator["operator_id"])
     node_blocks = node_ledger["blocks"]
     node_block_id_coll = node_ledger[ledger_collection_name]
     _refuse_if_block_id_exists(
@@ -244,8 +229,10 @@ def transport_ledger_to_master_and_node(
         block_id=block_id,
         store_label=f"{node_ledger_name}.{ledger_collection_name}",
     )
-    node_blocks.insert_one(dict(transport_doc))
-    node_block_id_coll.insert_one(dict(transport_doc))
+    node_doc = dict(transport_doc)
+    node_doc[last_field] = block_id
+    node_blocks.insert_one(dict(node_doc))
+    node_block_id_coll.insert_one(dict(node_doc))
     # LastBlockID pointer only — not BlockID history.
     node_ledger["ledger_meta"].update_one(
         {"_meta": True},
@@ -279,6 +266,160 @@ def transport_ledger_to_master_and_node(
     }
 
 
+def _hash_bytes(payload: bytes) -> str:
+    import hashlib
+
+    algorithm = resolve_blockchain_hash_algorithm()
+    return hashlib.new(algorithm, payload).hexdigest()
+
+
+def chunk_session_payload(record: dict[str, Any], *, session_id: str) -> dict[str, Any]:
+    """blockchain/chunker.py shape: chunk_hash and data_b64. Size is SESSION_CHUNK_SIZE_BYTES."""
+    import base64
+    import json
+
+    size = resolve_session_chunk_size_bytes()
+    raw = json.dumps(record, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
+    chunks: list[dict[str, Any]] = []
+    offset = 0
+    index = 0
+    while offset < len(raw):
+        piece = raw[offset : offset + size]
+        chunks.append(
+            {
+                "index": index,
+                "offset": offset,
+                "size": len(piece),
+                "chunk_hash": _hash_bytes(piece),
+                "data_b64": base64.b64encode(piece).decode("ascii"),
+            }
+        )
+        offset += size
+        index += 1
+    if not chunks:
+        piece = b""
+        chunks.append(
+            {
+                "index": 0,
+                "offset": 0,
+                "size": 0,
+                "chunk_hash": _hash_bytes(piece),
+                "data_b64": base64.b64encode(piece).decode("ascii"),
+            }
+        )
+    return {
+        "sessionID": session_id,
+        "SessionID": session_id,
+        "chunk_count": len(chunks),
+        "total_bytes": len(raw),
+        "chunk_size": size,
+        "aggregate_hash": _hash_bytes(raw),
+        "hash_algorithm": resolve_blockchain_hash_algorithm(),
+        "chunks": chunks,
+    }
+
+
+def verify_chunk_hashes(chunked: dict[str, Any]) -> bool:
+    import base64
+
+    for row in chunked.get("chunks") or []:
+        raw = base64.b64decode(str(row.get("data_b64") or ""))
+        if _hash_bytes(raw) != str(row.get("chunk_hash") or ""):
+            return False
+    return True
+
+
+def _write_chunk_collections(
+    *,
+    client: Any,
+    session_id: str,
+    record: dict[str, Any],
+    chunked: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Write session-data, chunks, and queues of fewer than BLOCK_DATA_QUEUE_MAX_CHUNKS."""
+    sessions = client.sessions()
+    now = utc_now()
+    host = host_user_id(record)
+    viewer = str(record.get("Viewer_UserID") or record.get("viewerUserID") or "")
+    data_id = f"{session_id}:{chunked.get('aggregate_hash')}"
+    sessions[resolve_session_data_collection()].insert_one(
+        {
+            "SessionID": session_id,
+            "Host_UserID": host,
+            "Viewer_UserID": viewer,
+            "payload": _session_payload_for_chunking(record),
+            "Status": resolve_session_complete_status(),
+            "created_at": now,
+            "aggregate_hash": chunked.get("aggregate_hash"),
+        }
+    )
+    sessions[resolve_session_id_collection()].update_one(
+        session_query(session_id),
+        {
+            "$set": {
+                "SessionID": session_id,
+                "Host_UserID": host,
+                "Viewer_UserID": viewer,
+                "SessionID_status": session_status_value(record),
+                "session-data-ref": data_id,
+                "updated_at": now,
+            }
+        },
+        upsert=True,
+    )
+    chunks = list(chunked.get("chunks") or [])
+    limit = resolve_block_data_queue_max_chunks()
+    groups = [chunks[index : index + limit] for index in range(0, len(chunks), limit)] or [[]]
+    queues: list[dict[str, Any]] = []
+    chunk_collection = sessions[resolve_session_data_chunk_collection()]
+    queue_collection = sessions[resolve_block_data_queue_collection()]
+    queue_id_collection = sessions[resolve_block_queue_id_collection()]
+    for group_index, group in enumerate(groups):
+        refs: list[str] = []
+        for row in group:
+            chunk_id = f"{session_id}:{group_index}:{row.get('index')}"
+            chunk_collection.insert_one(
+                {
+                    "chunk_id": chunk_id,
+                    "SessionID": session_id,
+                    "session-data-ref": data_id,
+                    "chunk_index": row.get("index"),
+                    "compressed_payload": row.get("data_b64"),
+                    "chunk_hash": row.get("chunk_hash"),
+                    "created_at": now,
+                }
+            )
+            refs.append(chunk_id)
+        queue_id = f"{session_id}:queue:{group_index}"
+        queue_collection.insert_one(
+            {
+                "block-queue-ID": queue_id,
+                "chunk_refs": refs,
+                "chunk_count": len(refs),
+                "status": "queued",
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+        queue_id_collection.insert_one(
+            {
+                "block-queue-ID": queue_id,
+                "block-data-queue-ref": queue_id,
+                "awaiting_block": True,
+                "target_BlockID": None,
+                "created_at": now,
+            }
+        )
+        queues.append(
+            {
+                "block-queue-ID": queue_id,
+                "chunk_count": len(refs),
+                "chunks": group,
+            }
+        )
+    return queues
+
+
 @with_mongo
 def convert_complete_session_to_chunks(
     *,
@@ -286,13 +427,20 @@ def convert_complete_session_to_chunks(
     client: Any,
 ) -> dict[str, Any]:
     record = _find_complete_session(client, session_id)
-    chunked = chunk_session_data(_session_payload_for_chunking(record))
+    chunked = chunk_session_payload(_session_payload_for_chunking(record), session_id=session_id)
     if not verify_chunk_hashes(chunked):
         raise RuntimeError("session chunk hash verification failed")
+    queues = _write_chunk_collections(
+        client=client,
+        session_id=session_id,
+        record=record,
+        chunked=chunked,
+    )
     return {
         "SessionID": session_id,
         "SessionID_status": resolve_session_complete_status(),
         "chunked": chunked,
+        "queues": queues,
     }
 
 
@@ -313,35 +461,48 @@ def create_new_block_from_session(
     chunked = chunk_result["chunked"]
     now = utc_now()
     actor_type, node_user_id = _actor_for_operator(operator)
+    queues = list(chunk_result.get("queues") or [])
+    if not queues:
+        queues = [{"chunks": chunked.get("chunks") or [], "chunk_count": chunked.get("chunk_count")}]
 
-    packet = [
-        {
-            "sessionID": session_id,
-            "aggregate_hash": chunked.get("aggregate_hash"),
-            "chunks": chunked.get("chunks") or [],
-            "chunk_count": chunked.get("chunk_count"),
-        }
-    ]
-
-    creation = call_blockchain_create(
-        actor_type=actor_type,
-        node_user_id=node_user_id,
-        invoker=actor_type,
-        reported_memory_gb=reported_memory_gb,
-        packet=packet,
-    )
-
-    ledger_doc = _ledger_doc_from_create_result(
-        creation=creation,
-        session_id=session_id,
-        chunked=chunked,
-        now=now,
-    )
-    transport = transport_ledger_to_master_and_node(
-        client=client,
-        ledger_doc=ledger_doc,
-        operator=operator,
-    )
+    creation: dict[str, Any] = {}
+    transport: dict[str, Any] = {}
+    ledger_doc: dict[str, Any] = {}
+    for queue in queues:
+        group = list(queue.get("chunks") or [])
+        packet = [
+            {
+                "sessionID": session_id,
+                "SessionID": session_id,
+                "aggregate_hash": chunked.get("aggregate_hash"),
+                "chunks": group,
+                "chunk_count": len(group),
+                "block-queue-ID": queue.get("block-queue-ID"),
+            }
+        ]
+        creation = call_blockchain_create(
+            actor_type=actor_type,
+            node_user_id=node_user_id,
+            invoker=operator.get("id_type") or actor_type,
+            reported_memory_gb=reported_memory_gb,
+            packet=packet,
+        )
+        group_chunked = dict(chunked)
+        group_chunked["chunk_count"] = len(group)
+        group_chunked["chunks"] = group
+        ledger_doc = _ledger_doc_from_create_result(
+            creation=creation,
+            session_id=session_id,
+            chunked=group_chunked,
+            now=now,
+        )
+        ledger_doc["creator_id"] = operator.get("operator_id")
+        ledger_doc["creator_id_type"] = operator.get("id_type")
+        transport = transport_ledger_to_master_and_node(
+            client=client,
+            ledger_doc=ledger_doc,
+            operator=operator,
+        )
 
     block_id = transport["BlockID"]
     last_field = resolve_node_ledger_last_block_field()

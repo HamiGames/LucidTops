@@ -22,21 +22,18 @@ def pull_information():
 
 
 def write_in_image_secrets() -> Path:
-    """Create /app/secrets/operations.secrets during image build."""
-    if CONSOLE_COPY.is_file() and CONSOLE_COPY.stat().st_size > 0:
-        IN_IMAGE.parent.mkdir(parents=True, exist_ok=True)
-        IN_IMAGE.write_text(CONSOLE_COPY.read_text(encoding="utf-8"), encoding="utf-8")
-        if IN_IMAGE.stat().st_size == 0:
-            raise RuntimeError(
-                f"operations.secrets was not written at {IN_IMAGE.as_posix()}"
-            )
-        return IN_IMAGE
+    """Create /app/secrets/operations.secrets during image build from console secrets."""
     from operations_secrets import write_operations_secrets_at_build
 
+    source = Path("/tmp/ops-secrets-src")
     return write_operations_secrets_at_build(
-        master_secrets=Path("/tmp/ops-secrets-src/Master.secrets"),
-        proxy_secrets=Path("/tmp/ops-secrets-src/proxy.secrets"),
-        torrc=Path("/tmp/ops-secrets-src/torrc"),
+        master_secrets=source / "Master.secrets",
+        proxy_secrets=source / "proxy.secrets",
+        torrc=source / "torrc",
+        databases_secrets=source / "databases.secrets",
+        mongodb_secrets=source / "mongodb.secrets",
+        server_secrets=source / "server.secrets",
+        operations_secrets=source / "operations.secrets",
     )
 
 

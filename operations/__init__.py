@@ -9,20 +9,12 @@ from typing import Any
 
 OPERATIONS_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = OPERATIONS_DIR.parent
-BACKEND_DIR = PROJECT_ROOT / "backend"
 
-for path in (PROJECT_ROOT, OPERATIONS_DIR, BACKEND_DIR):
+for path in (PROJECT_ROOT, OPERATIONS_DIR):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
 from BlockRoutes import BLOCKCHAIN_ROUTES, create_blockchain_router, register_blockchain_routes
-from NodeDbSchema import (
-    NODE_DB_SCHEMA_FIELDS,
-    NODE_HOSTED_DB_COLLECTION,
-    NODE_SEED_COLLECTION,
-    NODE_SEED_FIELDS,
-    schema_template as node_db_schema_template,
-)
 from DatabaseRoutes import DATABASE_ROUTES, create_database_router, register_database_routes
 from NodeRoutes import NODE_ROUTES, create_node_router, register_node_routes
 from SessionRoutes import SESSION_ROUTES, create_session_router, register_session_routes
@@ -45,11 +37,7 @@ __all__ = (
     "BLOCKCHAIN_ROUTES",
     "CHIP_IN_ROUTES",
     "DATABASE_ROUTES",
-    "NODE_DB_SCHEMA_FIELDS",
-    "NODE_HOSTED_DB_COLLECTION",
     "NODE_ROUTES",
-    "NODE_SEED_COLLECTION",
-    "NODE_SEED_FIELDS",
     "SESSION_ROUTES",
     "USER_ROUTES",
     "create_blockchain_router",
@@ -59,7 +47,6 @@ __all__ = (
     "create_session_router",
     "create_user_router",
     "handle_chip_in",
-    "node_db_schema_template",
     "register_chip_in_routes",
     "register_operations_routes",
     "register_blockchain_routes",

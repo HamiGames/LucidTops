@@ -41,7 +41,6 @@ from _common import (
     BaseModel,
     Field,
     OperatorAuthPayload,
-    get_master_db,
     get_mongo_client,
     handle_operations_error,
     operator_kwargs_from_payload,
@@ -51,8 +50,9 @@ from _common import (
     tor_envelope,
     utc_now,
 )
-from NodeDbSchema import NODE_HOSTED_DB_COLLECTION, NODE_SEED_COLLECTION
 from operations_secrets import (
+    resolve_lucidtops_node_db_collection,
+    resolve_node_seed_collection,
     resolve_node_seed_files_collection,
     resolve_operations_api_prefix,
     resolve_operations_query_limit,
@@ -123,42 +123,23 @@ def _database_handler(route: str, payload: Any) -> dict[str, Any]:
     if client is None:
         raise RuntimeError("Master server database is unavailable")
     try:
-        db = get_master_db(client)
         now = utc_now()
         kwargs = operator_kwargs_from_payload(payload)
 
         if route in MASTER_DATABASE_ROUTES:
             operator = require_master_server_operator(client=client, **kwargs)
             if route == "/database-create":
-                database_id = secrets.token_hex(16)
-                record = {
-                    "databaseID": database_id,
-                    "status": "active",
-                    "created_at": now,
-                    "updated_at": now,
+                names = client.confirm_named_containers()
+                result = {
+                    "status": "confirmed",
+                    "containers": names,
+                    "count": len(names),
                     "creator_id": {operator["id_type"]: operator["operator_id"]},
+                    "created_at": now,
                 }
-                db.master_credentials.update_one(
-                    {"databaseID": database_id},
-                    {"$set": record},
-                    upsert=True,
-                )
-                result = record
             elif route == "/database-find":
-                if payload.database_id:
-                    record = db.master_credentials.find_one(
-                        {"databaseID": payload.database_id}, {"_id": 0}
-                    )
-                    if not record:
-                        raise LookupError("Database not found")
-                    result = record
-                else:
-                    records = list(
-                        db.master_credentials.find(
-                            {"databaseID": {"$exists": True}}, {"_id": 0}
-                        ).limit(resolve_operations_query_limit())
-                    )
-                    result = {"records": records, "count": len(records)}
+                names = client.confirm_named_containers()
+                result = {"records": [{"database": name} for name in names], "count": len(names)}
             else:
                 result = {
                     "databaseID": payload.database_id,
@@ -174,6 +155,9 @@ def _database_handler(route: str, payload: Any) -> dict[str, Any]:
                 operator = require_operations_operator(client=client, **kwargs)
 
             node_key = operator["operator_id"]
+            db = client.node()
+            seed_collection = resolve_node_seed_collection()
+            hosted_collection = resolve_lucidtops_node_db_collection()
             if route == "/database-seed":
                 node_database_id = secrets.token_hex(16)
                 record = {
@@ -185,12 +169,12 @@ def _database_handler(route: str, payload: Any) -> dict[str, Any]:
                     "created_at": now,
                     "updated_at": now,
                 }
-                db[NODE_SEED_COLLECTION].update_one(
+                db[seed_collection].update_one(
                     {"NodeID": node_key},
                     {"$set": record},
                     upsert=True,
                 )
-                db[NODE_HOSTED_DB_COLLECTION].update_one(
+                db[hosted_collection].update_one(
                     {"NodeID": node_key},
                     {"$set": record},
                     upsert=True,
@@ -200,7 +184,7 @@ def _database_handler(route: str, payload: Any) -> dict[str, Any]:
                 query: dict[str, Any] = {"NodeID": node_key}
                 if payload.database_id:
                     query["NodeDatabaseID"] = payload.database_id
-                record = db[NODE_SEED_COLLECTION].find_one(query, {"_id": 0})
+                record = db[seed_collection].find_one(query, {"_id": 0})
                 if not record:
                     raise LookupError("NodeID hosted database not found")
                 result = record
@@ -270,7 +254,7 @@ def _database_handler(route: str, payload: Any) -> dict[str, Any]:
                     "status": "renamed",
                 }
             elif route == "/database-seed-sync":
-                seeds = list(db[NODE_SEED_COLLECTION].find({}, {"_id": 0}))
+                seeds = list(db[seed_collection].find({}, {"_id": 0}))
                 sync_payload = [
                     {
                         "NodeID": seed.get("NodeID") or seed.get("NodeUserID"),

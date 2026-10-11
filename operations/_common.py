@@ -12,39 +12,29 @@ RULES of CODE CREATION:
 from __future__ import annotations
 
 import sys
+from contextvars import ContextVar
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
 OPERATIONS_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = OPERATIONS_DIR.parent
-BACKEND_DIR = PROJECT_ROOT / "backend"
 
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 if str(OPERATIONS_DIR) not in sys.path:
     sys.path.insert(0, str(OPERATIONS_DIR))
-if str(BACKEND_DIR) not in sys.path:
-    sys.path.insert(0, str(BACKEND_DIR))
 
-from config import (  # noqa: E402
-    API_PREFIX,
-    format_tor_onion_service,
-    get_master_db,
-    get_mongo_client,
-    resolve_master_server_onion,
-    utc_now,
-)
-from WebPageLink import frontend_link_for_api_route  # noqa: E402
-from load_module import load_backend_module  # noqa: E402
+from mongo_clients import OpsMongo, open_ops_mongo  # noqa: E402
 from operations_secrets import (  # noqa: E402
     require_secret,
     resolve_blockchain_collection,
     resolve_email_mac_limit,
     resolve_lucid_ledger_collection,
     resolve_lucidtops_node_db_collection,
-    resolve_lucidtops_node_db_name,
     resolve_lucidtops_user_db_collection,
-    resolve_lucidtops_user_db_name,
+    resolve_master_server_onion,
+    resolve_operations_api_prefix,
     resolve_registration_approved_status,
     resolve_session_records_collection,
 )
@@ -55,9 +45,37 @@ from ops_pull_information import (  # noqa: E402
 )
 from id_secrets import resolve_operator_from_id_secrets  # noqa: E402
 
-_data_chunker = load_backend_module("data-chunker.py")
-chunk_session_data = _data_chunker.chunk_session_data
-verify_chunk_hashes = _data_chunker.verify_chunk_hashes
+_lucid_user_id: ContextVar[str] = ContextVar("lucid_user_id", default="")
+_lucid_token_id: ContextVar[str] = ContextVar("lucid_token_id", default="")
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def bind_lucid_headers(*, user_id: str, token_id: str) -> None:
+    _lucid_user_id.set(user_id.strip())
+    _lucid_token_id.set(token_id.strip())
+
+
+def lucid_header_user_id() -> str:
+    return _lucid_user_id.get().strip()
+
+
+def lucid_header_token_id() -> str:
+    return _lucid_token_id.get().strip()
+
+
+def format_tor_onion_service(onion: str, path: str = "") -> str:
+    host = onion.strip().lower().split("/")[0]
+    if not path:
+        return host
+    normalized = path if path.startswith("/") else f"/{path}"
+    return f"{host}{normalized}"
+
+
+def get_mongo_client() -> OpsMongo:
+    return open_ops_mongo()
 
 try:
     from fastapi import APIRouter, HTTPException, status
@@ -98,12 +116,12 @@ def _normalize_mac(mac: str) -> str:
     return "".join(ch for ch in str(mac).upper() if ch.isalnum())
 
 
-def get_node_db(client: Any) -> Any:
-    return client[resolve_lucidtops_node_db_name()]
+def get_node_db(client: OpsMongo) -> Any:
+    return client.node()
 
 
-def get_user_db(client: Any) -> Any:
-    return client[resolve_lucidtops_user_db_name()]
+def get_user_db(client: OpsMongo) -> Any:
+    return client.user()
 
 
 def node_operators_collection(client: Any) -> Any:
@@ -121,15 +139,10 @@ def tor_envelope(
     payload: dict[str, Any] | None = None,
     **extra: Any,
 ) -> dict[str, Any]:
-    """Attach Tor-only metadata and javascript frontend linkage (not clearnet)."""
-    link = frontend_link_for_api_route(route)
+    """Attach Tor metadata. GUI prefix stays GUI_PREFIX (/gui). Paths are not *.html."""
     onion = resolve_master_server_onion()
-    api_segment = link.get("api_path") or route
-    api_path = (
-        api_segment
-        if api_segment.startswith(API_PREFIX)
-        else f"{API_PREFIX}{api_segment if api_segment.startswith('/') else f'/{api_segment}'}"
-    )
+    api_prefix = resolve_operations_api_prefix()
+    api_path = route if route.startswith(api_prefix) else f"{api_prefix}{route}"
     gui_prefix = require_secret("FRONTEND_GUI_PREFIX")
     body: dict[str, Any] = {
         "route": route,
@@ -139,23 +152,12 @@ def tor_envelope(
         "tor_only": True,
         "master_server_onion": onion,
         "timestamp": utc_now(),
+        "api_path": api_path,
+        "gui_path": gui_prefix,
     }
-    if link.get("frontend"):
-        body["frontend"] = link["frontend"]
-        body["javascript"] = link["javascript"]
-    body["api_path"] = api_path
-    if link.get("gui_path"):
-        body["gui_path"] = link["gui_path"]
     if onion:
         body["tor_service"] = format_tor_onion_service(onion, api_path)
-        if link.get("gui_path"):
-            gui_path = link["gui_path"]
-            gui_full = (
-                gui_path
-                if gui_path.startswith(gui_prefix)  # pyright: ignore[reportOptionalMemberAccess]
-                else f"{gui_prefix}{gui_path}"
-            )
-            body["tor_gui_service"] = format_tor_onion_service(onion, str(gui_full))
+        body["tor_gui_service"] = format_tor_onion_service(onion, gui_prefix)
     if payload:
         body.update(payload)
     body.update(extra)
@@ -170,8 +172,6 @@ def with_mongo(handler: Callable[..., dict[str, Any]]) -> Callable[..., dict[str
         owns_client = client is None
         if owns_client:
             client = get_mongo_client()
-            if client is None:
-                raise RuntimeError("Master server database is unavailable")
         try:
             return handler(*args, client=client, **kwargs)
         finally:
@@ -183,7 +183,8 @@ def with_mongo(handler: Callable[..., dict[str, Any]]) -> Callable[..., dict[str
 
 def _extract_mac_list(record: dict[str, Any]) -> list[str]:
     raw = (
-        record.get("mac_ids")
+        record.get("Registered_MAC_IDs")
+        or record.get("mac_ids")
         or record.get("MAC_IDs")
         or record.get("MAC_IDS")
         or record.get("mac_id_list")
@@ -373,6 +374,49 @@ def handle_operations_error(exc: Exception) -> None:
     raise exc
 
 
+def apply_request_identity(data: Any) -> Any:
+    """Map page fields and X-Lucid headers onto the payload before validation."""
+    if not isinstance(data, dict):
+        return data
+    merged = dict(data)
+    op_keys = (
+        "NodeID",
+        "AdminID",
+        "MasterUserID",
+        "MasterServerID",
+        "node_id",
+        "admin_id",
+        "master_user_id",
+        "master_server_id",
+    )
+    has_operator = any(str(merged.get(key) or "").strip() for key in op_keys)
+    if not str(merged.get("UserID") or merged.get("user_id") or "").strip():
+        header_user = lucid_header_user_id()
+        if header_user:
+            merged["UserID"] = header_user
+    if merged.get("Host_UserID") and not str(merged.get("UserID") or "").strip():
+        merged["UserID"] = merged["Host_UserID"]
+    if merged.get("SessionID") is not None and not str(merged.get("sessionID") or "").strip():
+        merged["sessionID"] = str(merged["SessionID"])
+    if merged.get("sessionID") is not None:
+        merged["sessionID"] = str(merged["sessionID"])
+    if not has_operator:
+        token = str(
+            merged.get("UserTokenID")
+            or merged.get("TokenID")
+            or lucid_header_token_id()
+            or ""
+        ).strip()
+        if token:
+            merged["UserTokenID"] = token
+        merged.pop("TokenID", None)
+    elif not str(merged.get("TokenID") or "").strip():
+        header_token = lucid_header_token_id()
+        if header_token:
+            merged["TokenID"] = header_token
+    return merged
+
+
 if BaseModel is not object:
 
     class OperatorAuthPayload(BaseModel):  # type: ignore[reportIncompatibleMethodOverride]
@@ -380,12 +424,17 @@ if BaseModel is not object:
         admin_id: str | None = Field(default=None, alias="AdminID")
         master_user_id: str | None = Field(default=None, alias="MasterUserID")
         master_server_id: str | None = Field(default=None, alias="MasterServerID")
-        token_id: str = Field(..., alias="TokenID", min_length=1)  # type: ignore[reportUnknownReturnType]
+        token_id: str = Field(default="", alias="TokenID")
         email: str | None = Field(default=None, alias="email")
 
         model_config = {"populate_by_name": True}
 
         if model_validator is not None:
+
+            @model_validator(mode="before")
+            @classmethod
+            def _identity_from_headers(cls, data: Any) -> Any:
+                return apply_request_identity(data)
 
             @model_validator(mode="after")
             def _exactly_one_operator_id(self) -> Any:
@@ -399,7 +448,7 @@ if BaseModel is not object:
                     )
                     if value and str(value).strip()
                 ]
-                if len(present) != 1:
+                if len(present) > 1:
                     raise ValueError(
                         "exactly one of NodeID, AdminID, MasterUserID, or MasterServerID is required"
                     )

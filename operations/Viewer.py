@@ -32,14 +32,12 @@ from typing import Any
 
 _OPERATIONS_DIR = Path(__file__).resolve().parent
 _PROJECT_ROOT = _OPERATIONS_DIR.parent
-_BACKEND_DIR = _PROJECT_ROOT / "backend"
-for path in (_PROJECT_ROOT, _OPERATIONS_DIR, _BACKEND_DIR):
+for path in (_PROJECT_ROOT, _OPERATIONS_DIR):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from _common import SESSION_RECORDS_COLLECTION, get_master_db, with_mongo
-from sessions.searchpeer import peer_search
-from sessions.SessionCore import find_session, validate_session_id
+from _common import with_mongo
+from session import find_session, host_user_id, session_query, session_records, validate_session_id
 
 
 @with_mongo
@@ -47,19 +45,24 @@ def resolve_viewer(*, session_id: str, client: Any) -> dict[str, Any]:
     """Return the current viewer (last joiner) for a session."""
     if not validate_session_id(session_id):
         raise ValueError("A valid sessionID is required")
-    record = get_master_db(client)[SESSION_RECORDS_COLLECTION].find_one(
-        {"sessionID": session_id.strip()}
-    )
+    record = session_records(client).find_one(session_query(session_id))
     if not record:
         raise LookupError("Session not found")
     return {
         "sessionID": session_id.strip(),
-        "hostUserID": record.get("hostUserID"),
-        "viewerUserID": record.get("viewerUserID"),
+        "hostUserID": host_user_id(record),
+        "Host_UserID": host_user_id(record),
+        "viewerUserID": record.get("viewerUserID") or record.get("Viewer_UserID"),
         "role": "viewer" if record.get("viewerUserID") else None,
     }
 
 
+def peer_search(*, session_id: str, searcher_user_id: str) -> dict[str, Any]:
+    found = find_session(session_id=session_id)
+    found["searcherUserID"] = searcher_user_id
+    return found
+
+
 def host_controls_session(*, session_id: str, acting_user_id: str, record: dict[str, Any]) -> bool:
     """Host retains full session control via sessionControl settings."""
-    return record.get("hostUserID") == acting_user_id
+    return host_user_id(record) == acting_user_id

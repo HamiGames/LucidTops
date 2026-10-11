@@ -33,8 +33,9 @@
 #
 # Rebuild rule (§16.7): wipe image/volumes before rebuild.
 # Networks (§16.4): created/joined at operation via dockercmd.txt using names from the in-image secrets.
-# Operators: NodeID | AdminID | MasterUserID | MasterServerID in LucidTopsNodeDB.
-# Runtime deps copied into image: backend (config/pull/load_module) + sessions (chunk/session APIs).
+# Operators: NodeID | AdminID | MasterUserID | MasterServerID in LucidTops_NodeDB.
+# Database URLs are copied from databases.secrets at image build. backend and sessions
+# packages are not copied into this image.
 
 # -----------------------------------------------------------------------------
 # Build-args (declared before FROM for BASE_IMAGE; re-declared after FROM for use)
@@ -63,8 +64,6 @@ RUN set -eu; \
       /app/operations/configs \
       /app/operations/logs \
       /app/secrets \
-      /app/backend \
-      /app/sessions \
       "${LUCID_TOPS_ROOT}" \
       "${LUCID_TOPS_ROOT}/logs/operations" \
       "${LUCID_TOPS_ROOT}/run/operations"; \
@@ -120,19 +119,9 @@ RUN set -eu; \
   if [ ! -d /app/operations/configs ]; then \
     mkdir -p /app/operations/configs; \
     touch /app/operations/configs/.gitkeep; \
-  fi; \
-  if [ ! -d /app/backend ]; then \
-    mkdir -p /app/backend; \
-    touch /app/backend/.gitkeep; \
-  fi; \
-  if [ ! -d /app/sessions ]; then \
-    mkdir -p /app/sessions; \
-    touch /app/sessions/.gitkeep; \
   fi
 
 COPY operations/ /app/operations/
-COPY backend/ /app/backend/
-COPY sessions/ /app/sessions/
 
 RUN set -eu; \
     test -f /app/operations/ops_entrypoint.sh; \
@@ -143,29 +132,19 @@ RUN set -eu; \
     test -f /app/operations/_common.py; \
     test -f /app/operations/session.py; \
     test -f /app/operations/session_to_block.py; \
+    test -f /app/operations/mongo_clients.py; \
     test -s /app/operations/requirements.txt; \
     test -f /app/operations/Ops.dockerfile; \
     test -d /app/operations/run; \
     test -d /app/operations/configs; \
     test -d /app/operations/logs; \
     test -d /app/secrets; \
-    test -d /app/backend; \
-    test -f /app/backend/config.py; \
-    test -f /app/backend/WebPageLink.py; \
-    test -f /app/backend/load_module.py; \
-    test -f /app/backend/pull_information.py; \
-    test -f /app/backend/NodeDbSchema.py; \
-    test -f /app/backend/data-chunker.py; \
-    test -d /app/sessions; \
-    test -f /app/sessions/compress.py; \
-    test -f /app/sessions/SessionCore.py; \
-    test -f /app/sessions/sessionID.py; \
     chmod +x /app/operations/ops_entrypoint.sh /app/operations/ops_pull_information.py
 
 # -----------------------------------------------------------------------------
 # Runtime environment
 # -----------------------------------------------------------------------------
-ENV PYTHONPATH=/app:/app/backend:/app/operations:/app/sessions
+ENV PYTHONPATH=/app:/app/operations
 ENV PYTHONUNBUFFERED=1
 ENV LUCID_PROJECT_ROOT=/app
 ENV LUCID_TOPS_ROOT=${LUCID_TOPS_ROOT}
@@ -180,13 +159,16 @@ ENV OPERATIONS_CONFIGS_DIR=/app/operations/configs
 COPY Server/Secrets/Master.secrets /tmp/ops-secrets-src/Master.secrets
 COPY Server/Secrets/proxy.secrets /tmp/ops-secrets-src/proxy.secrets
 COPY Server/Secrets/operations.secrets /tmp/ops-secrets-src/operations.secrets
+COPY Server/Secrets/databases.secrets /tmp/ops-secrets-src/databases.secrets
+COPY Server/Secrets/mongodb.secrets /tmp/ops-secrets-src/mongodb.secrets
+COPY Server/Secrets/server.secrets /tmp/ops-secrets-src/server.secrets
 COPY torrc /tmp/ops-secrets-src/torrc
 
 RUN set -eu; \
     test -f /app/operations/pull_information.py; \
     test -s /tmp/ops-secrets-src/Master.secrets; \
     test -s /tmp/ops-secrets-src/proxy.secrets; \
-    test -s /tmp/ops-secrets-src/operations.secrets; \
+    test -s /tmp/ops-secrets-src/databases.secrets; \
     test -s /tmp/ops-secrets-src/torrc; \
     python3 /app/operations/pull_information.py --write-image; \
     test -s /app/secrets/operations.secrets

@@ -29,6 +29,7 @@ from operations_secrets import (
 
 
 def resolve_blockchain_governance_base_url() -> str:
+    """http matches the blockchain container URL form. Host, port, and prefix must already be in secrets."""
     host = resolve_blockchain_docker_dns_name()
     port = resolve_blockchain_bind_port()
     prefix = resolve_blockchain_api_prefix().rstrip("/")
