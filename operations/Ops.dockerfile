@@ -17,16 +17,19 @@
 #
 # Secrets (Operations.txt / dockerfile-structure.txt §9) — created at image build (RUN), not at container start:
 #   Internal file: /app/secrets/operations.secrets
-#   Source file copied from the build context:
-#     Server/Secrets/operations.secrets
-#   Also required at image creation (seed of that source file):
+#   Required in the build context:
 #     Server/Secrets/Master.secrets
 #     Server/Secrets/proxy.secrets
+#     Server/Secrets/databases.secrets
 #     torrc
+#   Used when the file is present:
+#     Server/Secrets/mongodb.secrets
+#     Server/Secrets/server.secrets (BLOCKCHAIN_SECRET and BLOCKCHAIN_SECRET_KEY only)
+#     Server/Secrets/operations.secrets
 #   Node / Admin / MasterUser devices read that in-image file. They do not rebuild it.
 #
 # RULES:
-# - connection values are sourced from Master.secrets, proxy.secrets, and torrc at image creation.
+# - connection values are sourced from Master.secrets, databases.secrets, proxy.secrets, and torrc at image creation.
 # - no placeholder fill; a missing required connection key fails the image build.
 # - no sensitive data written at container start.
 # - NO pull from GIT repository.
@@ -154,24 +157,33 @@ ENV OPERATIONS_CONFIGS_DIR=/app/operations/configs
 
 # -----------------------------------------------------------------------------
 # Bootstrap at image build (dockerfile-structure.txt §9) — not container start
-# Literal COPY paths; build context is /mnt/myssd/LucidTops
+# Build context is /mnt/myssd/LucidTops. operations.secrets is optional.
 # -----------------------------------------------------------------------------
-COPY Server/Secrets/Master.secrets /tmp/ops-secrets-src/Master.secrets
-COPY Server/Secrets/proxy.secrets /tmp/ops-secrets-src/proxy.secrets
-COPY Server/Secrets/operations.secrets /tmp/ops-secrets-src/operations.secrets
-COPY Server/Secrets/databases.secrets /tmp/ops-secrets-src/databases.secrets
-COPY Server/Secrets/mongodb.secrets /tmp/ops-secrets-src/mongodb.secrets
-COPY Server/Secrets/server.secrets /tmp/ops-secrets-src/server.secrets
-COPY torrc /tmp/ops-secrets-src/torrc
-
-RUN set -eu; \
+RUN --mount=type=bind,source=Server/Secrets,target=/mnt/ops-secrets,ro \
+    --mount=type=bind,source=torrc,target=/mnt/ops-torrc,ro \
+    set -eu; \
+    mkdir -p /tmp/ops-secrets-src; \
+    cp /mnt/ops-secrets/Master.secrets /tmp/ops-secrets-src/Master.secrets; \
+    cp /mnt/ops-secrets/proxy.secrets /tmp/ops-secrets-src/proxy.secrets; \
+    cp /mnt/ops-secrets/databases.secrets /tmp/ops-secrets-src/databases.secrets; \
+    if [ -s /mnt/ops-secrets/mongodb.secrets ]; then \
+      cp /mnt/ops-secrets/mongodb.secrets /tmp/ops-secrets-src/mongodb.secrets; \
+    fi; \
+    if [ -s /mnt/ops-secrets/server.secrets ]; then \
+      cp /mnt/ops-secrets/server.secrets /tmp/ops-secrets-src/server.secrets; \
+    fi; \
+    if [ -s /mnt/ops-secrets/operations.secrets ]; then \
+      cp /mnt/ops-secrets/operations.secrets /tmp/ops-secrets-src/operations.secrets; \
+    fi; \
+    cp /mnt/ops-torrc /tmp/ops-secrets-src/torrc; \
     test -f /app/operations/pull_information.py; \
     test -s /tmp/ops-secrets-src/Master.secrets; \
     test -s /tmp/ops-secrets-src/proxy.secrets; \
     test -s /tmp/ops-secrets-src/databases.secrets; \
     test -s /tmp/ops-secrets-src/torrc; \
     python3 /app/operations/pull_information.py --write-image; \
-    test -s /app/secrets/operations.secrets
+    test -s /app/secrets/operations.secrets; \
+    rm -rf /tmp/ops-secrets-src
 
 WORKDIR /app/operations
 ENTRYPOINT ["/app/operations/ops_entrypoint.sh"]
