@@ -27,6 +27,7 @@ RULES:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from typing import Any
@@ -42,6 +43,8 @@ from ._common import (
 )
 from .sessionID import (
     resolve_operations_handoff_url,
+    resolve_session_secret,
+    resolve_session_secret_int,
     touch_session_id_log,
     validate_session_id,
 )
@@ -60,40 +63,47 @@ def _try_secret(key: str) -> str:
 
 def _operations_operator_payload() -> dict[str, Any]:
     """
-    Operator identity for operations handoff (NodeID|AdminID|MasterServerID|MasterUserID).
-    Values must exist in env/sessions.secrets at time of operation.
+    Handoff identity is MasterServerID from backend.secrets.
+    OPERATIONS_OPERATOR_TOKEN_ID is not present in Server/Secrets and is not invented.
     """
-    id_type = _env("OPERATIONS_OPERATOR_ID_TYPE") or _try_secret("OPERATIONS_OPERATOR_ID_TYPE")
-    operator_id = _env("OPERATIONS_OPERATOR_ID") or _try_secret("OPERATIONS_OPERATOR_ID")
-    token_id = _env("OPERATIONS_OPERATOR_TOKEN_ID") or _try_secret(
-        "OPERATIONS_OPERATOR_TOKEN_ID"
-    )
-    email = _env("OPERATIONS_OPERATOR_EMAIL") or _try_secret("OPERATIONS_OPERATOR_EMAIL")
-
-    if not id_type or not operator_id or not token_id:
+    operator_id = _env("MASTER_SERVER_ID") or _try_secret("MASTER_SERVER_ID")
+    if not operator_id:
+        operator_id = _env("TALLY_ENTITY_ID_MASTER") or _try_secret("TALLY_ENTITY_ID_MASTER")
+    if not operator_id:
         raise RuntimeError(
-            "operations operator credentials missing — "
-            "OPERATIONS_OPERATOR_ID_TYPE, OPERATIONS_OPERATOR_ID, "
-            "OPERATIONS_OPERATOR_TOKEN_ID must be set at time of operation"
+            "MASTER_SERVER_ID missing — must be seeded from backend.secrets "
+            "before operations handoff"
         )
+    return {"MasterServerID": operator_id}
 
-    payload: dict[str, Any] = {"TokenID": token_id}
-    if email:
-        payload["email"] = email
 
-    type_key_map = {
-        "NodeID": "NodeID",
-        "AdminID": "AdminID",
-        "MasterUserID": "MasterUserID",
-        "MasterServerID": "MasterServerID",
+def _hash_and_chunk(record: dict[str, Any]) -> dict[str, Any]:
+    algorithm = resolve_session_secret("SESSION_HASH_ALGORITHM").lower()
+    if algorithm != "sha512":
+        raise RuntimeError(
+            f"SESSION_HASH_ALGORITHM must be sha512 at time of operation (found {algorithm})"
+        )
+    chunk_size = resolve_session_secret_int("SESSION_CHUNK_SIZE_BYTES")
+    if chunk_size < 1:
+        raise RuntimeError("SESSION_CHUNK_SIZE_BYTES must be >= 1")
+    payload = {
+        key: value
+        for key, value in record.items()
+        if key not in {"_id", "chunked_payload", "aggregate_hash"}
     }
-    key = type_key_map.get(id_type)
-    if not key:
-        raise RuntimeError(
-            f"OPERATIONS_OPERATOR_ID_TYPE invalid at time of operation: {id_type}"
-        )
-    payload[key] = operator_id
-    return payload
+    raw = json.dumps(payload, default=str, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    digest = hashlib.sha512(raw).hexdigest()
+    chunks = [
+        raw[offset : offset + chunk_size].hex()
+        for offset in range(0, len(raw), chunk_size)
+    ] or [""]
+    return {
+        "aggregate_hash": digest,
+        "chunked_payload": chunks,
+        "compressed": True,
+        "chunk_size_bytes": chunk_size,
+        "hash_algorithm": algorithm,
+    }
 
 
 def _post_operations_handoff(*, session_id: str, body: dict[str, Any]) -> dict[str, Any]:
@@ -163,10 +173,10 @@ def handoff_complete_session_to_operations(
     body = {
         **operator,
         "sessionID": session_id.strip(),
-        "SessionID": int(session_id.strip()),
         "UserID": record.get("hostUserID"),
-        "UserTokenID": operator.get("TokenID"),
         "SessionID_status": complete,
+        "aggregate_hash": record.get("aggregate_hash"),
+        "compressed": True,
     }
     result = _post_operations_handoff(session_id=session_id.strip(), body=body)
     handoff_doc = {
@@ -214,27 +224,31 @@ def compress_session(
     complete = complete_status_value()
     status = record.get("SessionID_status") or record.get("sessionStatus")
     if status not in {complete, "ended"}:
-        raise ValueError("Session must have ended/complete before operations handoff")
-
-    if status != complete:
+        raise ValueError("Session must have ended before operations handoff")
+    if status == "ended":
         user_ids = list(record.get("userIDs") or [])
         ended_peers = list(record.get("ended_peers") or [])
-        if user_ids and all(uid in ended_peers for uid in user_ids):
-            session_records_collection(client).update_one(
-                {"sessionID": session_id.strip()},
-                {
-                    "$set": {
-                        "sessionStatus": complete,
-                        "SessionID_status": complete,
-                        "updated_at": utc_now(),
-                    }
-                },
-            )
-            touch_session_id_log(session_id=session_id, status=complete, client=client)
-        else:
-            raise ValueError(
-                "SessionID_status complete requires all peers to end before handoff"
-            )
+        if not user_ids or not all(uid in ended_peers for uid in user_ids):
+            raise ValueError("all peers must end before operations handoff")
+
+    hashed = _hash_and_chunk(record)
+    session_records_collection(client).update_one(
+        {"sessionID": session_id.strip()},
+        {
+            "$set": {
+                "sessionData": hashed["aggregate_hash"],
+                "sessionStatus": complete,
+                "SessionID_status": complete,
+                "aggregate_hash": hashed["aggregate_hash"],
+                "chunked_payload": hashed["chunked_payload"],
+                "compressed": True,
+                "hash_algorithm": hashed["hash_algorithm"],
+                "chunk_size_bytes": hashed["chunk_size_bytes"],
+                "updated_at": utc_now(),
+            }
+        },
+    )
+    touch_session_id_log(session_id=session_id, status=complete, client=client)
 
     handoff = handoff_complete_session_to_operations(
         session_id=session_id.strip(),
@@ -242,8 +256,9 @@ def compress_session(
     )
     return {
         "sessionID": session_id.strip(),
-        "compressed": False,
+        "compressed": True,
+        "aggregate_hash": hashed["aggregate_hash"],
+        "chunk_count": len(hashed["chunked_payload"]),
         "operations_handoff": handoff,
-        "note": "chunk/New_BlockID performed by operations container only",
         "participantUserIDs": list(record.get("userIDs") or []),
     }

@@ -224,9 +224,8 @@ def _empty_session_record(
     now = utc_now()
     return {
         "sessionID": session_id,
-        "SessionID": int(session_id),
         "sessionKey": session_key,
-        "sessionData": {},
+        "sessionData": session_id,
         "sessionStatus": "pending",
         "SessionID_status": "pending",
         "sessionType": resolve_session_type(),
@@ -332,7 +331,6 @@ def create_session(*, host_user_id: str, id_token: str, client: Any) -> dict[str
     )
     return {
         "sessionID": session_id,
-        "SessionID": int(session_id),
         "sessionKey": session_key,
         "hostUserID": host_user_id,
         "sessionStatus": record["sessionStatus"],
@@ -383,7 +381,6 @@ def reconnect_session(
     )
     return {
         "sessionID": new_id,
-        "SessionID": int(new_id),
         "sessionKey": session_key,
         "hostUserID": user_id,
         "seed_session_id": session_id.strip(),
@@ -401,8 +398,7 @@ def find_session(*, session_id: str, client: Any) -> dict[str, Any]:
     if not record:
         raise LookupError("Session not found")
     return {
-        "sessionID": record["sessionID"],
-        "SessionID": record.get("SessionID", int(record["sessionID"])),
+        "sessionID": str(record["sessionID"]),
         "sessionStatus": record.get("sessionStatus"),
         "SessionID_status": record.get("SessionID_status", record.get("sessionStatus")),
         "hostUserID": record.get("hostUserID"),
@@ -439,7 +435,6 @@ def validate_session_for_rdp(
         "status": "validated",
         "session_id": session_id.strip(),
         "sessionID": session_id.strip(),
-        "SessionID": int(session_id.strip()),
         "user_id": user_id,
         "UserID": user_id,
         "is_participant": is_participant,
@@ -765,12 +760,14 @@ def end_session(*, session_id: str, host_user_id: str, id_token: str, client: An
         "ended_peers": ended_peers,
     }
     if status_value == complete:
-        from .compress import handoff_complete_session_to_operations
+        from .compress import compress_session
 
-        result["operations_handoff"] = handoff_complete_session_to_operations(
-            session_id=session_id.strip(),
-            client=client,
-        )
+        compressed = compress_session(session_id=session_id.strip(), client=client)
+        result["operations_handoff"] = compressed.get("operations_handoff")
+        result["aggregate_hash"] = compressed.get("aggregate_hash")
+        result["compressed"] = True
+        result["sessionStatus"] = complete
+        result["SessionID_status"] = complete
     return result
 
 
@@ -825,7 +822,6 @@ def transfer_session_metadata(
         )
     payload = {
         "sessionID": record.get("sessionID"),
-        "SessionID": record.get("SessionID"),
         "target": target,
         "SessionID_status": status,
         "transferred_at": utc_now(),

@@ -14,21 +14,14 @@ export PYTHONPATH="${LUCID_PROJECT_ROOT:-/app}:${BACKEND_DIR}:${SESSIONS_DIR}:${
 LUCID_TOPS_ROOT="${LUCID_TOPS_ROOT:-/mnt/myssd/LucidTops}"
 export LUCID_TOPS_ROOT
 
-# Seed sources (Proxy Bootstrap → Server/Secrets). Accept Proxy.secrets or proxy.secrets.
+# Seed sources (Server/Secrets). The Pi file is proxy.secrets.
 SERVER_SECRETS_DIR="${MASTER_SECRETS_DIR:-${SERVER_SECRETS_DIR:-${LUCID_TOPS_ROOT}/Server/Secrets}}"
 export SERVER_SECRETS_DIR
 export MASTER_SECRETS_DIR="${MASTER_SECRETS_DIR:-${SERVER_SECRETS_DIR}}"
 export MASTER_SECRETS_FILE="${MASTER_SECRETS_FILE:-${SERVER_SECRETS_DIR}/Master.secrets}"
-if [ -z "${PROXY_SECRETS_FILE:-}" ]; then
-  if [ -f "${SERVER_SECRETS_DIR}/proxy.secrets" ]; then
-    PROXY_SECRETS_FILE="${SERVER_SECRETS_DIR}/proxy.secrets"
-  elif [ -f "${SERVER_SECRETS_DIR}/Proxy.secrets" ]; then
-    PROXY_SECRETS_FILE="${SERVER_SECRETS_DIR}/Proxy.secrets"
-  else
-    PROXY_SECRETS_FILE="${SERVER_SECRETS_DIR}/proxy.secrets"
-  fi
-fi
-export PROXY_SECRETS_FILE
+export PROXY_SECRETS_FILE="${PROXY_SECRETS_FILE:-${SERVER_SECRETS_DIR}/proxy.secrets}"
+export DATABASES_SECRETS_FILE="${DATABASES_SECRETS_FILE:-${SERVER_SECRETS_DIR}/databases.secrets}"
+export BACKEND_SECRETS_FILE="${BACKEND_SECRETS_FILE:-${SERVER_SECRETS_DIR}/backend.secrets}"
 
 # Sessions write target is the Pi console Server/Secrets directory.
 export SECRETS_DIR="${SERVER_SECRETS_DIR}"
@@ -54,6 +47,14 @@ if [ -z "${SESSIONS_SECRETS_FILE:-}" ] || [ ! -f "${SESSIONS_SECRETS_FILE}" ]; t
   echo "SESSIONS_SECRETS_FILE missing after write — ${SESSIONS_SECRETS_FILE:-unset}" >&2
   exit 1
 fi
+
+# Replace the pull environment with the written sessions.secrets values.
+# This drops a stale Master.secrets MONGODB_URL that the pull may have exported.
+REFRESH_ENV="$(mktemp)"
+python -c "from Config_sessions import export_sessions_secrets_shell; export_sessions_secrets_shell()" > "${REFRESH_ENV}"
+# shellcheck disable=SC1090
+. "${REFRESH_ENV}"
+rm -f "${REFRESH_ENV}"
 
 # Refresh bind + network from written sessions.secrets (seeded from Master/proxy).
 SESSIONS_BIND_HOST="$(grep -E '^SESSIONS_BIND_HOST=' "${SESSIONS_SECRETS_FILE}" | head -1 | cut -d= -f2-)"

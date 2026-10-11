@@ -24,7 +24,7 @@ compatibility requirements:
 other:
 - no place holder values, all values are created at time of operation.
 - all code will be configurable from outside the container (via the DockerfileDNS) and stored on the Host Machine (hardward using a configurable Path)
-- all configuration files names will use the Path (mnt/myssd/LucidTops/secrets) and the file name will be the container name (sessions.secrets)
+- all configuration files names will use the Path (/mnt/myssd/LucidTops/Server/Secrets) and the file name will be the container name (sessions.secrets)
 
 RULES:
 - No hardcoded values, all values are created at time of operation.
@@ -91,14 +91,16 @@ SESSIONS_SECRETS_REQUIRED_KEYS: tuple[str, ...] = (
     "SESSIONS_BIND_PORT",
     "SESSIONS_DOCKER_DNS_NAME",
     "SESSIONS_SERVICE_NAME",
-    "SESSIONS_NETWORK_NAME",
+    "DOCKER_NETWORK_NAME",
     "LUCIDTOPS_SESSIONS_DB_NAME",
+    "LUCIDTOPS_SESSIONS_DB_URL",
     "LUCIDTOPS_SESSIONS_COLLECTION",
     "LUCIDTOPS_SESSIONS_ID_LOG_COLLECTION",
+    "MASTER_MONGODB_URL",
+    "MASTER_MONGODB_DATABASE",
     "HARDWARE_PRIMARY_IP",
     "HARDWARE_PRIMARY_MAC",
     "OPERATIONS_DOCKER_DNS_NAME",
-    "OPERATIONS_BIND_PORT",
     "OPERATIONS_URL_SCHEME",
     "OPERATIONS_SESSION_HANDOFF_PATH",
 )
@@ -207,8 +209,8 @@ def _normalize_route(route: str) -> str:
 
 def _normalize_api_prefix(prefix: str) -> str:
     cleaned = prefix.strip()
-    if not cleaned:
-        raise RuntimeError("SESSION_API_PREFIX missing — must be set at time of operation")
+    if cleaned in {"", "/"}:
+        return ""
     if not cleaned.startswith("/"):
         cleaned = f"/{cleaned}"
     normalized = cleaned.rstrip("/")
@@ -259,7 +261,12 @@ def resolve_finalised_statuses() -> frozenset[str]:
 
 
 def resolve_session_api_prefix() -> str:
-    return _normalize_api_prefix(resolve_session_secret("SESSION_API_PREFIX"))
+    if "SESSION_API_PREFIX" in os.environ:
+        return _normalize_api_prefix(os.environ.get("SESSION_API_PREFIX", ""))
+    loaded = load_sessions_secrets()
+    if "SESSION_API_PREFIX" in loaded:
+        return _normalize_api_prefix(loaded.get("SESSION_API_PREFIX", ""))
+    raise RuntimeError("SESSION_API_PREFIX missing — must be set at time of operation")
 
 
 def resolve_session_create_api_route() -> str:
@@ -358,7 +365,7 @@ def resolve_sessions_service_name() -> str:
 
 
 def resolve_sessions_network_name() -> str:
-    return resolve_session_secret("SESSIONS_NETWORK_NAME")
+    return resolve_session_secret("DOCKER_NETWORK_NAME")
 
 
 def resolve_operations_handoff_url() -> str:
@@ -600,7 +607,6 @@ def log_session_id(
     now = utc_now()
     entry = {
         "sessionID": session_id.strip(),
-        "SessionID": int(session_id.strip()),
         "hostUserID": host_user_id,
         "userIDs": list(user_ids or [host_user_id]),
         "source": source or resolve_session_id_log_source(),
@@ -678,7 +684,6 @@ def create_session_id_request(
     )
     return {
         "sessionID": session_id,
-        "SessionID": int(session_id),
         "hostUserID": host_user_id.strip(),
         "userIDs": ids,
         "status": "pending",
@@ -715,13 +720,22 @@ def remove_stale_session_ids(*, client: Any) -> dict[str, Any]:
 
 @with_mongo
 def audit_inactive_tally_session_ids(*, client: Any) -> dict[str, Any]:
-    """Flag NodeUserIDs linked to inactive tally sessionIDs (NodeGov.py)."""
+    """Flag NodeUserIDs linked to tally sessionIDs past the inactivity window."""
     db = get_master_db(client)
     finalised = resolve_finalised_statuses()
+    days = resolve_session_inactivity_days()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    live_statuses = {"pending", "active"}
     flagged: list[dict[str, Any]] = []
     for doc in session_id_log_collection(client).find(
-        {"status": {"$nin": list(finalised)}}
+        {"status": {"$nin": list(finalised - live_statuses)}}
     ):
+        status = str(doc.get("status") or "")
+        updated_at = str(doc.get("updated_at") or "")
+        if status not in live_statuses and status in finalised:
+            continue
+        if not updated_at or updated_at >= cutoff:
+            continue
         entity_id = doc.get("hostUserID")
         session_id = doc.get("sessionID")
         if not entity_id or not session_id:
@@ -735,10 +749,10 @@ def audit_inactive_tally_session_ids(*, client: Any) -> dict[str, Any]:
                     "$set": {
                         "fraud_flag": True,
                         "fraud_reason": "inactive_sessionID",
-                        "sessionID": session_id,
+                        "sessionID": str(session_id),
                         "updated_at": utc_now(),
                     }
                 },
             )
-            flagged.append({"NodeUserID": str(entity_id), "sessionID": session_id})
-    return {"flagged_count": len(flagged), "flagged": flagged}
+            flagged.append({"NodeUserID": str(entity_id), "sessionID": str(session_id)})
+    return {"flagged_count": len(flagged), "flagged": flagged, "cutoff_days": days}

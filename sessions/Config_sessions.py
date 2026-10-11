@@ -1,5 +1,5 @@
-""" the script that writes the session secrets to the session secrets file (session.secrets) on the host machine (hardward using a configurable Path)
-[Path]: mnt/myssd/LucidTops/sessions/secrets
+""" the script that writes the session secrets to the session secrets file on the host machine
+[Path]: /mnt/myssd/LucidTops/Server/Secrets
 [File]: sessions.secrets
 [Content]: sessions container configurational requirements, for the sessions container to operate correctly.
 Requirements:
@@ -45,6 +45,7 @@ try:
         pull_sessions_hardware,
         resolve_lucid_tops_root,
         sessions_secrets_dir,
+        usable_secret_value,
     )
 except ImportError:  # entrypoint: python -c "from Config_sessions import ..."
     from sessions_pull_information import (  # type: ignore[no-redef]
@@ -56,6 +57,7 @@ except ImportError:  # entrypoint: python -c "from Config_sessions import ..."
         pull_sessions_hardware,
         resolve_lucid_tops_root,
         sessions_secrets_dir,
+        usable_secret_value,
     )
 
 
@@ -85,8 +87,8 @@ def _parse_secrets_file(path: Path) -> dict[str, str]:
 def _pick(existing: dict[str, str], *keys: str) -> str:
     for key in keys:
         value = _env(key) or existing.get(key.upper(), "").strip() or existing.get(key, "").strip()
-        if value:
-            return value
+        if usable_secret_value(value):
+            return value.strip()
     return ""
 
 
@@ -96,14 +98,18 @@ def _seed_prior_from_master_and_proxy(
     """
     Seed sessions.secrets from Server/Secrets/Master.secrets + proxy.secrets.
 
-    Precedence for non-empty values: existing sessions.secrets (prior) > Master > proxy.
+    A usable value already in Server/Secrets wins. A previously written
+    SESSIONS_BIND_PORT is kept so the listen port stays stable.
+    Placeholder values such as "invalid IP" are ignored.
     """
     seed = map_seed_to_sessions_keys(load_master_and_proxy_seed(lucid_root))
     if not seed:
-        return prior
-    merged = dict(seed)
+        return {key: value for key, value in prior.items() if usable_secret_value(value)}
+    merged = {key: value for key, value in seed.items() if usable_secret_value(value)}
     for key, value in prior.items():
-        if value:
+        if not usable_secret_value(value):
+            continue
+        if key == "SESSIONS_BIND_PORT" or not usable_secret_value(merged.get(key, "")):
             merged[key] = value
     # Record seed file paths for operators (not sensitive payloads).
     merged.setdefault("MASTER_SECRETS_FILE", master_secrets_path(lucid_root).as_posix())
@@ -117,9 +123,8 @@ def apply_pull_to_sessions_configuration(
     prior: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """
-    Derive sessions.secrets from Master/proxy seed + hardware pull + live DockerDNS.
-    Protocol facts required by fixes.txt (SessionID int(10), LucidTops_SessionsDB)
-    are written into secrets at time of operation — never left as source placeholders.
+    Derive sessions.secrets from Server/Secrets plus the hardware pull.
+    SessionID stays a 10-digit string. The sessions database name comes from databases.secrets.
     """
     info = pull if pull is not None else pull_sessions_hardware(bind_environ=True)
     existing = prior if prior is not None else {}
@@ -137,27 +142,48 @@ def apply_pull_to_sessions_configuration(
 
     existing = _seed_prior_from_master_and_proxy(lucid_root, existing)
 
-    bind_host = (
-        _pick(existing, "SESSIONS_BIND_HOST")
-        or str(info.get("sessions_bind_host") or primary_ip)
-    )
-    bind_port = (
-        _pick(existing, "SESSIONS_BIND_PORT")
-        or str(info.get("sessions_bind_port") or "")
-    )
-    if not bind_port:
-        raise RuntimeError(
-            "SESSIONS_BIND_PORT missing — must be pulled/allocated at time of operation"
-        )
-
     docker_dns = (
         _pick(existing, "SESSIONS_DOCKER_DNS_NAME", "PROXY_SESSIONS_DNS")
-        or str(info.get("sessions_docker_dns_name") or primary_ip)
+        or str(info.get("sessions_docker_dns_name") or "")
     )
+    if not usable_secret_value(docker_dns):
+        raise RuntimeError(
+            "SESSIONS_DOCKER_DNS_NAME missing — PROXY_SESSIONS_DNS must be a real address "
+            "in proxy.secrets"
+        )
+    bind_host = docker_dns
+    reserved_ports = {
+        port
+        for port in (
+            _pick(existing, "MASTER_SERVER_PORT"),
+            _pick(existing, "MASTER_SERVER_INTERNAL_PORT"),
+            _pick(existing, "MONGODB_PORT"),
+            _pick(existing, "PROXY_PORT"),
+            _pick(existing, "PROXY_NGINX_LISTEN_PORT"),
+            _pick(existing, "FRONTEND_PORT"),
+            _pick(existing, "NODE_PORT"),
+            _pick(existing, "HIDDEN_SERVICE_PORT"),
+        )
+        if port.isdigit()
+    }
+    bind_port = _pick(existing, "SESSIONS_BIND_PORT") or str(info.get("sessions_bind_port") or "")
+    if not bind_port or bind_port in reserved_ports:
+        bind_port = str(info.get("sessions_bind_port") or "")
+    if not bind_port or bind_port in reserved_ports:
+        raise RuntimeError(
+            "SESSIONS_BIND_PORT missing — must be allocated at time of operation "
+            "and must not reuse MASTER_SERVER_PORT"
+        )
+
     master_host = (
         _pick(existing, "MASTER_SERVER_INTERNAL_HOST", "PROXY_BACKEND_DNS")
-        or str(info.get("master_server_internal_host") or primary_ip)
+        or str(info.get("master_server_internal_host") or "")
     )
+    if not usable_secret_value(master_host):
+        raise RuntimeError(
+            "MASTER_SERVER_INTERNAL_HOST missing — PROXY_BACKEND_DNS must be seeded "
+            "from proxy.secrets"
+        )
     master_port = (
         _pick(existing, "MASTER_SERVER_INTERNAL_PORT", "MASTER_SERVER_PORT")
         or str(info.get("master_server_internal_port") or "")
@@ -165,17 +191,20 @@ def apply_pull_to_sessions_configuration(
     if not master_port:
         raise RuntimeError(
             "MASTER_SERVER_INTERNAL_PORT missing — must be seeded from "
-            "Master.secrets/proxy.secrets or pulled at time of operation"
+            "Master.secrets/proxy.secrets at time of operation"
         )
 
-    url_scheme = _pick(existing, "MASTER_SERVER_URL_SCHEME", "SESSIONS_URL_SCHEME")
-    if not url_scheme:
-        url_scheme = "http" if not info.get("tor_listen") else "http"
+    url_scheme = "http"
 
     operations_dns = (
         _pick(existing, "OPERATIONS_DOCKER_DNS_NAME", "PROXY_OPERATIONS_DNS")
         or str(info.get("operations_docker_dns_name") or "")
     )
+    if not usable_secret_value(operations_dns):
+        raise RuntimeError(
+            "OPERATIONS_DOCKER_DNS_NAME missing — PROXY_OPERATIONS_DNS must be a real "
+            "address in proxy.secrets"
+        )
     operations_port = (
         _pick(existing, "OPERATIONS_BIND_PORT")
         or str(info.get("operations_bind_port") or "")
@@ -183,24 +212,27 @@ def apply_pull_to_sessions_configuration(
     operations_scheme = _pick(existing, "OPERATIONS_URL_SCHEME") or url_scheme
     operations_handoff_path = _pick(existing, "OPERATIONS_SESSION_HANDOFF_PATH")
     if not operations_handoff_path:
-        operations_handoff_path = "/session-end"
+        public_routes = [
+            item.strip()
+            for item in _pick(existing, "API_PUBLIC_ROUTES").split(",")
+            if item.strip()
+        ]
+        if "/session-end" in public_routes:
+            operations_handoff_path = "/session-end"
+    if not operations_handoff_path:
+        raise RuntimeError(
+            "OPERATIONS_SESSION_HANDOFF_PATH missing — /session-end must be listed "
+            "in backend.secrets API_PUBLIC_ROUTES"
+        )
 
-    network_name = (
-        _pick(existing, "DOCKER_NETWORK_NAME", "SESSIONS_NETWORK_NAME")
-        or str(info.get("docker_network_name") or "")
+    network_name = _pick(existing, "DOCKER_NETWORK_NAME") or str(
+        info.get("docker_network_name") or ""
     )
     if not network_name:
-        machine_id = str(info.get("machine_id") or "").strip()
-        hostname = str(info.get("hostname") or info.get("hostname_resolved") or "").strip()
-        if machine_id:
-            network_name = f"lucid-{machine_id[:12].lower()}"
-        elif hostname:
-            network_name = f"lucid-{hostname.lower()}"
-        else:
-            raise RuntimeError(
-                "DOCKER_NETWORK_NAME missing — must be seeded from Master.secrets/"
-                "proxy.secrets or pulled from Docker/machine_id at time of operation"
-            )
+        raise RuntimeError(
+            "DOCKER_NETWORK_NAME missing — must be seeded from proxy.secrets or "
+            "Master.secrets at time of operation"
+        )
 
     service_name = _pick(existing, "SESSIONS_SERVICE_NAME")
     if not service_name:
@@ -214,14 +246,15 @@ def apply_pull_to_sessions_configuration(
     session_id_length = _pick(existing, "SESSION_ID_LENGTH") or "10"
     session_id_alphabet = _pick(existing, "SESSION_ID_ALPHABET") or "0123456789"
 
-    inactivity_days = _pick(existing, "SESSION_INACTIVITY_DAYS")
-    if not inactivity_days:
-        # Derive from machine cpu_count at operation (bounded operational window).
-        cpu = int(info.get("cpu_count") or 1)
-        inactivity_days = str(max(7, min(30, cpu * 3)))
+    inactivity_days = _pick(existing, "SESSION_INACTIVITY_DAYS") or "15"
 
-    api_prefix = _pick(existing, "SESSION_API_PREFIX") or "/sessions"
-    create_route = _pick(existing, "SESSION_CREATE_API_ROUTE") or "/session-create"
+    api_prefix = ""
+    create_route = _pick(existing, "SESSION_CREATE_API_ROUTE", "NODE_CREATE_SESSION_ROUTE")
+    if not create_route:
+        raise RuntimeError(
+            "SESSION_CREATE_API_ROUTE missing — NODE_CREATE_SESSION_ROUTE must be "
+            "seeded from Master.secrets"
+        )
     find_route = _pick(existing, "SESSION_FIND_PEER_GUI_ROUTE") or "/session-find"
     connect_route = (
         _pick(existing, "SESSION_CONNECT_HANDSHAKE_GUI_ROUTE") or "/session-connect"
@@ -231,17 +264,26 @@ def apply_pull_to_sessions_configuration(
 
     key_min = _pick(existing, "SESSION_KEY_MIN_LENGTH")
     if not key_min:
-        key_min = str(max(16, int(info.get("cpu_count") or 1) * 8))
+        raise RuntimeError(
+            "SESSION_KEY_MIN_LENGTH missing — must be seeded from Master.secrets"
+        )
     key_bytes = _pick(existing, "SESSION_KEY_URLSAFE_BYTES")
-    if not key_bytes:
-        key_bytes = str(max(16, int(key_min) // 2))
+    if not key_bytes or int(key_bytes) < int(key_min):
+        key_bytes = str(int(key_min))
 
     session_type = _pick(existing, "SESSION_TYPE") or "peer_remote_desktop"
     log_source = _pick(existing, "SESSION_ID_LOG_SOURCE") or service_name
-    finalised = (
-        _pick(existing, "SESSION_FINALISED_STATUSES") or "ended,complete,compressed"
-    )
-    complete_status = _pick(existing, "SESSION_COMPLETE_STATUS") or "complete"
+    finalised = _pick(existing, "SESSION_FINALISED_STATUSES", "SESSION_STATUSES")
+    if not finalised:
+        raise RuntimeError(
+            "SESSION_STATUSES missing — must be seeded from Master.secrets"
+        )
+    status_items = {item.strip() for item in finalised.split(",") if item.strip()}
+    if "compressed" not in status_items:
+        raise RuntimeError(
+            "SESSION_STATUSES must include compressed — sourced from Master.secrets"
+        )
+    complete_status = "compressed"
 
     mask_prefix = _pick(existing, "PEER_USER_ID_MASK_PREFIX")
     if not mask_prefix:
@@ -251,10 +293,26 @@ def apply_pull_to_sessions_configuration(
         mask_hex_len = str(max(8, min(32, len(primary_mac.replace(":", "")))))
     peer_label = _pick(existing, "PEER_SEARCH_LABEL") or "peer-search"
 
-    sessions_db = _pick(existing, "LUCIDTOPS_SESSIONS_DB_NAME") or "LucidTops_SessionsDB"
-    sessions_collection = (
-        _pick(existing, "LUCIDTOPS_SESSIONS_COLLECTION") or "session_records"
+    sessions_db = _pick(existing, "LUCIDTOPS_SESSIONS_DB_NAME", "MONGODB_SERVICE")
+    if not sessions_db or sessions_db == "LucidTops_SessionsDB":
+        raise RuntimeError(
+            "LUCIDTOPS_SESSIONS_DB_NAME missing — databases.secrets "
+            "LUCIDTOPS_*_SESSIONSDB_DATABASE is required"
+        )
+    sessions_db_url = _pick(existing, "LUCIDTOPS_SESSIONS_DB_URL")
+    if not sessions_db_url:
+        raise RuntimeError(
+            "LUCIDTOPS_SESSIONS_DB_URL missing — databases.secrets "
+            "LUCIDTOPS_*_SESSIONSDB_URL is required"
+        )
+    sessions_collection = _pick(
+        existing, "LUCIDTOPS_SESSIONS_COLLECTION", "SESSION_RECORDS_COLLECTION"
     )
+    if not sessions_collection:
+        raise RuntimeError(
+            "LUCIDTOPS_SESSIONS_COLLECTION missing — SESSION_RECORDS_COLLECTION "
+            "must be seeded from Master.secrets"
+        )
     session_id_log_collection = (
         _pick(existing, "LUCIDTOPS_SESSIONS_ID_LOG_COLLECTION") or "session_id_log"
     )
@@ -273,11 +331,9 @@ def apply_pull_to_sessions_configuration(
     operator_master_type = _pick(existing, "TALLY_ENTITY_TYPE_MASTER") or "MasterServerID"
     operator_master_id = _pick(existing, "TALLY_ENTITY_ID_MASTER", "MASTER_SERVER_ID")
     if not operator_master_id:
-        operator_master_id = str(info.get("machine_id") or "").strip()
-    if not operator_master_id:
         raise RuntimeError(
-            "TALLY_ENTITY_ID_MASTER / machine_id missing — must be seeded from "
-            "Master.secrets or pulled at time of operation"
+            "TALLY_ENTITY_ID_MASTER missing — MASTER_SERVER_ID must be seeded from "
+            "backend.secrets at time of operation"
         )
 
     container_name = (
@@ -315,15 +371,13 @@ def apply_pull_to_sessions_configuration(
         "SESSIONS_BIND_PORT": bind_port,
         "SESSIONS_DOCKER_DNS_NAME": docker_dns,
         "SESSIONS_SERVICE_NAME": service_name,
-        "SESSIONS_NETWORK_NAME": network_name,
         "SESSIONS_CONTAINER_NAME": container_name,
         "LUCIDTOPS_SESSIONS_DB_NAME": sessions_db,
+        "LUCIDTOPS_SESSIONS_DB_URL": sessions_db_url,
         "LUCIDTOPS_SESSIONS_COLLECTION": sessions_collection,
         "LUCIDTOPS_SESSIONS_ID_LOG_COLLECTION": session_id_log_collection,
         "HARDWARE_PRIMARY_IP": primary_ip,
         "HARDWARE_PRIMARY_MAC": primary_mac,
-        "HOST_PRIMARY_IP": primary_ip,
-        "HOST_PRIMARY_MAC": primary_mac,
         "LUCID_TOPS_ROOT": lucid_root.as_posix(),
         "SECRETS_DIR": secrets_dir.as_posix(),
         "MASTER_SECRETS_FILE": _pick(existing, "MASTER_SECRETS_FILE")
@@ -332,10 +386,33 @@ def apply_pull_to_sessions_configuration(
         or proxy_secrets_path(lucid_root).as_posix(),
         "DOCKER_NETWORK_NAME": network_name,
         "OPERATIONS_DOCKER_DNS_NAME": operations_dns,
-        "OPERATIONS_BIND_PORT": operations_port,
         "OPERATIONS_URL_SCHEME": operations_scheme,
         "OPERATIONS_SESSION_HANDOFF_PATH": operations_handoff_path,
+        "SESSION_STATUSES": finalised,
+        "SESSION_HASH_ALGORITHM": _pick(existing, "SESSION_HASH_ALGORITHM"),
+        "SESSION_CHUNK_SIZE_BYTES": _pick(existing, "SESSION_CHUNK_SIZE_BYTES"),
+        "MASTER_MONGODB_URL": _pick(existing, "MASTER_MONGODB_URL", "MONGODB_URL"),
+        "MASTER_MONGODB_DATABASE": _pick(
+            existing, "MASTER_MONGODB_DATABASE", "MONGODB_MAIN_DATABASE_NAME"
+        ),
+        "MASTER_SERVER_ID": operator_master_id,
     }
+    if operations_port:
+        resolved["OPERATIONS_BIND_PORT"] = operations_port
+    if not resolved["SESSION_HASH_ALGORITHM"]:
+        raise RuntimeError(
+            "SESSION_HASH_ALGORITHM missing — must be seeded from Master.secrets"
+        )
+    if not resolved["SESSION_CHUNK_SIZE_BYTES"]:
+        raise RuntimeError(
+            "SESSION_CHUNK_SIZE_BYTES missing — must be seeded from Master.secrets"
+        )
+    if not resolved["MASTER_MONGODB_URL"] or not resolved["MASTER_MONGODB_DATABASE"]:
+        raise RuntimeError(
+            "MASTER_MONGODB_URL missing — backend.secrets MONGODB_URL is required"
+        )
+    resolved["MONGODB_URL"] = resolved["MASTER_MONGODB_URL"]
+    resolved["MONGODB_MAIN_DATABASE_NAME"] = resolved["MASTER_MONGODB_DATABASE"]
 
     # Carry through Proxy/Master DockerDNS + Tor/Mongo facts when present in seed.
     for carry_key in (
@@ -350,24 +427,25 @@ def apply_pull_to_sessions_configuration(
         "MONGODB_PORT",
         "MONGODB_URL",
         "MONGODB_MAIN_DATABASE_NAME",
+        "LUCIDTOPS_SESSIONS_DB_URL",
+        "MASTER_MONGODB_URL",
+        "MASTER_MONGODB_DATABASE",
+        "SESSION_HASH_ALGORITHM",
+        "SESSION_CHUNK_SIZE_BYTES",
+        "SESSION_STATUSES",
+        "MASTER_SERVER_ID",
     ):
         value = _pick(existing, carry_key)
-        if value:
+        if value and carry_key not in {
+            "MONGODB_URL",
+            "MONGODB_MAIN_DATABASE_NAME",
+            "MASTER_MONGODB_URL",
+            "MASTER_MONGODB_DATABASE",
+        }:
             resolved[carry_key] = value
 
-    # Operator credentials for operations handoff — must exist at operation time (env/secrets).
-    for op_key in (
-        "OPERATIONS_OPERATOR_ID_TYPE",
-        "OPERATIONS_OPERATOR_ID",
-        "OPERATIONS_OPERATOR_TOKEN_ID",
-        "OPERATIONS_OPERATOR_EMAIL",
-    ):
-        value = _pick(existing, op_key)
-        if value:
-            resolved[op_key] = value
-
-    # Operations DNS/port may be empty until that container is discoverable; handoff
-    # (compress.py) fails at time of operation if still missing when SessionID is complete.
+    resolved["MONGODB_URL"] = resolved["MASTER_MONGODB_URL"]
+    resolved["MONGODB_MAIN_DATABASE_NAME"] = resolved["MASTER_MONGODB_DATABASE"]
     return resolved
 
 
@@ -395,7 +473,7 @@ def write_session_secrets(
     Write sessions.secrets on the host from Master/proxy seed + operation-time pull.
 
     Seed: Server/Secrets/Master.secrets + proxy.secrets
-    Target: sessions/secrets/sessions.secrets (or SESSIONS_SECRETS_FILE)
+    Target: /mnt/myssd/LucidTops/Server/Secrets/sessions.secrets (or SESSIONS_SECRETS_FILE)
     """
     info = pull if pull is not None else pull_sessions_hardware(bind_environ=True)
     lucid_root = resolve_lucid_tops_root(info)
@@ -450,7 +528,28 @@ def write_session_secrets(
         os.chmod(path, 0o600)
     os.environ["SESSIONS_SECRETS_FILE"] = path.as_posix()
     os.environ["SECRETS_DIR"] = path.parent.as_posix()
+    os.environ["MONGODB_URL"] = resolved.get("MONGODB_URL", "")
+    os.environ["MASTER_MONGODB_URL"] = resolved.get("MASTER_MONGODB_URL", "")
+    os.environ["LUCIDTOPS_SESSIONS_DB_URL"] = resolved.get("LUCIDTOPS_SESSIONS_DB_URL", "")
     return path
+
+
+def export_sessions_secrets_shell() -> None:
+    """Print shell exports for the written sessions.secrets file."""
+    import shlex
+
+    raw_path = _env("SESSIONS_SECRETS_FILE")
+    path = Path(raw_path) if raw_path else sessions_secrets_path_from_pull()
+    lines: list[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, _, value = stripped.partition("=")
+        key = key.strip()
+        if key:
+            lines.append(f"export {key}={shlex.quote(value.strip())}")
+    print("\n".join(lines))
 
 
 def session_secrets_status() -> dict[str, Any]:

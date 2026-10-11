@@ -26,7 +26,10 @@ if str(BACKEND_DIR) not in sys.path:
 if str(SESSIONS_DIR) not in sys.path:
     sys.path.insert(0, str(SESSIONS_DIR))
 
-from config import get_mongo_client, utc_now  # noqa: E402
+from config import utc_now  # noqa: E402
+
+
+_master_client: Any = None
 
 
 def _env(key: str) -> str:
@@ -87,16 +90,49 @@ def resolve_sessions_secret_bool(key: str) -> bool:
     raise RuntimeError(f"{key} must be a boolean in environment/sessions.secrets")
 
 
+def _direct_mongo_client(url: str) -> Any:
+    """Open pymongo with no SOCKS proxy. Sessions is on the Docker network."""
+    try:
+        from pymongo import MongoClient
+        from pymongo.errors import PyMongoError
+    except ImportError as exc:
+        raise RuntimeError("pymongo is required for the sessions container") from exc
+    try:
+        client = MongoClient(url, serverSelectionTimeoutMS=3000)
+        client.admin.command("ping")
+    except PyMongoError as exc:
+        raise RuntimeError(f"MongoDB unreachable at {url}") from exc
+    except Exception as exc:
+        raise RuntimeError(f"MongoDB unreachable at {url}") from exc
+    return client
+
+
+def get_mongo_client() -> Any | None:
+    """Sessions database client. Does not use backend get_mongo_client or SOCKS."""
+    try:
+        url = resolve_sessions_secret("LUCIDTOPS_SESSIONS_DB_URL")
+    except RuntimeError:
+        return None
+    try:
+        return _direct_mongo_client(url)
+    except RuntimeError:
+        return None
+
+
 def get_sessions_db(client: Any) -> Any:
-    """Tor-hosted LucidTops_SessionsDB (name from secrets at time of operation)."""
+    """Sessions database named by databases.secrets at time of operation."""
     return client[resolve_sessions_secret("LUCIDTOPS_SESSIONS_DB_NAME")]
 
 
-def get_master_db(client: Any) -> Any:
-    """MasterServer DB for UserID/TokenID verification (outside sessions records)."""
-    from config import get_master_db as _get_master_db
-
-    return _get_master_db(client)
+def get_master_db(client: Any = None) -> Any:
+    """Master database from backend.secrets. Direct Docker-network URL, no SOCKS."""
+    del client
+    global _master_client
+    url = resolve_sessions_secret("MASTER_MONGODB_URL")
+    name = resolve_sessions_secret("MASTER_MONGODB_DATABASE")
+    if _master_client is None:
+        _master_client = _direct_mongo_client(url)
+    return _master_client[name]
 
 
 def session_records_collection(client: Any) -> Any:
@@ -120,7 +156,7 @@ def with_mongo(handler: Callable[..., dict[str, Any]]) -> Callable[..., dict[str
         if owns_client:
             client = get_mongo_client()
             if client is None:
-                raise RuntimeError("Master server database is unavailable")
+                raise RuntimeError("LucidTops sessions database is unavailable")
         try:
             return handler(*args, client=client, **kwargs)
         finally:
@@ -181,9 +217,8 @@ def verify_node_id_token(
 
 def session_statuses() -> frozenset[str]:
     raw = resolve_sessions_secret("SESSION_FINALISED_STATUSES")
-    base = {"pending", "active", "ended", "complete", "compressed"}
-    extra = {item.strip() for item in raw.split(",") if item.strip()}
-    return frozenset(base | extra)
+    configured = {item.strip() for item in raw.split(",") if item.strip()}
+    return frozenset({"pending", "active"} | configured)
 
 
 def complete_status_value() -> str:

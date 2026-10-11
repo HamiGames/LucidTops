@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ._common import get_mongo_client
+from ._common import complete_status_value, get_mongo_client
 from .compress import compress_session
 from .searchpeer import peer_search
 from .SessionCore import (
@@ -261,7 +261,7 @@ def create_session_router(*, prefix: str = "") -> Any:
                 client=client,
             )
             # If complete already handed off inside end_session; else allow explicit compress.
-            if result.get("SessionID_status") == "complete" and not result.get(
+            if result.get("SessionID_status") == complete_status_value() and not result.get(
                 "operations_handoff"
             ):
                 result["operations_handoff"] = compress_session(

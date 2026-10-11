@@ -58,7 +58,7 @@ def create_app() -> Any:
     client = get_mongo_client()
     if client is None:
         raise RuntimeError(
-            "LucidTops_SessionsDB unavailable — MongoDB must be reachable at time of operation"
+            "sessions database unavailable — LUCIDTOPS_SESSIONS_DB_URL must be reachable at time of operation"
         )
     client.close()
 
@@ -78,7 +78,6 @@ def create_app() -> Any:
     health = resolve_session_health_path()
 
     @app.get(health)
-    @app.get("/health")
     def health_check() -> dict[str, Any]:
         return {
             "status": "ok",
