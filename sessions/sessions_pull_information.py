@@ -20,28 +20,55 @@ Write target (Pi console — not inside the image):
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import socket
 import sys
 from pathlib import Path
 from typing import Any
 
-SESSIONS_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = SESSIONS_DIR.parent
-BACKEND_DIR = PROJECT_ROOT / "backend"
-
-for path in (PROJECT_ROOT, SESSIONS_DIR, BACKEND_DIR):
-    if str(path) not in sys.path:
-        sys.path.insert(0, str(path))
-
-from pull_information import (  # noqa: E402
-    _allocate_ephemeral_port,
-    _match_container,
-    bind_operation_environ,
-    export_shell_env,
-    get_last_pull,
-    pull_realworld_information,
+_BACKEND_PULL_MODULE = "backend_pull_information"
+_BACKEND_PULL_NAMES = (
+    "_allocate_ephemeral_port",
+    "_match_container",
+    "bind_operation_environ",
+    "export_shell_env",
+    "get_last_pull",
+    "pull_realworld_information",
 )
+
+
+def _load_backend_pull():
+    """Load backend/pull_information.py by path.
+
+    sessions/pull_information.py is the script the entrypoint runs, so a
+    name import of pull_information resolves to that file and hides these helpers.
+    """
+    existing = sys.modules.get(_BACKEND_PULL_MODULE)
+    if existing is not None and all(hasattr(existing, name) for name in _BACKEND_PULL_NAMES):
+        return existing
+    backend_path = Path(__file__).resolve().parent.parent / "backend" / "pull_information.py"
+    spec = importlib.util.spec_from_file_location(_BACKEND_PULL_MODULE, backend_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"backend pull_information.py missing at {backend_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[_BACKEND_PULL_MODULE] = module
+    spec.loader.exec_module(module)
+    missing = [name for name in _BACKEND_PULL_NAMES if not hasattr(module, name)]
+    if missing:
+        raise ImportError(
+            f"cannot import {', '.join(missing)} from backend pull_information ({backend_path})"
+        )
+    return module
+
+
+_backend_pull = _load_backend_pull()
+_allocate_ephemeral_port = _backend_pull._allocate_ephemeral_port
+_match_container = _backend_pull._match_container
+bind_operation_environ = _backend_pull.bind_operation_environ
+export_shell_env = _backend_pull.export_shell_env
+get_last_pull = _backend_pull.get_last_pull
+pull_realworld_information = _backend_pull.pull_realworld_information
 
 
 def _env(key: str) -> str:

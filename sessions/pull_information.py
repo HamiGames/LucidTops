@@ -10,15 +10,20 @@ module can stay named pull_information.py without hiding that helper.
 from __future__ import annotations
 
 import importlib.util
+import sys
 from pathlib import Path
 
 
 def _backend_pull():
+    existing = sys.modules.get("backend_pull_information")
+    if existing is not None and hasattr(existing, "utc_now"):
+        return existing
     backend_path = Path(__file__).resolve().parent.parent / "backend" / "pull_information.py"
     spec = importlib.util.spec_from_file_location("backend_pull_information", backend_path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"backend pull_information.py missing at {backend_path}")
     module = importlib.util.module_from_spec(spec)
+    sys.modules["backend_pull_information"] = module
     spec.loader.exec_module(module)
     return module
 
